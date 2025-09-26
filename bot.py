@@ -128,6 +128,44 @@ def setup_database():
             value TEXT NOT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS monthly_summary (
+            character_id INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            total_sales REAL NOT NULL,
+            total_fees REAL NOT NULL,
+            PRIMARY KEY (character_id, year, month)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_monthly_summary(character_id, year, month):
+    """Retrieves the monthly summary for a character from the database."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT total_sales, total_fees FROM monthly_summary WHERE character_id = ? AND year = ? AND month = ?",
+        (character_id, year, month)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        return {"total_sales": result[0], "total_fees": result[1]}
+    return {"total_sales": 0, "total_fees": 0}
+
+def update_monthly_summary(character_id, year, month, total_sales, total_fees):
+    """Inserts or updates the monthly summary for a character."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO monthly_summary (character_id, year, month, total_sales, total_fees)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (character_id, year, month, total_sales, total_fees)
+    )
     conn.commit()
     conn.close()
 
@@ -231,27 +269,56 @@ def add_processed_journal_entries(character_id, entry_ids):
 
 # --- ESI API Functions ---
 
-def get_wallet_journal(access_token, character_id):
+def get_wallet_journal(access_token, character_id, processed_entry_ids=None):
+    """
+    Fetches wallet journal entries from ESI.
+    If processed_entry_ids are provided, it will stop fetching when it encounters an already processed entry.
+    """
     if not character_id: return []
-    journal_entries, page = [], 1
+    if processed_entry_ids is None:
+        processed_entry_ids = set()
+
+    new_journal_entries, page = [], 1
     url = f"https://esi.evetech.net/v6/characters/{character_id}/wallet/journal/"
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"datasource": "tranquility"}
-    while True:
+
+    stop_fetching = False
+    while not stop_fetching:
         try:
             params['page'] = page
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
-            if not data: break
-            journal_entries.extend(data)
+            if not data:
+                break # No more pages
+
+            page_entries = []
+            for entry in data:
+                if entry['id'] in processed_entry_ids:
+                    stop_fetching = True
+                    break  # Stop processing entries in this page
+                page_entries.append(entry)
+
+            new_journal_entries.extend(page_entries)
+
+            if stop_fetching:
+                logging.info(f"Found previously processed journal entry. Stopping fetch for char {character_id}.")
+                break # Stop fetching more pages
+
+            # Check if there are more pages from header
             pages_header = response.headers.get('x-pages')
-            if pages_header and int(pages_header) <= page: break
+            if pages_header and int(pages_header) <= page:
+                break # Last page reached
+
             page += 1
+            # Add a small delay to be nice to ESI
+            time.sleep(0.1)
+
         except requests.exceptions.RequestException as e:
-            logging.error(f"Error fetching wallet journal page {page}: {e}")
-            return []
-    return journal_entries
+            logging.error(f"Error fetching wallet journal page {page} for char {character_id}: {e}")
+            return [] # Return empty list on error
+    return new_journal_entries
 
 def get_access_token(refresh_token):
     url = "https://login.eveonline.com/v2/oauth/token"
@@ -491,43 +558,69 @@ def calculate_estimated_profit(sales_today, all_buy_transactions):
     )
     return total_sales_value - total_estimated_cogs
 
-async def run_daily_summary_for_character(character: Character, all_transactions, journal_entries, context: ContextTypes.DEFAULT_TYPE):
-    """Calculates and prepares the daily summary data for a single character."""
+async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
+    """Calculates and prepares the daily summary data for a single character using optimized methods."""
     logging.info(f"Calculating daily summary for {character.name}...")
     access_token = get_access_token(character.refresh_token)
     if not access_token:
         logging.error(f"Could not get access token for {character.name} during summary. Skipping.")
         return None
-    wallet_balance = get_wallet_balance(access_token, character.id)
+
+    # --- Fetch new data only ---
     processed_journal_entries = get_processed_journal_entries(character.id)
-    new_journal_entries = [e for e in journal_entries if e['id'] not in processed_journal_entries]
-    has_new_transactions_24h = any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions)
-    if not new_journal_entries and not has_new_transactions_24h:
-        logging.info(f"No new journal or transaction entries for {character.name}. Skipping summary message.")
-        if new_journal_entries:
-            add_processed_journal_entries(character.id, [e['id'] for e in new_journal_entries])
+    new_journal_entries = get_wallet_journal(access_token, character.id, processed_journal_entries)
+    all_transactions = get_wallet_transactions(access_token, character.id) # Still fetches last 30 days, but is less of a bottleneck.
+
+    if not new_journal_entries and not any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions):
+        logging.info(f"No new journal or recent transaction entries for {character.name}. Skipping summary message.")
         return None
-    now, one_day_ago = datetime.now(timezone.utc), datetime.now(timezone.utc) - timedelta(days=1)
-    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    now = datetime.now(timezone.utc)
+    one_day_ago = now - timedelta(days=1)
+    wallet_balance = get_wallet_balance(access_token, character.id)
+
+    # --- 24-Hour Summary (from new entries) ---
     total_brokers_fees_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
     total_transaction_tax_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') == 'transaction_tax' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
+    total_fees_24h = total_brokers_fees_24h + total_transaction_tax_24h
+
     sales_past_24_hours = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago]
     total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
     all_buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-    estimated_profit_24h = calculate_estimated_profit(sales_past_24_hours, all_buy_transactions)
-    estimated_profit_24h -= (total_brokers_fees_24h + total_transaction_tax_24h)
-    total_sales_month = sum(e.get('amount', 0) for e in journal_entries if e.get('ref_type') == 'player_trading' and e.get('amount', 0) > 0 and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
-    total_brokers_fees_month = sum(abs(e.get('amount', 0)) for e in journal_entries if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
-    total_transaction_tax_month = sum(abs(e.get('amount', 0)) for e in journal_entries if e.get('ref_type') == 'transaction_tax' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
-    total_fees_month = total_brokers_fees_month + total_transaction_tax_month
+    estimated_profit_24h = calculate_estimated_profit(sales_past_24_hours, all_buy_transactions) - total_fees_24h
+
+    # --- Monthly Summary (Optimized) ---
+    last_summary_month_str = get_bot_state(f"last_summary_month_{character.id}")
+    current_month_key = now.strftime('%Y-%m')
+
+    # Check if the month has rolled over
+    if last_summary_month_str != current_month_key:
+        logging.info(f"Month has changed for {character.name}. Resetting monthly summary.")
+        # If we want to be super accurate, we'd calculate the previous month's final summary here.
+        # For simplicity, we just start the new month fresh.
+        update_monthly_summary(character.id, now.year, now.month, 0, 0)
+        set_bot_state(f"last_summary_month_{character.id}", current_month_key)
+
+    # Get current stored totals
+    monthly_summary = get_monthly_summary(character.id, now.year, now.month)
+    total_sales_month = monthly_summary['total_sales']
+    total_fees_month = monthly_summary['total_fees']
+
+    # Add new amounts to totals
+    new_sales_this_month = sum(e.get('amount', 0) for e in new_journal_entries if e.get('ref_type') == 'player_trading' and e.get('amount', 0) > 0)
+    new_fees_this_month = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
+    total_sales_month += new_sales_this_month
+    total_fees_month += new_fees_this_month
     gross_revenue_month = total_sales_month - total_fees_month
+
+    # --- Send Message & Update State ---
     message = (
         f"📊 *Daily Market Summary ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d')}_\n\n"
         f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`\n\n"
         f"**Past 24 Hours:**\n"
         f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
-        f"  - Total Fees (Broker + Tax): `{(total_brokers_fees_24h + total_transaction_tax_24h):,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{total_fees_24h:,.2f} ISK`\n"
         f"  - **Estimated Profit:** `{estimated_profit_24h:,.2f} ISK`*\n\n"
         f"---\n\n"
         f"🗓️ **Current Month Summary ({now.strftime('%B %Y')}):**\n"
@@ -537,14 +630,18 @@ async def run_daily_summary_for_character(character: Character, all_transactions
         f"_*Profit is estimated based on the average purchase price of items over the last 30 days._"
     )
     await send_telegram_message(context, message)
-    processed_ids_for_this_run = [entry['id'] for entry in new_journal_entries]
-    add_processed_journal_entries(character.id, processed_ids_for_this_run)
-    logging.info(f"Daily summary sent for {character.name}. Processed {len(processed_ids_for_this_run)} new journal entries.")
+
+    # --- Persist new state ---
+    update_monthly_summary(character.id, now.year, now.month, total_sales_month, total_fees_month)
+    new_entry_ids = [entry['id'] for entry in new_journal_entries]
+    if new_entry_ids:
+        add_processed_journal_entries(character.id, new_entry_ids)
+    logging.info(f"Daily summary sent for {character.name}. Processed {len(new_entry_ids)} new journal entries.")
     return {
         "wallet_balance": wallet_balance, "total_sales_24h": total_sales_24h,
-        "total_fees_24h": total_brokers_fees_24h + total_transaction_tax_24h,
-        "estimated_profit_24h": estimated_profit_24h, "total_sales_month": total_sales_month,
-        "total_fees_month": total_fees_month, "gross_revenue_month": gross_revenue_month
+        "total_fees_24h": total_fees_24h, "estimated_profit_24h": estimated_profit_24h,
+        "total_sales_month": total_sales_month, "total_fees_month": total_fees_month,
+        "gross_revenue_month": gross_revenue_month
     }
 
 async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE):
@@ -552,16 +649,12 @@ async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     logging.info("Starting daily summary run for all characters...")
     all_character_stats = []
     for character in CHARACTERS:
-        access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            logging.error(f"Could not get access token for {character.name} in daily summary. Skipping.")
-            continue
-        all_transactions = get_wallet_transactions(access_token, character.id)
-        journal_entries = get_wallet_journal(access_token, character.id)
-        char_stats = await run_daily_summary_for_character(character, all_transactions, journal_entries, context)
+        # The character-specific function now handles its own data fetching
+        char_stats = await run_daily_summary_for_character(character, context)
         if char_stats:
             all_character_stats.append(char_stats)
-        await asyncio.sleep(1)
+        await asyncio.sleep(1) # Be nice to ESI, even though sub-functions have waits
+
     if len(all_character_stats) > 1:
         logging.info("Generating combined daily summary...")
         combined_wallet = sum(s['wallet_balance'] for s in all_character_stats)
@@ -591,21 +684,51 @@ async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     logging.info("Daily summary run completed for all characters.")
 
 def initialize_journal_history():
+    """
+    On first run, seeds the journal history and calculates the initial monthly summary state
+    to ensure the first summary report is accurate.
+    """
     conn = db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT count(*) FROM processed_journal_entries")
-    count = cursor.fetchone()[0]
+    # Check if any character has been seeded before to prevent re-seeding for all
+    cursor.execute("SELECT DISTINCT character_id FROM processed_journal_entries")
+    seeded_char_ids = {row[0] for row in cursor.fetchall()}
     conn.close()
-    if count > 0:
-        logging.info(f"Existing journal history found ({count} records). Skipping seeding.")
-        return
-    logging.info("First run for daily summary detected. Seeding journal history...")
+
+    logging.info("Checking for unseeded characters for summary history...")
+
     for character in CHARACTERS:
-        logging.info(f"Seeding journal history for {character.name}...")
+        if character.id in seeded_char_ids:
+            logging.info(f"Character {character.name} already has seeded journal history. Skipping.")
+            continue
+
+        logging.info(f"First run for {character.name} detected. Seeding journal and summary history...")
         access_token = get_access_token(character.refresh_token)
-        if not access_token: continue
+        if not access_token:
+            logging.error(f"Cannot get access token for {character.name} during seeding.")
+            continue
+
+        # Fetch all historical entries (don't pass processed_ids)
         historical_journal = get_wallet_journal(access_token, character.id)
-        if not historical_journal: continue
+        if not historical_journal:
+            logging.warning(f"No historical journal found for {character.name}. Seeding complete with no data.")
+            # Mark as processed to prevent trying again
+            add_processed_journal_entries(character.id, [-1]) # Add a dummy entry
+            continue
+
+        now = datetime.now(timezone.utc)
+        start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        # Calculate totals for the current month from all of history
+        sales_this_month = sum(e.get('amount', 0) for e in historical_journal if e.get('ref_type') == 'player_trading' and e.get('amount', 0) > 0 and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
+        fees_this_month = sum(abs(e.get('amount', 0)) for e in historical_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'] and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
+
+        # Store the calculated initial state
+        update_monthly_summary(character.id, now.year, now.month, sales_this_month, fees_this_month)
+        set_bot_state(f"last_summary_month_{character.id}", now.strftime('%Y-%m'))
+        logging.info(f"Seeded monthly summary for {character.name}: Sales={sales_this_month:,.2f}, Fees={fees_this_month:,.2f}")
+
+        # Mark all historical entries as processed
         historical_ids = [entry['id'] for entry in historical_journal]
         add_processed_journal_entries(character.id, historical_ids)
         logging.info(f"Seeded {len(historical_ids)} historical journal entries for {character.name}.")
