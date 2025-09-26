@@ -12,8 +12,12 @@ TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"
 TELEGRAM_CHANNEL_ID = "your_telegram_channel_id_here"
 
 # 3. Bot Configuration
-# The time in "HH:MM" UTC format to send the daily summary. Default is 22:00 UTC (6am GMT+8).
+# The time in "HH:MM" UTC format to send the daily summary.
 DAILY_SUMMARY_TIME = "22:00"
+# The region ID for your primary trade hub (e.g., 10000002 for The Forge/Jita).
+REGION_ID = 10000002
+# The wallet balance below which you want to receive a low-balance alert. Set to 0 to disable.
+WALLET_BALANCE_THRESHOLD = 0
 # Set to "true" or "false" to enable or disable notification types.
 ENABLE_SALES_NOTIFICATIONS = "true"
 ENABLE_BUY_NOTIFICATIONS = "true"

@@ -45,6 +45,30 @@ def setup_database():
             volume_remain INTEGER NOT NULL
         )
     """)
+    # Key-value store for various bot states
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_bot_state(key):
+    """Retrieves a value from the bot_state key-value store."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM bot_state WHERE key = ?", (key,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def set_bot_state(key, value):
+    """Sets a value in the bot_state key-value store."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
 
@@ -238,6 +262,55 @@ def get_market_orders(access_token, character_id):
         logging.error(f"Error fetching market orders: {e}")
         return []
 
+def get_wallet_balance(access_token, character_id):
+    """Fetches the character's wallet balance."""
+    if not character_id:
+        return None
+    url = f"https://esi.evetech.net/v1/characters/{character_id}/wallet/"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"datasource": "tranquility"}
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching wallet balance: {e}")
+        return None
+
+def get_market_history(type_id, region_id):
+    """Fetches recent market history for a type in a region."""
+    url = f"https://esi.evetech.net/v1/markets/{region_id}/history/"
+    params = {"type_id": type_id, "datasource": "tranquility"}
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        # Return the most recent day's history
+        return response.json()[-1] if response.json() else None
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching market history for type_id {type_id}: {e}")
+        return None
+
+def get_location_name(location_id, access_token):
+    """Gets the name of a station or structure."""
+    # Location IDs for player-owned structures are > 1,000,000,000
+    # Stations and outposts are < 100,000,000
+    if location_id > 1000000000:
+        url = f"https://esi.evetech.net/v3/universe/structures/{location_id}/"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        params = {"datasource": "tranquility"}
+    else:
+        url = f"https://esi.evetech.net/v2/universe/stations/{location_id}/"
+        headers = {}
+        params = {"datasource": "tranquility"}
+
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        return response.json().get('name', 'Unknown Location')
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching location name for ID {location_id}: {e}")
+        return "Unknown Location"
+
 def get_names_from_ids(id_list):
     """Resolves a list of IDs to names."""
     if not id_list: return {}
@@ -270,8 +343,10 @@ async def send_telegram_message(message):
 # --- Main Application Logic ---
 
 async def check_market_activity():
-    """Checks for filled market orders (both buy and sell) and sends notifications."""
+    """Checks for filled market orders, sends notifications, and checks wallet balance."""
     logging.info("Checking for market activity...")
+    from config import REGION_ID, WALLET_BALANCE_THRESHOLD, ENABLE_SALES_NOTIFICATIONS, ENABLE_BUY_NOTIFICATIONS
+
     access_token = get_access_token()
     if not access_token:
         logging.error("Could not obtain access token. Skipping check."); return
@@ -280,74 +355,102 @@ async def check_market_activity():
     if not character_id:
         logging.error("Could not obtain character ID. Skipping check."); return
 
+    # --- Wallet Balance Check ---
+    wallet_balance = get_wallet_balance(access_token, character_id)
+    if wallet_balance is not None and WALLET_BALANCE_THRESHOLD > 0:
+        last_alert_str = get_bot_state('low_balance_alert_sent_at')
+        alert_sent_recently = False
+        if last_alert_str:
+            last_alert_time = datetime.fromisoformat(last_alert_str)
+            if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
+                alert_sent_recently = True
+
+        if wallet_balance < WALLET_BALANCE_THRESHOLD and not alert_sent_recently:
+            alert_message = (
+                f"⚠️ *Low Wallet Balance Warning* ⚠️\n\n"
+                f"Your wallet balance has dropped below `{WALLET_BALANCE_THRESHOLD:,.2f}` ISK.\n"
+                f"**Current Balance:** `{wallet_balance:,.2f}` ISK"
+            )
+            await send_telegram_message(alert_message)
+            set_bot_state('low_balance_alert_sent_at', datetime.now(timezone.utc).isoformat())
+        elif wallet_balance >= WALLET_BALANCE_THRESHOLD and last_alert_str:
+            # Reset the alert if balance is back up
+            set_bot_state('low_balance_alert_sent_at', '')
+
+    # --- Market Order Check ---
     live_orders = get_market_orders(access_token, character_id)
     tracked_orders = get_tracked_market_orders()
 
-    # --- Detect Activity and Group It ---
-    sales_detected = defaultdict(lambda: {'quantity': 0, 'value': 0})
-    buys_detected = defaultdict(lambda: {'quantity': 0, 'value': 0})
+    sales_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0, 'price': 0})
+    buys_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0})
     orders_to_update = []
 
     for order in live_orders:
-        order_id = order['order_id']
-
-        # Always update the order's state for the next check
+        order_id, location_id = order['order_id'], order['location_id']
         orders_to_update.append((order_id, order['volume_remain']))
 
-        # Ignore orders outside the 1-90 day duration
-        if not (1 <= order.get('duration', 0) <= 90):
-            continue
+        if not (1 <= order.get('duration', 0) <= 90): continue
 
-        if order_id in tracked_orders:
-            if order['volume_remain'] < tracked_orders[order_id]:
-                quantity_changed = tracked_orders[order_id] - order['volume_remain']
-                price = order['price']
+        if order_id in tracked_orders and order['volume_remain'] < tracked_orders[order_id]:
+            quantity = tracked_orders[order_id] - order['volume_remain']
+            price = order['price']
 
-                if order.get('is_buy_order'):
-                    buys_detected[order['type_id']]['quantity'] += quantity_changed
-                    buys_detected[order['type_id']]['value'] += quantity_changed * price
-                else:
-                    sales_detected[order['type_id']]['quantity'] += quantity_changed
-                    sales_detected[order['type_id']]['value'] += quantity_changed * price
+            if order.get('is_buy_order'):
+                buys_detected[order['type_id']].update({
+                    'quantity': buys_detected[order['type_id']]['quantity'] + quantity,
+                    'value': buys_detected[order['type_id']]['value'] + (quantity * price),
+                    'location_id': location_id
+                })
+            else:
+                sales_detected[order['type_id']].update({
+                    'quantity': sales_detected[order['type_id']]['quantity'] + quantity,
+                    'value': sales_detected[order['type_id']]['value'] + (quantity * price),
+                    'location_id': location_id,
+                    'price': price # Store the price for market context
+                })
 
     # --- Process Sales ---
-    from config import ENABLE_SALES_NOTIFICATIONS, ENABLE_BUY_NOTIFICATIONS
     if ENABLE_SALES_NOTIFICATIONS.lower() == 'true' and sales_detected:
-        logging.info(f"Detected {len(sales_detected)} groups of filled sell orders. Preparing notifications...")
-        item_ids_to_fetch = list(sales_detected.keys())
-        id_to_name = get_names_from_ids(item_ids_to_fetch)
+        logging.info(f"Detected {len(sales_detected)} groups of filled sell orders...")
+        item_ids = list(sales_detected.keys())
+        loc_ids = [data['location_id'] for data in sales_detected.values()]
+        id_to_name = get_names_from_ids(item_ids + loc_ids)
 
         for type_id, data in sales_detected.items():
-            item_name = id_to_name.get(type_id, "Unknown Item")
+            history = get_market_history(type_id, REGION_ID)
+            avg_price_str = f"{history['average']:.2f} ISK" if history else "N/A"
+            price_diff_str = f"({(data['price'] / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+
             message = (
                 f"✅ *Market Sale!* ✅\n\n"
-                f"**Item:** `{item_name}` (`{type_id}`)\n"
+                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                 f"**Quantity Sold:** `{data['quantity']}`\n"
-                f"**Total Value:** `{data['value']:,.2f} ISK`"
+                f"**Your Price:** `{data['price']:,.2f} ISK`\n"
+                f"**{id_to_name.get(REGION_ID, 'Region')} Avg Price:** `{avg_price_str}` {price_diff_str}\n"
+                f"**Location:** `{id_to_name.get(data['location_id'], 'Unknown')}`\n"
+                f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(message)
             time.sleep(1)
-    else:
-        logging.info("No new market sales detected or sales notifications are disabled.")
 
     # --- Process Buys ---
     if ENABLE_BUY_NOTIFICATIONS.lower() == 'true' and buys_detected:
-        logging.info(f"Detected {len(buys_detected)} groups of filled buy orders. Preparing notifications...")
-        item_ids_to_fetch = list(buys_detected.keys())
-        id_to_name = get_names_from_ids(item_ids_to_fetch)
+        logging.info(f"Detected {len(buys_detected)} groups of filled buy orders...")
+        item_ids = list(buys_detected.keys())
+        loc_ids = [data['location_id'] for data in buys_detected.values()]
+        id_to_name = get_names_from_ids(item_ids + loc_ids)
 
         for type_id, data in buys_detected.items():
-            item_name = id_to_name.get(type_id, "Unknown Item")
             message = (
                 f"🛒 *Market Buy!* 🛒\n\n"
-                f"**Item:** `{item_name}` (`{type_id}`)\n"
+                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                 f"**Quantity Bought:** `{data['quantity']}`\n"
-                f"**Total Cost:** `{data['value']:,.2f} ISK`"
+                f"**Total Cost:** `{data['value']:,.2f} ISK`\n"
+                f"**Location:** `{id_to_name.get(data['location_id'], 'Unknown')}`\n"
+                f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(message)
             time.sleep(1)
-    else:
-        logging.info("No new market buys detected or buy notifications are disabled.")
 
     # --- Update Database State ---
     update_tracked_market_orders(orders_to_update)
@@ -410,6 +513,7 @@ async def run_daily_summary():
         logging.error("Could not obtain character ID for daily summary."); return
 
     # --- Fetch all necessary data ---
+    wallet_balance = get_wallet_balance(access_token, character_id)
     all_transactions = get_wallet_transactions(access_token, character_id)
     journal_entries = get_wallet_journal(access_token, character_id)
     processed_journal_entries = get_processed_journal_entries()
@@ -446,6 +550,7 @@ async def run_daily_summary():
     # --- Format and Send Message ---
     message = (
         f"📊 *Daily Market Summary* ({now.strftime('%Y-%m-%d')})\n\n"
+        f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`\n\n"
         f"**Past 24 Hours:**\n"
         f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{(total_brokers_fees_24h + total_transaction_tax_24h):,.2f} ISK`\n"
