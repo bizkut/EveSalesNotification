@@ -881,120 +881,230 @@ def initialize_market_orders():
         logging.info(f"Seeded {len(orders_to_track)} active market orders for {character.name}.")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetches and displays the wallet balance for all characters."""
+    """Fetches and displays the wallet balance for the configured character(s)."""
     logging.info(f"Received /balance command from user {update.effective_user.name}")
     if not CHARACTERS:
         await update.message.reply_text("No characters are loaded. Cannot fetch balances.")
         return
 
-    message_lines = ["💰 *Wallet Balances* 💰\n"]
-    total_balance = 0
-
-    for character in CHARACTERS:
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Fetching balance for {character.name}...")
         access_token = get_access_token(character.refresh_token)
         if not access_token:
-            message_lines.append(f"• `{character.name}`: `Could not refresh token`")
-            continue
-
+            await update.message.reply_text(f"Could not refresh token for {character.name}.")
+            return
         balance = get_wallet_balance(access_token, character.id)
         if balance is not None:
-            message_lines.append(f"• `{character.name}`: `{balance:,.2f} ISK`")
-            total_balance += balance
+            message = f"💰 *Wallet Balance for {character.name}*\n\n`{balance:,.2f} ISK`"
+            await update.message.reply_text(text=message, parse_mode='Markdown')
         else:
-            message_lines.append(f"• `{character.name}`: `Error fetching balance`")
+            await update.message.reply_text(f"Error fetching balance for {character.name}.")
+    else:
+        await _show_character_selection(update, "balance", include_all=True)
 
-    if len(CHARACTERS) > 1:
-        message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
-
-    await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually triggers the daily summary report and sends it to the requesting chat."""
-    chat_id = update.effective_chat.id
-    user_name = update.effective_user.name
-    logging.info(f"Received /summary command from user {user_name} in chat {chat_id}")
-    await update.message.reply_text("Manual summary requested. Generating report, please wait...")
-    # This might take a few seconds, so it's good to give user feedback.
-    await run_daily_summary(context, chat_id=chat_id)
-
-async def _show_character_selection(update: Update, action: str) -> None:
-    """Displays an inline keyboard for character selection for a given action (sales/buys)."""
+    """Manually triggers the daily summary report for the configured character(s)."""
+    logging.info(f"Received /summary command from user {update.effective_user.name}")
     if not CHARACTERS:
-        await update.message.reply_text("No characters are loaded. Cannot perform this action.")
+        await update.message.reply_text("No characters are loaded. Cannot run summary.")
         return
 
+    chat_id = update.effective_chat.id
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Generating summary for {character.name}...")
+        await run_daily_summary_for_character(character, context, chat_id=chat_id)
+    else:
+        await _show_character_selection(update, "summary", include_all=True)
+
+async def _show_character_selection(update: Update, action: str, include_all: bool = False) -> None:
+    """Displays an inline keyboard for character selection for a given action."""
     keyboard = [
         [InlineKeyboardButton(character.name, callback_data=f"{action}:{character.id}")]
         for character in CHARACTERS
     ]
+    if include_all and len(CHARACTERS) > 1:
+        keyboard.append([InlineKeyboardButton("All Characters", callback_data=f"{action}:all")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(f"Please select a character to view recent {action}:", reply_markup=reply_markup)
+    await update.message.reply_text(f"Please select a character for the /{action} command:", reply_markup=reply_markup)
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays a character selection menu for viewing recent sales."""
+    """Displays the 5 most recent sales for the configured character(s)."""
     logging.info(f"Received /sales command from user {update.effective_user.name}")
-    await _show_character_selection(update, "sales")
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot fetch sales.")
+        return
+
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Fetching recent sales for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            await update.message.reply_text(f"Could not refresh token for {character.name}.")
+            return
+
+        all_transactions = get_wallet_transactions(access_token, character.id)
+        if not all_transactions:
+            await update.message.reply_text(f"No transaction history found for {character.name}.")
+            return
+
+        filtered_tx = sorted(
+            [tx for tx in all_transactions if not tx.get('is_buy')],
+            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+            reverse=True
+        )[:5]
+
+        if not filtered_tx:
+            await update.message.reply_text(f"No recent sales found for {character.name}.")
+            return
+
+        item_ids = [tx['type_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(item_ids)
+        message_lines = [f"✅ *Last 5 Sales for {character.name}* ✅\n"]
+        for tx in filtered_tx:
+            item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+            message_lines.append(
+                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
+            )
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+    else:
+        await _show_character_selection(update, "sales")
 
 
 async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays a character selection menu for viewing recent buys."""
+    """Displays the 5 most recent buys for the configured character(s)."""
     logging.info(f"Received /buys command from user {update.effective_user.name}")
-    await _show_character_selection(update, "buys")
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot fetch buys.")
+        return
+
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Fetching recent buys for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            await update.message.reply_text(f"Could not refresh token for {character.name}.")
+            return
+
+        all_transactions = get_wallet_transactions(access_token, character.id)
+        if not all_transactions:
+            await update.message.reply_text(f"No transaction history found for {character.name}.")
+            return
+
+        filtered_tx = sorted(
+            [tx for tx in all_transactions if tx.get('is_buy')],
+            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+            reverse=True
+        )[:5]
+
+        if not filtered_tx:
+            await update.message.reply_text(f"No recent buys found for {character.name}.")
+            return
+
+        item_ids = [tx['type_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(item_ids)
+        message_lines = [f"🛒 *Last 5 Buys for {character.name}* 🛒\n"]
+        for tx in filtered_tx:
+            item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+            message_lines.append(
+                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
+            )
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+    else:
+        await _show_character_selection(update, "buys")
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles button clicks for character selection."""
     query = update.callback_query
-    await query.answer()  # Acknowledge the button press
+    await query.answer()
 
     try:
         action, character_id_str = query.data.split(':')
-        character_id = int(character_id_str)
     except (ValueError, IndexError):
-        await query.edit_message_text(text="Invalid callback data. Please try the command again.")
+        await query.edit_message_text(text="Invalid callback data.")
+        return
+
+    chat_id = update.effective_chat.id
+
+    if character_id_str == "all":
+        if action == "balance":
+            await query.edit_message_text(text="Fetching balances for all characters...")
+            message_lines = ["💰 *Wallet Balances* 💰\n"]
+            total_balance = 0
+            for char in CHARACTERS:
+                access_token = get_access_token(char.refresh_token)
+                balance = get_wallet_balance(access_token, char.id) if access_token else None
+                if balance is not None:
+                    message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
+                    total_balance += balance
+                else:
+                    message_lines.append(f"• `{char.name}`: `Error fetching balance`")
+            message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
+            await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
+        elif action == "summary":
+            await query.edit_message_text(text="Generating summary for all characters...")
+            await run_daily_summary(context, chat_id=chat_id)
+        return
+
+    try:
+        character_id = int(character_id_str)
+    except ValueError:
+        await query.edit_message_text(text="Invalid character ID.")
         return
 
     character = next((c for c in CHARACTERS if c.id == character_id), None)
     if not character:
-        await query.edit_message_text(text="Could not find the selected character. Please try again.")
+        await query.edit_message_text(text="Could not find the selected character.")
         return
 
-    await query.edit_message_text(text=f"Fetching recent {action} for {character.name}, please wait...")
-
+    await query.edit_message_text(text=f"Processing /{action} for {character.name}, please wait...")
     access_token = get_access_token(character.refresh_token)
     if not access_token:
         await query.edit_message_text(text=f"Could not refresh token for {character.name}.")
         return
 
-    all_transactions = get_wallet_transactions(access_token, character.id)
-    if not all_transactions:
-        await query.edit_message_text(text=f"No transaction history found for {character.name}.")
-        return
+    if action == "balance":
+        balance = get_wallet_balance(access_token, character.id)
+        if balance is not None:
+            message = f"💰 *Wallet Balance for {character.name}*\n\n`{balance:,.2f} ISK`"
+            await query.edit_message_text(text=message, parse_mode='Markdown')
+        else:
+            await query.edit_message_text(text=f"Error fetching balance for {character.name}.")
+    elif action == "summary":
+        await run_daily_summary_for_character(character, context, chat_id=chat_id)
+    elif action in ["sales", "buys"]:
+        all_transactions = get_wallet_transactions(access_token, character.id)
+        if not all_transactions:
+            await query.edit_message_text(text=f"No transaction history found for {character.name}.")
+            return
 
-    is_buy = True if action == 'buys' else False
-    filtered_tx = sorted(
-        [tx for tx in all_transactions if tx.get('is_buy') == is_buy],
-        key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
-        reverse=True
-    )[:5]
+        is_buy = True if action == 'buys' else False
+        filtered_tx = sorted(
+            [tx for tx in all_transactions if tx.get('is_buy') == is_buy],
+            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+            reverse=True
+        )[:5]
 
-    if not filtered_tx:
-        await query.edit_message_text(text=f"No recent {action} found for {character.name}.")
-        return
+        if not filtered_tx:
+            await query.edit_message_text(text=f"No recent {action} found for {character.name}.")
+            return
 
-    item_ids = [tx['type_id'] for tx in filtered_tx]
-    id_to_name = get_names_from_ids(item_ids)
-
-    action_verb = "Bought" if is_buy else "Sold"
-    message_lines = [f"✅ *Last 5 {action.capitalize()} for {character.name}* ✅\n"]
-    for tx in filtered_tx:
-        item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
-        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-        message_lines.append(
-            f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
-        )
-
-    await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
+        item_ids = [tx['type_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(item_ids)
+        message_lines = [f"✅ *Last 5 {action.capitalize()} for {character.name}* ✅\n"]
+        for tx in filtered_tx:
+            item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+            message_lines.append(
+                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
+            )
+        await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
 
 async def post_init(application: Application):
     """Sets the bot's commands in the Telegram menu after initialization."""
