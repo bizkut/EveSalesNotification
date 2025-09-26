@@ -138,6 +138,16 @@ def setup_database():
             PRIMARY KEY (character_id, year, month)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS purchase_lots (
+            lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_id INTEGER NOT NULL,
+            type_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            price REAL NOT NULL,
+            purchase_date TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -266,6 +276,54 @@ def add_processed_journal_entries(character_id, entry_ids):
     )
     conn.commit()
     conn.close()
+
+
+def add_purchase_lot(character_id, type_id, quantity, price):
+    """Adds a new purchase lot to the database."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO purchase_lots (character_id, type_id, quantity, price, purchase_date)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (character_id, type_id, quantity, price, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    conn.close()
+    logging.info(f"Recorded purchase for char {character_id}: {quantity} of type {type_id} at {price:,.2f} ISK each.")
+
+
+def get_purchase_lots(character_id, type_id):
+    """Retrieves all purchase lots for a specific item, oldest first."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT lot_id, quantity, price FROM purchase_lots WHERE character_id = ? AND type_id = ? ORDER BY purchase_date ASC",
+        (character_id, type_id)
+    )
+    lots = [{"lot_id": row[0], "quantity": row[1], "price": row[2]} for row in cursor.fetchall()]
+    conn.close()
+    return lots
+
+
+def update_purchase_lot_quantity(lot_id, new_quantity):
+    """Updates the remaining quantity of a purchase lot."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE purchase_lots SET quantity = ? WHERE lot_id = ?", (new_quantity, lot_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_purchase_lot(lot_id):
+    """Deletes a purchase lot from the database, typically when it's fully consumed."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM purchase_lots WHERE lot_id = ?", (lot_id,))
+    conn.commit()
+    conn.close()
+
 
 # --- ESI API Functions ---
 
@@ -433,6 +491,46 @@ async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str
 
 # --- Main Application Logic ---
 
+def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
+    """
+    Calculates the Cost of Goods Sold (COGS) for a sale using FIFO and updates the database.
+    Returns the total COGS for the quantity sold.
+    """
+    lots = get_purchase_lots(character_id, type_id)
+    if not lots:
+        return None  # Indicates no purchase history
+
+    cogs = 0
+    remaining_to_sell = quantity_sold
+
+    for lot in lots:
+        if remaining_to_sell <= 0:
+            break
+
+        quantity_from_lot = min(remaining_to_sell, lot['quantity'])
+        cogs += quantity_from_lot * lot['price']
+        remaining_to_sell -= quantity_from_lot
+
+        if quantity_from_lot < lot['quantity']:
+            # Lot partially consumed
+            new_quantity = lot['quantity'] - quantity_from_lot
+            update_purchase_lot_quantity(lot['lot_id'], new_quantity)
+            logging.info(f"Partially consumed lot {lot['lot_id']}. New quantity: {new_quantity}")
+        else:
+            # Lot fully consumed
+            delete_purchase_lot(lot['lot_id'])
+            logging.info(f"Fully consumed and deleted lot {lot['lot_id']}.")
+
+    if remaining_to_sell > 0:
+        # This can happen if the user sells items they acquired before the bot started tracking
+        logging.warning(
+            f"Could not find enough purchase history for char {character_id} to account for sale of {quantity_sold} of type {type_id}. "
+            f"Profit calculation may be incomplete for this sale."
+        )
+
+    return cogs
+
+
 async def check_market_activity_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
     """Checks for market activity for a single character."""
     logging.info(f"Checking market activity for {character.name}...")
@@ -464,8 +562,8 @@ async def check_market_activity_for_character(character: Character, context: Con
 
     live_orders = get_market_orders(access_token, character.id)
     tracked_orders = get_tracked_market_orders(character.id)
-    sales_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0, 'price': 0})
-    buys_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0})
+    sales_detected = defaultdict(list)
+    buys_detected = defaultdict(list)
     orders_to_update = []
 
     for order in live_orders:
@@ -476,35 +574,51 @@ async def check_market_activity_for_character(character: Character, context: Con
             quantity = tracked_orders[order_id] - order['volume_remain']
             price = order['price']
             if order.get('is_buy_order'):
-                buys_detected[order['type_id']].update({
-                    'quantity': buys_detected[order['type_id']]['quantity'] + quantity,
-                    'value': buys_detected[order['type_id']]['value'] + (quantity * price),
+                buys_detected[order['type_id']].append({
+                    'quantity': quantity,
+                    'price': price,
                     'location_id': location_id
                 })
             else:
-                sales_detected[order['type_id']].update({
-                    'quantity': sales_detected[order['type_id']]['quantity'] + quantity,
-                    'value': sales_detected[order['type_id']]['value'] + (quantity * price),
-                    'location_id': location_id,
-                    'price': price
+                sales_detected[order['type_id']].append({
+                    'quantity': quantity,
+                    'price': price,
+                    'location_id': location_id
                 })
 
     if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' and sales_detected:
         logging.info(f"Detected {len(sales_detected)} groups of filled sell orders for {character.name}...")
         item_ids = list(sales_detected.keys())
-        loc_ids = [data['location_id'] for data in sales_detected.values()]
+        loc_ids = [sale['location_id'] for sales in sales_detected.values() for sale in sales]
         id_to_name = get_names_from_ids(item_ids + loc_ids + [config.REGION_ID])
-        for type_id, data in sales_detected.items():
+
+        for type_id, sales in sales_detected.items():
+            total_quantity = sum(s['quantity'] for s in sales)
+            total_value = sum(s['quantity'] * s['price'] for s in sales)
+            avg_sale_price = total_value / total_quantity if total_quantity else 0
+            location_id = sales[0]['location_id']
+
+            # --- FIFO Profit Calculation ---
+            cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
+            profit_line = ""
+            if cogs is not None:
+                profit = total_value - cogs
+                profit_line = f"\n**Profit:** `{profit:,.2f} ISK`"
+            else:
+                profit_line = "\n**Profit:** `N/A (No purchase history)`"
+            # --- End FIFO ---
+
             history = get_market_history(type_id, config.REGION_ID)
             avg_price_str = f"{history['average']:,.2f} ISK" if history else "N/A"
-            price_diff_str = f"({(data['price'] / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+            price_diff_str = f"({(avg_sale_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
             message = (
                 f"✅ *Market Sale ({character.name})* ✅\n\n"
                 f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                f"**Quantity Sold:** `{data['quantity']}`\n"
-                f"**Your Price:** `{data['price']:,.2f} ISK`\n"
-                f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg Price:** `{avg_price_str}` {price_diff_str}\n"
-                f"**Location:** `{id_to_name.get(data['location_id'], 'Unknown')}`\n"
+                f"**Quantity Sold:** `{total_quantity}`\n"
+                f"**Avg. Your Price:** `{avg_sale_price:,.2f} ISK`\n"
+                f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg Price:** `{avg_price_str}` {price_diff_str}"
+                f"{profit_line}\n\n"
+                f"**Location:** `{id_to_name.get(location_id, 'Unknown')}`\n"
                 f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(context, message)
@@ -513,15 +627,23 @@ async def check_market_activity_for_character(character: Character, context: Con
     if getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true' and buys_detected:
         logging.info(f"Detected {len(buys_detected)} groups of filled buy orders for {character.name}...")
         item_ids = list(buys_detected.keys())
-        loc_ids = [data['location_id'] for data in buys_detected.values()]
+        loc_ids = [buy['location_id'] for buys in buys_detected.values() for buy in buys]
         id_to_name = get_names_from_ids(item_ids + loc_ids)
-        for type_id, data in buys_detected.items():
+        for type_id, buys in buys_detected.items():
+            total_quantity = sum(b['quantity'] for b in buys)
+            total_value = sum(b['quantity'] * b['price'] for b in buys)
+            location_id = buys[0]['location_id']
+
+            # Record each individual purchase as a lot
+            for buy in buys:
+                add_purchase_lot(character.id, type_id, buy['quantity'], buy['price'])
+
             message = (
                 f"🛒 *Market Buy ({character.name})* 🛒\n\n"
                 f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                f"**Quantity Bought:** `{data['quantity']}`\n"
-                f"**Total Cost:** `{data['value']:,.2f} ISK`\n"
-                f"**Location:** `{id_to_name.get(data['location_id'], 'Unknown')}`\n"
+                f"**Quantity Bought:** `{total_quantity}`\n"
+                f"**Total Cost:** `{total_value:,.2f} ISK`\n"
+                f"**Location:** `{id_to_name.get(location_id, 'Unknown')}`\n"
                 f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(context, message)
