@@ -96,6 +96,21 @@ The bot will now start. On its first run, it will seed its database with your hi
 
 ---
 
+## Usage & Commands
+
+You can interact with the bot by sending it commands in a private chat or in a channel it's a member of.
+
+**Note:** The command menu (the `/` button in the text input field) will only be visible when you are in a **private chat** with the bot. In channels, you must type the commands manually.
+
+### Available Commands
+
+-   `/balance` - Fetches and displays the current wallet balance for all configured characters.
+-   `/summary` - Manually triggers and sends the daily summary report for all characters.
+-   `/sales` - Shows a character selection menu to view the 5 most recent sales for the chosen character.
+-   `/buys` - Shows a character selection menu to view the 5 most recent buys for the chosen character.
+
+---
+
 ## Example Notifications
 
 **Market Sale Notification:**
