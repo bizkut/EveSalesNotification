@@ -658,40 +658,6 @@ def get_next_run_delay(headers):
     except (ValueError, TypeError):
         return 60
 
-async def check_wallet_balance_job(context: ContextTypes.DEFAULT_TYPE):
-    """A self-scheduling job to check a character's wallet balance."""
-    character = context.job.data
-    logging.debug(f"Running wallet balance check for {character.name}")
-
-    wallet_balance, headers = get_wallet_balance(character, return_headers=True)
-
-    if wallet_balance is not None and getattr(config, 'WALLET_BALANCE_THRESHOLD', 0) > 0:
-        state_key = f"low_balance_alert_sent_at_{character.id}"
-        last_alert_str = get_bot_state(state_key)
-        alert_sent_recently = False
-        if last_alert_str:
-            last_alert_time = datetime.fromisoformat(last_alert_str)
-            if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
-                alert_sent_recently = True
-
-        if wallet_balance < config.WALLET_BALANCE_THRESHOLD and not alert_sent_recently:
-            alert_message = (
-                f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\n"
-                f"Your wallet balance has dropped below `{config.WALLET_BALANCE_THRESHOLD:,.2f}` ISK.\n"
-                f"**Current Balance:** `{wallet_balance:,.2f}` ISK"
-            )
-            await send_telegram_message(context, alert_message)
-            set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
-        elif wallet_balance >= config.WALLET_BALANCE_THRESHOLD and last_alert_str:
-            # Reset the alert state if balance is back up
-            set_bot_state(state_key, '')
-
-    # --- Reschedule ---
-    delay = get_next_run_delay(headers)
-    context.job_queue.run_once(check_wallet_balance_job, delay, data=character)
-    logging.info(f"Wallet balance check for {character.name} complete. Next check in {delay:.2f} seconds.")
-
-
 async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
     """
     A self-scheduling job that checks for new wallet transactions and sends notifications.
@@ -724,6 +690,28 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
         id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [config.REGION_ID])))
 
         wallet_balance = get_wallet_balance(character)
+
+        # Check for low balance threshold
+        if wallet_balance is not None and getattr(config, 'WALLET_BALANCE_THRESHOLD', 0) > 0:
+            state_key = f"low_balance_alert_sent_at_{character.id}"
+            last_alert_str = get_bot_state(state_key)
+            alert_sent_recently = False
+            if last_alert_str:
+                last_alert_time = datetime.fromisoformat(last_alert_str)
+                if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
+                    alert_sent_recently = True
+
+            if wallet_balance < config.WALLET_BALANCE_THRESHOLD and not alert_sent_recently:
+                alert_message = (
+                    f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\n"
+                    f"Your wallet balance has dropped below `{config.WALLET_BALANCE_THRESHOLD:,.2f}` ISK.\n"
+                    f"**Current Balance:** `{wallet_balance:,.2f}` ISK"
+                )
+                await send_telegram_message(context, alert_message)
+                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+            elif wallet_balance >= config.WALLET_BALANCE_THRESHOLD and last_alert_str:
+                set_bot_state(state_key, '')
+
         batch_threshold = getattr(config, 'NOTIFICATION_BATCH_THRESHOLD', 3)
         enable_sales = getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true'
         enable_buys = getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true'
@@ -1320,7 +1308,6 @@ def main() -> None:
             # Start the self-scheduling jobs for each character
             job_queue.run_once(check_wallet_transactions_job, 5, data=character, name=f"wallet_transactions_{character.id}")
             job_queue.run_once(check_order_history_job, 15, data=character, name=f"order_history_{character.id}")
-            job_queue.run_once(check_wallet_balance_job, 25, data=character, name=f"wallet_balance_{character.id}")
         logging.info("Market activity notifications ENABLED. Jobs are now self-scheduling based on cache timers.")
     else:
         logging.info("Market activity notifications DISABLED by config.")
