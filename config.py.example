@@ -12,6 +12,8 @@ TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"
 TELEGRAM_CHANNEL_ID = "your_telegram_channel_id_here"
 
 # 3. Bot Configuration
+# The desired logging level. Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR'.
+LOG_LEVEL = 'INFO'
 # The time in "HH:MM" UTC format to send the daily summary.
 DAILY_SUMMARY_TIME = "22:00"
 # The region ID for your primary trade hub (e.g., 10000002 for The Forge/Jita).
