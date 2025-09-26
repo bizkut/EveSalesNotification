@@ -4,33 +4,123 @@ import time
 import schedule
 import logging
 import os
+import sqlite3
 from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from config import ESI_CLIENT_ID, ESI_SECRET_KEY, ESI_REFRESH_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- File-based Persistence ---
+# --- Database Functions ---
 
 DATA_DIR = "data"
-PROCESSED_TRANSACTIONS_FILE = os.path.join(DATA_DIR, "processed_transactions.dat")
+DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
 
-def load_processed_transactions():
-    """Loads the set of processed transaction IDs from a file."""
-    try:
-        with open(PROCESSED_TRANSACTIONS_FILE, "r") as f:
-            return {int(line.strip()) for line in f}
-    except FileNotFoundError:
-        return set()
-
-def save_processed_transactions(processed_ids):
-    """Saves the set of processed transaction IDs to a file."""
+def db_connection():
+    """Creates a database connection."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(PROCESSED_TRANSACTIONS_FILE, "w") as f:
-        for transaction_id in processed_ids:
-            f.write(f"{transaction_id}\n")
+    return sqlite3.connect(DB_FILE)
+
+def setup_database():
+    """Creates the necessary database tables if they don't exist."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    # Table for tracking individual transaction notifications
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS processed_transactions (
+            transaction_id INTEGER PRIMARY KEY
+        )
+    """)
+    # Table for tracking journal entries for the daily summary
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS processed_journal_entries (
+            entry_id INTEGER PRIMARY KEY
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_processed_transactions():
+    """Retrieves all processed transaction IDs from the database."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT transaction_id FROM processed_transactions")
+    processed_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return processed_ids
+
+def add_processed_transactions(transaction_ids):
+    """Adds a list of transaction IDs to the database."""
+    if not transaction_ids:
+        return
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.executemany(
+        "INSERT OR IGNORE INTO processed_transactions (transaction_id) VALUES (?)",
+        [(tx_id,) for tx_id in transaction_ids]
+    )
+    conn.commit()
+    conn.close()
+
+def get_processed_journal_entries():
+    """Retrieves all processed journal entry IDs from the database."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT entry_id FROM processed_journal_entries")
+    processed_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return processed_ids
+
+def add_processed_journal_entries(entry_ids):
+    """Adds a list of journal entry IDs to the database."""
+    if not entry_ids:
+        return
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.executemany(
+        "INSERT OR IGNORE INTO processed_journal_entries (entry_id) VALUES (?)",
+        [(entry_id,) for entry_id in entry_ids]
+    )
+    conn.commit()
+    conn.close()
 
 # --- ESI API Functions ---
+
+def get_wallet_journal(access_token, character_id):
+    """Fetches all wallet journal entries for a character, handling pagination."""
+    if not character_id:
+        return []
+
+    journal_entries = []
+    page = 1
+    url = f"https://esi.evetech.net/v6/characters/{character_id}/wallet/journal/"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    params = {"datasource": "tranquility"}
+
+    while True:
+        try:
+            params['page'] = page
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+
+            data = response.json()
+            if not data:
+                break
+
+            journal_entries.extend(data)
+
+            pages_header = response.headers.get('x-pages')
+            if pages_header and int(pages_header) <= page:
+                break
+
+            page += 1
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error fetching wallet journal page {page}: {e}")
+            return []
+
+    return journal_entries
 
 def get_access_token():
     """Refreshes the ESI access token."""
@@ -62,8 +152,8 @@ def get_character_id(access_token):
         logging.error(f"Error getting character ID: {e}")
         return None
 
-def get_filled_orders(access_token, character_id):
-    """Fetches the character's filled sales orders."""
+def get_wallet_transactions(access_token, character_id):
+    """Fetches all wallet transactions for a character."""
     if not character_id:
         return []
     url = f"https://esi.evetech.net/v1/characters/{character_id}/wallet/transactions/"
@@ -72,9 +162,10 @@ def get_filled_orders(access_token, character_id):
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
-        return [tx for tx in response.json() if not tx.get('is_buy')]
+        # Returns all transactions, which can be filtered for buys or sells later
+        return response.json()
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching filled orders: {e}")
+        logging.error(f"Error fetching wallet transactions: {e}")
         return []
 
 def get_names_from_ids(id_list):
@@ -119,8 +210,9 @@ async def check_for_new_orders():
     if not character_id:
         logging.error("Could not obtain character ID. Skipping check."); return
 
-    filled_orders = get_filled_orders(access_token, character_id)
-    processed_transactions = load_processed_transactions()
+    all_transactions = get_wallet_transactions(access_token, character_id)
+    filled_orders = [tx for tx in all_transactions if not tx.get('is_buy')]
+    processed_transactions = get_processed_transactions()
 
     new_orders = [o for o in filled_orders if o['transaction_id'] not in processed_transactions]
 
@@ -159,17 +251,158 @@ async def check_for_new_orders():
         time.sleep(1)
 
     all_new_transaction_ids = {tx_id for data in grouped_sales.values() for tx_id in data['transaction_ids']}
-    save_processed_transactions(processed_transactions.union(all_new_transaction_ids))
+    add_processed_transactions(list(all_new_transaction_ids))
 
     logging.info(f"Check complete. Processed {len(all_new_transaction_ids)} new orders in {len(grouped_sales)} groups.")
 
-def initialize_transaction_history():
-    """On first run, seeds the transaction history to avoid notifying for historical orders."""
-    if os.path.exists(PROCESSED_TRANSACTIONS_FILE):
-        logging.info("Existing transaction history found.")
+def calculate_estimated_profit(sales_today, all_buy_transactions):
+    """
+    Calculates the estimated profit from a list of sales based on the
+    average purchase price of those items over the last 30 days.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    if not sales_today:
+        return 0
+
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+
+    # Create a lookup for average buy prices
+    avg_buy_prices = {}
+    item_types_sold = {sale['type_id'] for sale in sales_today}
+
+    for type_id in item_types_sold:
+        relevant_buys = [
+            tx for tx in all_buy_transactions
+            if tx['type_id'] == type_id and
+            datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > thirty_days_ago
+        ]
+
+        if relevant_buys:
+            total_isk_spent = sum(buy['quantity'] * buy['unit_price'] for buy in relevant_buys)
+            total_quantity_bought = sum(buy['quantity'] for buy in relevant_buys)
+            avg_buy_prices[type_id] = total_isk_spent / total_quantity_bought if total_quantity_bought else 0
+        else:
+            # If no recent buy history, we can't estimate cost, so assume it's 0.
+            # This means profit will equal sales value for items not recently purchased.
+            avg_buy_prices[type_id] = 0
+
+    # Calculate total sales value and total estimated cost of goods sold
+    total_sales_value = sum(sale['quantity'] * sale['unit_price'] for sale in sales_today)
+    total_estimated_cogs = sum(
+        sale['quantity'] * avg_buy_prices.get(sale['type_id'], 0) for sale in sales_today
+    )
+
+    return total_sales_value - total_estimated_cogs
+
+async def run_daily_summary():
+    """Calculates and sends a daily summary of market activities."""
+    logging.info("Running daily summary...")
+    access_token = get_access_token()
+    if not access_token:
+        logging.error("Could not obtain access token for daily summary."); return
+
+    character_id = get_character_id(access_token)
+    if not character_id:
+        logging.error("Could not obtain character ID for daily summary."); return
+
+    # --- Fetch all necessary data ---
+    all_transactions = get_wallet_transactions(access_token, character_id)
+    journal_entries = get_wallet_journal(access_token, character_id)
+    processed_journal_entries = get_processed_journal_entries()
+
+    new_journal_entries = [e for e in journal_entries if e['id'] not in processed_journal_entries]
+
+    if not new_journal_entries and not any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions):
+        logging.info("No new journal or transaction entries for daily summary."); return
+
+    # --- Define time windows ---
+    now = datetime.now(timezone.utc)
+    one_day_ago = now - timedelta(days=1)
+    start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # --- Process 24-Hour Stats ---
+    total_brokers_fees_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
+    total_transaction_tax_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') == 'transaction_tax' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
+
+    sales_past_24_hours = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago]
+    total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
+
+    all_buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
+    estimated_profit_24h = calculate_estimated_profit(sales_past_24_hours, all_buy_transactions)
+    estimated_profit_24h -= (total_brokers_fees_24h + total_transaction_tax_24h)
+
+    # --- Process Monthly Stats ---
+    total_sales_month = sum(e.get('amount', 0) for e in journal_entries if e.get('ref_type') == 'player_trading' and e.get('amount', 0) > 0 and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
+    total_brokers_fees_month = sum(abs(e.get('amount', 0)) for e in journal_entries if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
+    total_transaction_tax_month = sum(abs(e.get('amount', 0)) for e in journal_entries if e.get('ref_type') == 'transaction_tax' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
+
+    total_fees_month = total_brokers_fees_month + total_transaction_tax_month
+    gross_revenue_month = total_sales_month - total_fees_month
+
+    # --- Format and Send Message ---
+    message = (
+        f"📊 *Daily Market Summary* ({now.strftime('%Y-%m-%d')})\n\n"
+        f"**Past 24 Hours:**\n"
+        f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{(total_brokers_fees_24h + total_transaction_tax_24h):,.2f} ISK`\n"
+        f"  - **Estimated Profit:** `{estimated_profit_24h:,.2f} ISK`*\n\n"
+        f"---\n\n"
+        f"🗓️ **Current Month Summary ({now.strftime('%B %Y')}):**\n"
+        f"  - Total Sales Value: `{total_sales_month:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{total_fees_month:,.2f} ISK`\n"
+        f"  - **Gross Revenue (Sales - Fees):** `{gross_revenue_month:,.2f} ISK`\n\n"
+        f"_\*Profit is estimated based on the average purchase price of items over the last 30 days._"
+    )
+
+    await send_telegram_message(message)
+
+    processed_ids_for_this_run = [entry['id'] for entry in new_journal_entries]
+    add_processed_journal_entries(processed_ids_for_this_run)
+    logging.info(f"Daily summary sent. Processed {len(processed_ids_for_this_run)} new journal entries.")
+
+def initialize_journal_history():
+    """On first run, seeds the journal history to avoid summarizing historical entries."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT count(*) FROM processed_journal_entries")
+    count = cursor.fetchone()[0]
+    conn.close()
+
+    if count > 0:
+        logging.info(f"Existing journal history found ({count} records). Skipping seeding.")
         return
 
-    logging.info("First run detected. Seeding transaction history to ignore past orders...")
+    logging.info("First run for daily summary detected. Seeding journal history...")
+    access_token = get_access_token()
+    if not access_token:
+        logging.error("Could not obtain access token for journal seeding."); return
+
+    character_id = get_character_id(access_token)
+    if not character_id:
+        logging.error("Could not obtain character ID for journal seeding."); return
+
+    historical_journal = get_wallet_journal(access_token, character_id)
+    if not historical_journal:
+        logging.info("No historical journal entries found to seed."); return
+
+    historical_ids = [entry['id'] for entry in historical_journal]
+    add_processed_journal_entries(historical_ids)
+    logging.info(f"Successfully seeded {len(historical_ids)} historical journal entries.")
+
+def initialize_transaction_history():
+    """On first run, seeds the transaction history to avoid notifying for historical orders."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT count(*) FROM processed_transactions")
+    count = cursor.fetchone()[0]
+    conn.close()
+
+    if count > 0:
+        logging.info(f"Existing transaction history found ({count} records). Skipping seeding.")
+        return
+
+    logging.info("First run for sales notifications detected. Seeding transaction history...")
     access_token = get_access_token()
     if not access_token:
         logging.error("Could not obtain access token. Failed to seed history."); return
@@ -178,43 +411,44 @@ def initialize_transaction_history():
     if not character_id:
         logging.error("Could not obtain character ID. Failed to seed history."); return
 
-    historical_orders = get_filled_orders(access_token, character_id)
+    all_transactions = get_wallet_transactions(access_token, character_id)
+    historical_orders = [tx for tx in all_transactions if not tx.get('is_buy')]
     if not historical_orders:
-        logging.info("No historical orders found to seed.")
-        save_processed_transactions(set()) # Create empty file to mark as initialized
-        return
+        logging.info("No historical orders found to seed."); return
 
-    historical_ids = {order['transaction_id'] for order in historical_orders}
-    save_processed_transactions(historical_ids)
+    historical_ids = [order['transaction_id'] for order in historical_orders]
+    add_processed_transactions(historical_ids)
     logging.info(f"Successfully seeded {len(historical_ids)} historical transactions. The bot will now only notify for new sales.")
 
 if __name__ == "__main__":
     logging.info("Bot starting up...")
 
-    # This will seed the history on the very first run
-    initialize_transaction_history()
+    # Create database tables if they don't exist
+    setup_database()
 
-    # The first check will now only find orders created after initialization
-    logging.info("Performing initial check for any orders created since startup...")
+    # Seed history for both sales and journal on the very first run
+    initialize_transaction_history()
+    initialize_journal_history()
+
+    # Perform an initial check for sales notifications on startup
+    logging.info("Performing initial check for any new sales orders...")
     import asyncio
     asyncio.run(check_for_new_orders())
 
+    # --- Set up schedules ---
     schedule.every(5).minutes.do(lambda: asyncio.run(check_for_new_orders()))
-    logging.info("Scheduler started. Will check for new orders every 5 minutes.")
+    logging.info("Scheduled sales check: every 5 minutes.")
+
+    # Schedule the daily summary for 22:00 UTC (6am GMT+8)
+    schedule.every().day.at("22:00").do(lambda: asyncio.run(run_daily_summary()))
+    logging.info("Scheduled daily summary: every day at 22:00 UTC (6am GMT+8).")
 
     logging.info("Entering main loop to run scheduler...")
     while True:
-        # This runs any jobs that are due.
         schedule.run_pending()
-
-        # This finds out how long to wait until the next scheduled job.
         idle_seconds = schedule.idle_seconds()
         if idle_seconds is not None and idle_seconds > 1:
-            # We log the wait time and then sleep to be resource-friendly.
-            # The log message confirms that we are waiting and not processing instantly.
             logging.info(f"Next check in {int(idle_seconds)} seconds. Waiting...")
             time.sleep(idle_seconds)
         else:
-            # If jobs are very close together, or if there are no jobs,
-            # we still wait a moment to prevent a fast, resource-intensive loop.
             time.sleep(1)
