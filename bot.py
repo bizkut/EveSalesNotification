@@ -1,13 +1,15 @@
 import requests
-import telegram
 import time
-import schedule
 import logging
 import os
 import sqlite3
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time as dt_time
 from dataclasses import dataclass
+import asyncio
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+
 import config
 
 # Configure logging
@@ -98,8 +100,6 @@ def setup_database():
             raise
 
     # --- Table Creation ---
-    # Table for tracking individual transaction notifications
-    # A composite primary key is used because transaction_id is only unique per character.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_transactions (
             transaction_id INTEGER NOT NULL,
@@ -107,8 +107,6 @@ def setup_database():
             PRIMARY KEY (transaction_id, character_id)
         )
     """)
-    # Table for tracking journal entries for the daily summary
-    # A composite primary key is used because entry_id is only unique per character.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_journal_entries (
             entry_id INTEGER NOT NULL,
@@ -116,8 +114,6 @@ def setup_database():
             PRIMARY KEY (entry_id, character_id)
         )
     """)
-    # Table for tracking the state of active market orders
-    # A composite primary key is used because order_id is only unique per character.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS market_orders (
             order_id INTEGER NOT NULL,
@@ -126,7 +122,6 @@ def setup_database():
             PRIMARY KEY (order_id, character_id)
         )
     """)
-    # Key-value store for various bot states (e.g., last low-balance alert time per character)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS bot_state (
             key TEXT PRIMARY KEY,
@@ -237,42 +232,28 @@ def add_processed_journal_entries(character_id, entry_ids):
 # --- ESI API Functions ---
 
 def get_wallet_journal(access_token, character_id):
-    """Fetches all wallet journal entries for a character, handling pagination."""
-    if not character_id:
-        return []
-
-    journal_entries = []
-    page = 1
+    if not character_id: return []
+    journal_entries, page = [], 1
     url = f"https://esi.evetech.net/v6/characters/{character_id}/wallet/journal/"
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"datasource": "tranquility"}
-
     while True:
         try:
             params['page'] = page
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
-
             data = response.json()
-            if not data:
-                break
-
+            if not data: break
             journal_entries.extend(data)
-
             pages_header = response.headers.get('x-pages')
-            if pages_header and int(pages_header) <= page:
-                break
-
+            if pages_header and int(pages_header) <= page: break
             page += 1
-
         except requests.exceptions.RequestException as e:
             logging.error(f"Error fetching wallet journal page {page}: {e}")
             return []
-
     return journal_entries
 
 def get_access_token(refresh_token):
-    """Refreshes the ESI access token for a given refresh token."""
     url = "https://login.eveonline.com/v2/oauth/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Host": "login.eveonline.com"}
     data = {
@@ -290,7 +271,6 @@ def get_access_token(refresh_token):
         return None
 
 def get_character_details_from_token(access_token):
-    """Gets the character ID and name from the access token."""
     url = "https://login.eveonline.com/oauth/verify"
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
@@ -303,40 +283,20 @@ def get_character_details_from_token(access_token):
         return None, None
 
 def get_wallet_transactions(access_token, character_id):
-    """Fetches all wallet transactions for a character."""
-    if not character_id:
-        return []
+    if not character_id: return []
     url = f"https://esi.evetech.net/v1/characters/{character_id}/wallet/transactions/"
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"datasource": "tranquility"}
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
-        # Returns all transactions, which can be filtered for buys or sells later
         return response.json()
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching wallet transactions: {e}")
         return []
 
-def get_character_skills(access_token, character_id):
-    """Fetches character skill levels from ESI."""
-    if not character_id:
-        return None
-    url = f"https://esi.evetech.net/v4/characters/{character_id}/skills/"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"datasource": "tranquility"}
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching character skills: {e}")
-        return None
-
 def get_market_orders(access_token, character_id):
-    """Fetches a character's active market orders."""
-    if not character_id:
-        return []
+    if not character_id: return []
     url = f"https://esi.evetech.net/v2/characters/{character_id}/orders/"
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"datasource": "tranquility"}
@@ -349,9 +309,7 @@ def get_market_orders(access_token, character_id):
         return []
 
 def get_wallet_balance(access_token, character_id):
-    """Fetches the character's wallet balance."""
-    if not character_id:
-        return None
+    if not character_id: return None
     url = f"https://esi.evetech.net/v1/characters/{character_id}/wallet/"
     headers = {"Authorization": f"Bearer {access_token}"}
     params = {"datasource": "tranquility"}
@@ -364,41 +322,17 @@ def get_wallet_balance(access_token, character_id):
         return None
 
 def get_market_history(type_id, region_id):
-    """Fetches recent market history for a type in a region."""
     url = f"https://esi.evetech.net/v1/markets/{region_id}/history/"
     params = {"type_id": type_id, "datasource": "tranquility"}
     try:
         response = requests.get(url, params=params)
         response.raise_for_status()
-        # Return the most recent day's history
         return response.json()[-1] if response.json() else None
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching market history for type_id {type_id}: {e}")
         return None
 
-def get_location_name(location_id, access_token):
-    """Gets the name of a station or structure."""
-    # Location IDs for player-owned structures are > 1,000,000,000
-    # Stations and outposts are < 100,000,000
-    if location_id > 1000000000:
-        url = f"https://esi.evetech.net/v3/universe/structures/{location_id}/"
-        headers = {"Authorization": f"Bearer {access_token}"}
-        params = {"datasource": "tranquility"}
-    else:
-        url = f"https://esi.evetech.net/v2/universe/stations/{location_id}/"
-        headers = {}
-        params = {"datasource": "tranquility"}
-
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json().get('name', 'Unknown Location')
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching location name for ID {location_id}: {e}")
-        return "Unknown Location"
-
 def get_names_from_ids(id_list):
-    """Resolves a list of IDs to names."""
     if not id_list: return {}
     unique_ids = list(set(id_list))
     url = "https://esi.evetech.net/v3/universe/names/"
@@ -417,18 +351,17 @@ def get_names_from_ids(id_list):
 
 # --- Telegram Bot Functions ---
 
-async def send_telegram_message(message):
+async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str):
     """Sends a message to the configured Telegram channel."""
     try:
-        bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
-        await bot.send_message(chat_id=TELEGRAM_CHANNEL_ID, text=message, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=config.TELEGRAM_CHANNEL_ID, text=message, parse_mode='Markdown')
         logging.info("Sent message to Telegram channel.")
     except Exception as e:
         logging.error(f"Error sending Telegram message: {e}")
 
 # --- Main Application Logic ---
 
-async def check_market_activity_for_character(character: Character):
+async def check_market_activity_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
     """Checks for market activity for a single character."""
     logging.info(f"Checking market activity for {character.name}...")
     access_token = get_access_token(character.refresh_token)
@@ -436,9 +369,8 @@ async def check_market_activity_for_character(character: Character):
         logging.error(f"Could not get access token for {character.name}. Skipping.")
         return
 
-    # --- Wallet Balance Check ---
     wallet_balance = get_wallet_balance(access_token, character.id)
-    if wallet_balance is not None and config.WALLET_BALANCE_THRESHOLD > 0:
+    if wallet_balance is not None and getattr(config, 'WALLET_BALANCE_THRESHOLD', 0) > 0:
         state_key = f"low_balance_alert_sent_at_{character.id}"
         last_alert_str = get_bot_state(state_key)
         alert_sent_recently = False
@@ -453,15 +385,13 @@ async def check_market_activity_for_character(character: Character):
                 f"Your wallet balance has dropped below `{config.WALLET_BALANCE_THRESHOLD:,.2f}` ISK.\n"
                 f"**Current Balance:** `{wallet_balance:,.2f}` ISK"
             )
-            await send_telegram_message(alert_message)
+            await send_telegram_message(context, alert_message)
             set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
         elif wallet_balance >= config.WALLET_BALANCE_THRESHOLD and last_alert_str:
-            set_bot_state(state_key, '') # Reset the alert if balance is back up
+            set_bot_state(state_key, '')
 
-    # --- Market Order Check ---
     live_orders = get_market_orders(access_token, character.id)
     tracked_orders = get_tracked_market_orders(character.id)
-
     sales_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0, 'price': 0})
     buys_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0})
     orders_to_update = []
@@ -469,13 +399,10 @@ async def check_market_activity_for_character(character: Character):
     for order in live_orders:
         order_id, location_id = order['order_id'], order['location_id']
         orders_to_update.append((order_id, order['volume_remain']))
-
         if not (1 <= order.get('duration', 0) <= 90): continue
-
         if order_id in tracked_orders and order['volume_remain'] < tracked_orders[order_id]:
             quantity = tracked_orders[order_id] - order['volume_remain']
             price = order['price']
-
             if order.get('is_buy_order'):
                 buys_detected[order['type_id']].update({
                     'quantity': buys_detected[order['type_id']]['quantity'] + quantity,
@@ -487,21 +414,18 @@ async def check_market_activity_for_character(character: Character):
                     'quantity': sales_detected[order['type_id']]['quantity'] + quantity,
                     'value': sales_detected[order['type_id']]['value'] + (quantity * price),
                     'location_id': location_id,
-                    'price': price # Store the price for market context
+                    'price': price
                 })
 
-    # --- Process Sales ---
-    if config.ENABLE_SALES_NOTIFICATIONS.lower() == 'true' and sales_detected:
+    if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' and sales_detected:
         logging.info(f"Detected {len(sales_detected)} groups of filled sell orders for {character.name}...")
         item_ids = list(sales_detected.keys())
         loc_ids = [data['location_id'] for data in sales_detected.values()]
         id_to_name = get_names_from_ids(item_ids + loc_ids + [config.REGION_ID])
-
         for type_id, data in sales_detected.items():
             history = get_market_history(type_id, config.REGION_ID)
             avg_price_str = f"{history['average']:,.2f} ISK" if history else "N/A"
             price_diff_str = f"({(data['price'] / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
-
             message = (
                 f"✅ *Market Sale ({character.name})* ✅\n\n"
                 f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
@@ -511,16 +435,14 @@ async def check_market_activity_for_character(character: Character):
                 f"**Location:** `{id_to_name.get(data['location_id'], 'Unknown')}`\n"
                 f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
-            await send_telegram_message(message)
-            time.sleep(1) # Avoid rate-limiting
+            await send_telegram_message(context, message)
+            await asyncio.sleep(1)
 
-    # --- Process Buys ---
-    if config.ENABLE_BUY_NOTIFICATIONS.lower() == 'true' and buys_detected:
+    if getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true' and buys_detected:
         logging.info(f"Detected {len(buys_detected)} groups of filled buy orders for {character.name}...")
         item_ids = list(buys_detected.keys())
         loc_ids = [data['location_id'] for data in buys_detected.values()]
         id_to_name = get_names_from_ids(item_ids + loc_ids)
-
         for type_id, data in buys_detected.items():
             message = (
                 f"🛒 *Market Buy ({character.name})* 🛒\n\n"
@@ -530,114 +452,75 @@ async def check_market_activity_for_character(character: Character):
                 f"**Location:** `{id_to_name.get(data['location_id'], 'Unknown')}`\n"
                 f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
-            await send_telegram_message(message)
-            time.sleep(1) # Avoid rate-limiting
+            await send_telegram_message(context, message)
+            await asyncio.sleep(1)
 
-    # --- Update Database State ---
     update_tracked_market_orders(character.id, orders_to_update)
     live_order_ids = {o['order_id'] for o in live_orders}
     stale_order_ids = set(tracked_orders.keys()) - live_order_ids
     if stale_order_ids:
         remove_tracked_market_orders(character.id, list(stale_order_ids))
-
     logging.info(f"Finished processing market activity for {character.name}.")
 
-
-async def check_market_activity():
+async def check_market_activity(context: ContextTypes.DEFAULT_TYPE):
     """Wrapper function to check market activity for all configured characters."""
     logging.info("Starting market activity check for all characters...")
-    for character in CHARACTERS:
-        await check_market_activity_for_character(character)
+    await asyncio.gather(*(check_market_activity_for_character(c, context) for c in CHARACTERS))
     logging.info("Completed market activity check for all characters.")
 
 def calculate_estimated_profit(sales_today, all_buy_transactions):
-    """
-    Calculates the estimated profit from a list of sales based on the
-    average purchase price of those items over the last 30 days.
-    """
-    from datetime import datetime, timezone, timedelta
-
-    if not sales_today:
-        return 0
-
+    if not sales_today: return 0
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-
-    # Create a lookup for average buy prices
     avg_buy_prices = {}
     item_types_sold = {sale['type_id'] for sale in sales_today}
-
     for type_id in item_types_sold:
         relevant_buys = [
             tx for tx in all_buy_transactions
             if tx['type_id'] == type_id and
             datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > thirty_days_ago
         ]
-
         if relevant_buys:
             total_isk_spent = sum(buy['quantity'] * buy['unit_price'] for buy in relevant_buys)
             total_quantity_bought = sum(buy['quantity'] for buy in relevant_buys)
             avg_buy_prices[type_id] = total_isk_spent / total_quantity_bought if total_quantity_bought else 0
         else:
-            # If no recent buy history, we can't estimate cost, so assume it's 0.
-            # This means profit will equal sales value for items not recently purchased.
             avg_buy_prices[type_id] = 0
-
-    # Calculate total sales value and total estimated cost of goods sold
     total_sales_value = sum(sale['quantity'] * sale['unit_price'] for sale in sales_today)
     total_estimated_cogs = sum(
         sale['quantity'] * avg_buy_prices.get(sale['type_id'], 0) for sale in sales_today
     )
-
     return total_sales_value - total_estimated_cogs
 
-async def run_daily_summary_for_character(character: Character, all_transactions, journal_entries):
+async def run_daily_summary_for_character(character: Character, all_transactions, journal_entries, context: ContextTypes.DEFAULT_TYPE):
     """Calculates and prepares the daily summary data for a single character."""
     logging.info(f"Calculating daily summary for {character.name}...")
-
-    # --- Fetch wallet balance ---
     access_token = get_access_token(character.refresh_token)
     if not access_token:
         logging.error(f"Could not get access token for {character.name} during summary. Skipping.")
         return None
     wallet_balance = get_wallet_balance(access_token, character.id)
-
     processed_journal_entries = get_processed_journal_entries(character.id)
     new_journal_entries = [e for e in journal_entries if e['id'] not in processed_journal_entries]
-
-    # Check if there's any new activity to report
     has_new_transactions_24h = any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions)
     if not new_journal_entries and not has_new_transactions_24h:
         logging.info(f"No new journal or transaction entries for {character.name}. Skipping summary message.")
-        # Still need to mark journal entries as processed if any exist
         if new_journal_entries:
             add_processed_journal_entries(character.id, [e['id'] for e in new_journal_entries])
         return None
-
-    # --- Define time windows ---
-    now = datetime.now(timezone.utc)
-    one_day_ago = now - timedelta(days=1)
+    now, one_day_ago = datetime.now(timezone.utc), datetime.now(timezone.utc) - timedelta(days=1)
     start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-    # --- Process 24-Hour Stats ---
     total_brokers_fees_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
     total_transaction_tax_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') == 'transaction_tax' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
-
     sales_past_24_hours = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago]
     total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
-
     all_buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
     estimated_profit_24h = calculate_estimated_profit(sales_past_24_hours, all_buy_transactions)
     estimated_profit_24h -= (total_brokers_fees_24h + total_transaction_tax_24h)
-
-    # --- Process Monthly Stats ---
     total_sales_month = sum(e.get('amount', 0) for e in journal_entries if e.get('ref_type') == 'player_trading' and e.get('amount', 0) > 0 and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
     total_brokers_fees_month = sum(abs(e.get('amount', 0)) for e in journal_entries if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
     total_transaction_tax_month = sum(abs(e.get('amount', 0)) for e in journal_entries if e.get('ref_type') == 'transaction_tax' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
-
     total_fees_month = total_brokers_fees_month + total_transaction_tax_month
     gross_revenue_month = total_sales_month - total_fees_month
-
-    # --- Format and Send Message ---
     message = (
         f"📊 *Daily Market Summary ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d')}_\n\n"
@@ -653,49 +536,34 @@ async def run_daily_summary_for_character(character: Character, all_transactions
         f"  - **Gross Revenue (Sales - Fees):** `{gross_revenue_month:,.2f} ISK`\n\n"
         f"_*Profit is estimated based on the average purchase price of items over the last 30 days._"
     )
-    await send_telegram_message(message)
-
-    # Mark journal entries as processed
+    await send_telegram_message(context, message)
     processed_ids_for_this_run = [entry['id'] for entry in new_journal_entries]
     add_processed_journal_entries(character.id, processed_ids_for_this_run)
     logging.info(f"Daily summary sent for {character.name}. Processed {len(processed_ids_for_this_run)} new journal entries.")
-
-    # Return stats for combined summary
     return {
-        "wallet_balance": wallet_balance,
-        "total_sales_24h": total_sales_24h,
+        "wallet_balance": wallet_balance, "total_sales_24h": total_sales_24h,
         "total_fees_24h": total_brokers_fees_24h + total_transaction_tax_24h,
-        "estimated_profit_24h": estimated_profit_24h,
-        "total_sales_month": total_sales_month,
-        "total_fees_month": total_fees_month,
-        "gross_revenue_month": gross_revenue_month
+        "estimated_profit_24h": estimated_profit_24h, "total_sales_month": total_sales_month,
+        "total_fees_month": total_fees_month, "gross_revenue_month": gross_revenue_month
     }
 
-async def run_daily_summary():
+async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE):
     """Wrapper to run the daily summary for all characters and send a combined report."""
     logging.info("Starting daily summary run for all characters...")
-
     all_character_stats = []
-
     for character in CHARACTERS:
         access_token = get_access_token(character.refresh_token)
         if not access_token:
             logging.error(f"Could not get access token for {character.name} in daily summary. Skipping.")
             continue
-
         all_transactions = get_wallet_transactions(access_token, character.id)
         journal_entries = get_wallet_journal(access_token, character.id)
-
-        char_stats = await run_daily_summary_for_character(character, all_transactions, journal_entries)
+        char_stats = await run_daily_summary_for_character(character, all_transactions, journal_entries, context)
         if char_stats:
             all_character_stats.append(char_stats)
-
-        time.sleep(1) # Stagger requests slightly
-
-    # If more than one character has stats, send a combined summary
+        await asyncio.sleep(1)
     if len(all_character_stats) > 1:
         logging.info("Generating combined daily summary...")
-
         combined_wallet = sum(s['wallet_balance'] for s in all_character_stats)
         combined_sales_24h = sum(s['total_sales_24h'] for s in all_character_stats)
         combined_fees_24h = sum(s['total_fees_24h'] for s in all_character_stats)
@@ -703,7 +571,6 @@ async def run_daily_summary():
         combined_sales_month = sum(s['total_sales_month'] for s in all_character_stats)
         combined_fees_month = sum(s['total_fees_month'] for s in all_character_stats)
         combined_revenue_month = sum(s['gross_revenue_month'] for s in all_character_stats)
-
         now = datetime.now(timezone.utc)
         message = (
             f"📈 *Combined Daily Market Summary*\n"
@@ -719,104 +586,223 @@ async def run_daily_summary():
             f"  - Total Fees (Broker + Tax): `{combined_fees_month:,.2f} ISK`\n"
             f"  - **Total Gross Revenue:** `{combined_revenue_month:,.2f} ISK`"
         )
-        await send_telegram_message(message)
+        await send_telegram_message(context, message)
         logging.info("Combined daily summary sent.")
-
     logging.info("Daily summary run completed for all characters.")
 
 def initialize_journal_history():
-    """On first run, seeds the journal history for each character to avoid summarizing historical entries."""
     conn = db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT count(*) FROM processed_journal_entries")
     count = cursor.fetchone()[0]
     conn.close()
-
     if count > 0:
         logging.info(f"Existing journal history found ({count} records). Skipping seeding.")
         return
-
-    logging.info("First run for daily summary detected. Seeding journal history for all characters...")
+    logging.info("First run for daily summary detected. Seeding journal history...")
     for character in CHARACTERS:
         logging.info(f"Seeding journal history for {character.name}...")
         access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            logging.error(f"Could not obtain access token for {character.name} for journal seeding. Skipping."); continue
-
+        if not access_token: continue
         historical_journal = get_wallet_journal(access_token, character.id)
-        if not historical_journal:
-            logging.info(f"No historical journal entries found to seed for {character.name}."); continue
-
+        if not historical_journal: continue
         historical_ids = [entry['id'] for entry in historical_journal]
         add_processed_journal_entries(character.id, historical_ids)
-        logging.info(f"Successfully seeded {len(historical_ids)} historical journal entries for {character.name}.")
+        logging.info(f"Seeded {len(historical_ids)} historical journal entries for {character.name}.")
 
 def initialize_market_orders():
-    """On first run, seeds the market order state for each character to avoid false positives."""
     conn = db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT count(*) FROM market_orders")
     count = cursor.fetchone()[0]
     conn.close()
-
     if count > 0:
         logging.info(f"Existing market order history found ({count} records). Skipping seeding.")
         return
-
-    logging.info("First run for market notifications detected. Seeding initial order state for all characters...")
+    logging.info("First run for market notifications detected. Seeding initial order state...")
     for character in CHARACTERS:
         logging.info(f"Seeding market orders for {character.name}...")
         access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            logging.error(f"Could not obtain access token for {character.name} for market order seeding. Skipping."); continue
-
+        if not access_token: continue
         live_orders = get_market_orders(access_token, character.id)
-        if not live_orders:
-            logging.info(f"No active market orders found to seed for {character.name}."); continue
-
+        if not live_orders: continue
         orders_to_track = [(order['order_id'], order['volume_remain']) for order in live_orders]
         update_tracked_market_orders(character.id, orders_to_track)
-        logging.info(f"Successfully seeded {len(orders_to_track)} active market orders for {character.name}.")
+        logging.info(f"Seeded {len(orders_to_track)} active market orders for {character.name}.")
 
-if __name__ == "__main__":
-    import asyncio
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetches and displays the wallet balance for all characters."""
+    logging.info(f"Received /balance command from user {update.effective_user.name}")
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot fetch balances.")
+        return
+
+    message_lines = ["💰 *Wallet Balances* 💰\n"]
+    total_balance = 0
+
+    for character in CHARACTERS:
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            message_lines.append(f"• `{character.name}`: `Could not refresh token`")
+            continue
+
+        balance = get_wallet_balance(access_token, character.id)
+        if balance is not None:
+            message_lines.append(f"• `{character.name}`: `{balance:,.2f} ISK`")
+            total_balance += balance
+        else:
+            message_lines.append(f"• `{character.name}`: `Error fetching balance`")
+
+    if len(CHARACTERS) > 1:
+        message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
+
+    await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manually triggers the daily summary report."""
+    logging.info(f"Received /summary command from user {update.effective_user.name}")
+    await update.message.reply_text("Manual summary requested. Generating report, please wait...")
+    # This might take a few seconds, so it's good to give user feedback.
+    await run_daily_summary(context)
+
+async def _show_character_selection(update: Update, action: str) -> None:
+    """Displays an inline keyboard for character selection for a given action (sales/buys)."""
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot perform this action.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(character.name, callback_data=f"{action}:{character.id}")]
+        for character in CHARACTERS
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(f"Please select a character to view recent {action}:", reply_markup=reply_markup)
+
+
+async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays a character selection menu for viewing recent sales."""
+    logging.info(f"Received /sales command from user {update.effective_user.name}")
+    await _show_character_selection(update, "sales")
+
+
+async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays a character selection menu for viewing recent buys."""
+    logging.info(f"Received /buys command from user {update.effective_user.name}")
+    await _show_character_selection(update, "buys")
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles button clicks for character selection."""
+    query = update.callback_query
+    await query.answer()  # Acknowledge the button press
+
+    try:
+        action, character_id_str = query.data.split(':')
+        character_id = int(character_id_str)
+    except (ValueError, IndexError):
+        await query.edit_message_text(text="Invalid callback data. Please try the command again.")
+        return
+
+    character = next((c for c in CHARACTERS if c.id == character_id), None)
+    if not character:
+        await query.edit_message_text(text="Could not find the selected character. Please try again.")
+        return
+
+    await query.edit_message_text(text=f"Fetching recent {action} for {character.name}, please wait...")
+
+    access_token = get_access_token(character.refresh_token)
+    if not access_token:
+        await query.edit_message_text(text=f"Could not refresh token for {character.name}.")
+        return
+
+    all_transactions = get_wallet_transactions(access_token, character.id)
+    if not all_transactions:
+        await query.edit_message_text(text=f"No transaction history found for {character.name}.")
+        return
+
+    is_buy = True if action == 'buys' else False
+    filtered_tx = sorted(
+        [tx for tx in all_transactions if tx.get('is_buy') == is_buy],
+        key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+        reverse=True
+    )[:5]
+
+    if not filtered_tx:
+        await query.edit_message_text(text=f"No recent {action} found for {character.name}.")
+        return
+
+    item_ids = [tx['type_id'] for tx in filtered_tx]
+    id_to_name = get_names_from_ids(item_ids)
+
+    action_verb = "Bought" if is_buy else "Sold"
+    message_lines = [f"✅ *Last 5 {action.capitalize()} for {character.name}* ✅\n"]
+    for tx in filtered_tx:
+        item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+        message_lines.append(
+            f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
+        )
+
+    await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
+
+async def post_init(application: Application):
+    """Sets the bot's commands in the Telegram menu after initialization."""
+    commands = [
+        BotCommand("balance", "Check wallet balances for all characters."),
+        BotCommand("summary", "Manually trigger the daily summary report."),
+        BotCommand("sales", "View recent sales for a character."),
+        BotCommand("buys", "View recent buys for a character."),
+    ]
+    await application.bot.set_my_commands(commands)
+    logging.info("Bot commands have been set in the Telegram menu.")
+
+def main() -> None:
+    """Run the bot."""
     logging.info("Bot starting up...")
 
-    # Create database tables if they don't exist
     setup_database()
-
-    # Load characters from config
     load_characters()
     if not CHARACTERS:
-        logging.error("No characters were loaded. Bot cannot continue. Please check your config.py and run get_refresh_token.py.")
-        exit()
+        logging.error("No characters were loaded. Bot cannot continue.")
+        return
 
-    # --- Set up schedules based on config ---
-    if config.ENABLE_SALES_NOTIFICATIONS.lower() == 'true' or config.ENABLE_BUY_NOTIFICATIONS.lower() == 'true':
+    application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+
+    # --- Add command handlers ---
+    application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("summary", summary_command))
+    application.add_handler(CommandHandler("sales", sales_command))
+    application.add_handler(CommandHandler("buys", buys_command))
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
+
+    # --- Schedule Jobs ---
+    job_queue = application.job_queue
+    if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' or \
+       getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
         initialize_market_orders()
-        logging.info("Performing initial check for market activity...")
-        asyncio.run(check_market_activity())
-        schedule.every(60).seconds.do(lambda: asyncio.run(check_market_activity()))
-        logging.info(f"Market activity notifications ENABLED (Sales: {config.ENABLE_SALES_NOTIFICATIONS}, Buys: {config.ENABLE_BUY_NOTIFICATIONS}). Checking every 60 seconds.")
+        job_queue.run_once(check_market_activity, 5)
+        job_queue.run_repeating(check_market_activity, interval=60, first=60)
+        logging.info("Market activity notifications ENABLED. Checking every 60 seconds.")
     else:
         logging.info("Market activity notifications DISABLED by config.")
 
-    if config.ENABLE_DAILY_SUMMARY.lower() == 'true':
+    if getattr(config, 'ENABLE_DAILY_SUMMARY', 'false').lower() == 'true':
         initialize_journal_history()
-        schedule.every().day.at(config.DAILY_SUMMARY_TIME).do(lambda: asyncio.run(run_daily_summary()))
-        logging.info(f"Daily summary ENABLED: scheduled for {config.DAILY_SUMMARY_TIME} UTC.")
+        try:
+            summary_time_str = getattr(config, 'DAILY_SUMMARY_TIME', '12:00')
+            time_parts = summary_time_str.split(':')
+            summary_time = dt_time(hour=int(time_parts[0]), minute=int(time_parts[1]), tzinfo=timezone.utc)
+            job_queue.run_daily(run_daily_summary, time=summary_time)
+            logging.info(f"Daily summary ENABLED: scheduled for {summary_time_str} UTC.")
+        except (ValueError, TypeError) as e:
+            logging.error(f"Could not schedule daily summary. Invalid DAILY_SUMMARY_TIME: {e}")
     else:
         logging.info("Daily summary DISABLED by config.")
 
-    if not schedule.jobs:
-        logging.info("No features enabled. Bot will now exit.")
-    else:
-        logging.info("Entering main loop to run scheduler...")
-        while True:
-            schedule.run_pending()
-            idle_seconds = schedule.idle_seconds()
-            if idle_seconds is not None and idle_seconds > 1:
-                logging.info(f"Next check in {int(idle_seconds)} seconds. Waiting...")
-                time.sleep(idle_seconds)
-            else:
-                time.sleep(1)
+    if not job_queue.jobs():
+         logging.info("No features enabled. Bot will run without scheduled jobs.")
+
+    logging.info("Bot is running. Polling for updates...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
