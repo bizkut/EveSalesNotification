@@ -13,7 +13,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 import config
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log_level_str = getattr(config, 'LOG_LEVEL', 'INFO').upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Character Dataclass and Global List ---
 
@@ -294,7 +296,7 @@ def add_purchase_lot(character_id, type_id, quantity, price, purchase_date=None)
     )
     conn.commit()
     conn.close()
-    logging.info(f"Recorded purchase for char {character_id}: {quantity} of type {type_id} at {price:,.2f} ISK each on {purchase_date}.")
+    logging.debug(f"Recorded purchase for char {character_id}: {quantity} of type {type_id} at {price:,.2f} ISK each on {purchase_date}.")
 
 
 def get_purchase_lots(character_id, type_id):
@@ -518,11 +520,11 @@ def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
             # Lot partially consumed
             new_quantity = lot['quantity'] - quantity_from_lot
             update_purchase_lot_quantity(lot['lot_id'], new_quantity)
-            logging.info(f"Partially consumed lot {lot['lot_id']}. New quantity: {new_quantity}")
+            logging.debug(f"Partially consumed lot {lot['lot_id']}. New quantity: {new_quantity}")
         else:
             # Lot fully consumed
             delete_purchase_lot(lot['lot_id'])
-            logging.info(f"Fully consumed and deleted lot {lot['lot_id']}.")
+            logging.debug(f"Fully consumed and deleted lot {lot['lot_id']}.")
 
     if remaining_to_sell > 0:
         # This can happen if the user sells items they acquired before the bot started tracking
@@ -536,7 +538,7 @@ def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
 
 async def check_market_activity_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
     """Checks for market activity for a single character."""
-    logging.info(f"Checking market activity for {character.name}...")
+    logging.debug(f"Checking market activity for {character.name}...")
     access_token = get_access_token(character.refresh_token)
     if not access_token:
         logging.error(f"Could not get access token for {character.name}. Skipping.")
@@ -590,7 +592,7 @@ async def check_market_activity_for_character(character: Character, context: Con
                 })
 
     if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' and sales_detected:
-        logging.info(f"Detected {len(sales_detected)} groups of filled sell orders for {character.name}...")
+        logging.debug(f"Detected {len(sales_detected)} groups of filled sell orders for {character.name}...")
         item_ids = list(sales_detected.keys())
         loc_ids = [sale['location_id'] for sales in sales_detected.values() for sale in sales]
         id_to_name = get_names_from_ids(item_ids + loc_ids + [config.REGION_ID])
@@ -628,7 +630,7 @@ async def check_market_activity_for_character(character: Character, context: Con
             await asyncio.sleep(1)
 
     if getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true' and buys_detected:
-        logging.info(f"Detected {len(buys_detected)} groups of filled buy orders for {character.name}...")
+        logging.debug(f"Detected {len(buys_detected)} groups of filled buy orders for {character.name}...")
         item_ids = list(buys_detected.keys())
         loc_ids = [buy['location_id'] for buys in buys_detected.values() for buy in buys]
         id_to_name = get_names_from_ids(item_ids + loc_ids)
@@ -657,13 +659,13 @@ async def check_market_activity_for_character(character: Character, context: Con
     stale_order_ids = set(tracked_orders.keys()) - live_order_ids
     if stale_order_ids:
         remove_tracked_market_orders(character.id, list(stale_order_ids))
-    logging.info(f"Finished processing market activity for {character.name}.")
+    logging.debug(f"Finished processing market activity for {character.name}.")
 
 async def check_market_activity(context: ContextTypes.DEFAULT_TYPE):
     """Wrapper function to check market activity for all configured characters."""
-    logging.info("Starting market activity check for all characters...")
+    logging.debug("Starting market activity check for all characters...")
     await asyncio.gather(*(check_market_activity_for_character(c, context) for c in CHARACTERS))
-    logging.info("Completed market activity check for all characters.")
+    logging.debug("Completed market activity check for all characters.")
 
 def calculate_fifo_profit_for_summary(sales_transactions, character_id):
     """

@@ -63,6 +63,7 @@ Follow these steps to get your bot up and running.
 2.  Open `config.py` with a text editor and fill in the following details:
     -   `ESI_CLIENT_ID` & `ESI_SECRET_KEY`: From your EVE application.
     -   `TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHANNEL_ID`: From your Telegram bot setup.
+-   `LOG_LEVEL`: The desired logging verbosity. Can be `'DEBUG'`, `'INFO'`, `'WARNING'`, or `'ERROR'`. Defaults to `'INFO'`.
     -   `DAILY_SUMMARY_TIME`: The "HH:MM" UTC time for the daily report.
     -   `REGION_ID`: The region ID for your main trade hub (e.g., `10000002` for The Forge/Jita).
     -   `WALLET_BALANCE_THRESHOLD`: The ISK amount for the low-balance alert (set to `0` to disable).
