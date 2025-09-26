@@ -573,12 +573,16 @@ def get_market_history(type_id, region_id):
 
 def get_names_from_ids(id_list):
     if not id_list: return {}
-    unique_ids = list(set(id_list))
+    # Filter for valid, positive integer IDs and remove duplicates
+    valid_ids = list(set(id for id in id_list if isinstance(id, int) and id > 0))
+    if not valid_ids:
+        return {}
+
     url = "https://esi.evetech.net/v3/universe/names/"
     id_to_name_map = {}
     # Break the list into chunks of 1000, the ESI limit
-    for i in range(0, len(unique_ids), 1000):
-        chunk = unique_ids[i:i+1000]
+    for i in range(0, len(valid_ids), 1000):
+        chunk = valid_ids[i:i+1000]
         # Note: POST requests to /names/ are publicly cached and don't need auth
         name_data = make_esi_request(url, data=chunk)
         if name_data:
