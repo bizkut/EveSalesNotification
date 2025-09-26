@@ -66,12 +66,10 @@ def load_characters():
 
 # --- Database Functions ---
 
-DATA_DIR = "data"
-DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
+DB_FILE = "bot_data.db"
 
 def db_connection():
     """Creates a database connection."""
-    os.makedirs(DATA_DIR, exist_ok=True)
     return sqlite3.connect(DB_FILE)
 
 def setup_database():
