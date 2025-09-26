@@ -269,26 +269,6 @@ async def send_telegram_message(message):
 
 # --- Main Application Logic ---
 
-def calculate_fee_rates(skills_data):
-    """Calculates broker and sales tax rates based on character skills."""
-    base_broker_fee = 0.05  # 5%
-    base_sales_tax = 0.02   # 2%
-
-    broker_relations_level = 0
-    accounting_level = 0
-
-    if skills_data and 'skills' in skills_data:
-        for skill in skills_data['skills']:
-            if skill.get('skill_id') == 3446:  # Broker Relations
-                broker_relations_level = skill.get('active_skill_level', 0)
-            elif skill.get('skill_id') == 16622:  # Accounting
-                accounting_level = skill.get('active_skill_level', 0)
-
-    broker_fee_rate = base_broker_fee * (1 - (broker_relations_level * 0.05))
-    sales_tax_rate = base_sales_tax * (1 - (accounting_level * 0.1))
-
-    return broker_fee_rate, sales_tax_rate
-
 async def check_for_new_orders():
     """Checks for filled market orders and sends notifications."""
     logging.info("Checking for filled market orders...")
@@ -337,12 +317,9 @@ async def check_for_new_orders():
 
     logging.info(f"Detected {len(sales_detected)} groups of filled orders. Preparing notifications...")
 
-    # --- Fetch Names and Fee Rates ---
+    # --- Fetch Names ---
     item_ids_to_fetch = list(sales_detected.keys())
     id_to_name = get_names_from_ids(item_ids_to_fetch)
-
-    skills_data = get_character_skills(access_token, character_id)
-    broker_fee, sales_tax = calculate_fee_rates(skills_data)
 
     # --- Send Notifications ---
     for type_id, data in sales_detected.items():
@@ -354,10 +331,7 @@ async def check_for_new_orders():
             f"✅ *Market Sale!* ✅\n\n"
             f"**Item:** `{item_name}` (`{type_id}`)\n"
             f"**Quantity Sold:** `{quantity_sold}`\n"
-            f"**Total Value:** `{total_value:,.2f} ISK`\n\n"
-            f"**Current Rates:**\n"
-            f"  - Broker's Fee: `{broker_fee:.2%}`\n"
-            f"  - Sales Tax: `{sales_tax:.2%}`"
+            f"**Total Value:** `{total_value:,.2f} ISK`"
         )
 
         await send_telegram_message(message)
@@ -428,16 +402,12 @@ async def run_daily_summary():
     # --- Fetch all necessary data ---
     all_transactions = get_wallet_transactions(access_token, character_id)
     journal_entries = get_wallet_journal(access_token, character_id)
-    skills_data = get_character_skills(access_token, character_id)
     processed_journal_entries = get_processed_journal_entries()
 
     new_journal_entries = [e for e in journal_entries if e['id'] not in processed_journal_entries]
 
     if not new_journal_entries and not any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions):
         logging.info("No new journal or transaction entries for daily summary."); return
-
-    # --- Calculate Fee Rates ---
-    broker_fee, sales_tax = calculate_fee_rates(skills_data)
 
     # --- Define time windows ---
     now = datetime.now(timezone.utc)
@@ -466,9 +436,6 @@ async def run_daily_summary():
     # --- Format and Send Message ---
     message = (
         f"📊 *Daily Market Summary* ({now.strftime('%Y-%m-%d')})\n\n"
-        f"**Current Rates:**\n"
-        f"  - Broker's Fee: `{broker_fee:.2%}`\n"
-        f"  - Sales Tax: `{sales_tax:.2%}`\n\n"
         f"**Past 24 Hours:**\n"
         f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{(total_brokers_fees_24h + total_transaction_tax_24h):,.2f} ISK`\n"

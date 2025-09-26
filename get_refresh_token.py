@@ -29,7 +29,6 @@ def main():
         "esi-wallet.read_character_wallet.v1",
         "esi-wallet.read_character_journal.v1",
         "esi-markets.read_character_orders.v1",
-        "esi-skills.read_skills.v1",
     ]
     scopes_string = " ".join(scopes)
     callback_url = "https://localhost/callback"
