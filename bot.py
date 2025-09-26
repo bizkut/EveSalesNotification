@@ -541,8 +541,9 @@ def get_market_history(type_id, region_id):
 
 def get_names_from_ids(id_list):
     if not id_list: return {}
-    # Filter for valid, positive integer IDs and remove duplicates
-    valid_ids = list(set(id for id in id_list if isinstance(id, int) and id > 0))
+    # Filter for valid, positive integer IDs and remove duplicates.
+    # Also exclude IDs > 10^10, which are typically player-owned structures and not resolvable by this endpoint.
+    valid_ids = list(set(id for id in id_list if isinstance(id, int) and 0 < id < 10000000000))
     if not valid_ids:
         return {}
 
