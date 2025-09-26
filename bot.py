@@ -418,13 +418,18 @@ def get_names_from_ids(id_list):
 
 # --- Telegram Bot Functions ---
 
-async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str):
-    """Sends a message to the configured Telegram channel."""
+async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str, chat_id: int = None):
+    """Sends a message. If chat_id is provided, sends to that chat. Otherwise, defaults to the configured channel."""
+    target_chat_id = chat_id if chat_id is not None else config.TELEGRAM_CHANNEL_ID
+    if not target_chat_id:
+        logging.error("No chat_id provided and no default TELEGRAM_CHANNEL_ID configured. Cannot send message.")
+        return
+
     try:
-        await context.bot.send_message(chat_id=config.TELEGRAM_CHANNEL_ID, text=message, parse_mode='Markdown')
-        logging.info("Sent message to Telegram channel.")
+        await context.bot.send_message(chat_id=target_chat_id, text=message, parse_mode='Markdown')
+        logging.info(f"Sent message to chat_id: {target_chat_id}.")
     except Exception as e:
-        logging.error(f"Error sending Telegram message: {e}")
+        logging.error(f"Error sending Telegram message to {target_chat_id}: {e}")
 
 # --- Main Application Logic ---
 
@@ -558,7 +563,7 @@ def calculate_estimated_profit(sales_today, all_buy_transactions):
     )
     return total_sales_value - total_estimated_cogs
 
-async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
+async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
     """Calculates and prepares the daily summary data for a single character using optimized methods."""
     logging.info(f"Calculating daily summary for {character.name}...")
     access_token = get_access_token(character.refresh_token)
@@ -629,7 +634,7 @@ async def run_daily_summary_for_character(character: Character, context: Context
         f"  - *Gross Revenue (Sales - Fees):* `{gross_revenue_month:,.2f} ISK`\n\n"
         f"_Profit is estimated based on the average purchase price of items over the last 30 days._"
     )
-    await send_telegram_message(context, message)
+    await send_telegram_message(context, message, chat_id=chat_id)
 
     # --- Persist new state ---
     update_monthly_summary(character.id, now.year, now.month, total_sales_month, total_fees_month)
@@ -644,13 +649,13 @@ async def run_daily_summary_for_character(character: Character, context: Context
         "gross_revenue_month": gross_revenue_month
     }
 
-async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE):
+async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
     """Wrapper to run the daily summary for all characters and send a combined report."""
     logging.info("Starting daily summary run for all characters...")
     all_character_stats = []
     for character in CHARACTERS:
         # The character-specific function now handles its own data fetching
-        char_stats = await run_daily_summary_for_character(character, context)
+        char_stats = await run_daily_summary_for_character(character, context, chat_id=chat_id)
         if char_stats:
             all_character_stats.append(char_stats)
         await asyncio.sleep(1) # Be nice to ESI, even though sub-functions have waits
@@ -679,7 +684,7 @@ async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE):
             f"  - Total Fees (Broker + Tax): `{combined_fees_month:,.2f} ISK`\n"
             f"  - **Total Gross Revenue:** `{combined_revenue_month:,.2f} ISK`"
         )
-        await send_telegram_message(context, message)
+        await send_telegram_message(context, message, chat_id=chat_id)
         logging.info("Combined daily summary sent.")
     logging.info("Daily summary run completed for all characters.")
 
@@ -782,11 +787,13 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually triggers the daily summary report."""
-    logging.info(f"Received /summary command from user {update.effective_user.name}")
+    """Manually triggers the daily summary report and sends it to the requesting chat."""
+    chat_id = update.effective_chat.id
+    user_name = update.effective_user.name
+    logging.info(f"Received /summary command from user {user_name} in chat {chat_id}")
     await update.message.reply_text("Manual summary requested. Generating report, please wait...")
     # This might take a few seconds, so it's good to give user feedback.
-    await run_daily_summary(context)
+    await run_daily_summary(context, chat_id=chat_id)
 
 async def _show_character_selection(update: Update, action: str) -> None:
     """Displays an inline keyboard for character selection for a given action (sales/buys)."""
