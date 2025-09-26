@@ -1016,33 +1016,41 @@ def initialize_journal_history():
         logging.info(f"Seeded {len(historical_ids)} historical journal entries for {character.name}.")
 
 
-def initialize_purchase_history():
-    """On first run, seeds the database with historical buy transactions to enable profit tracking."""
-    logging.info("Checking for unseeded characters for purchase history...")
+def initialize_transaction_history():
+    """
+    On first run for each character, seeds the database with historical transactions.
+    This prevents notifications for transactions that occurred before the bot was started.
+    It also seeds buy orders to enable profit tracking on future sales.
+    """
+    logging.info("Checking for unseeded characters for transaction history...")
     for character in CHARACTERS:
-        state_key = f"purchase_history_seeded_{character.id}"
+        state_key = f"transaction_history_seeded_{character.id}"
         if get_bot_state(state_key) == 'true':
-            logging.info(f"Purchase history already seeded for {character.name}. Skipping.")
+            logging.info(f"Transaction history already seeded for {character.name}. Skipping.")
             continue
 
-        logging.info(f"Seeding purchase history for {character.name}...")
+        logging.info(f"Seeding transaction history for {character.name}...")
         all_transactions = get_wallet_transactions(character)
         if not all_transactions:
             logging.info(f"No historical transactions found for {character.name}.")
             set_bot_state(state_key, 'true')
             continue
 
-        buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-        if not buy_transactions:
-            logging.info(f"No historical buy transactions found for {character.name}.")
-            set_bot_state(state_key, 'true')
-            continue
+        # Mark all historical transactions as processed to prevent notifications
+        historical_tx_ids = [tx['transaction_id'] for tx in all_transactions]
+        add_processed_transactions(character.id, historical_tx_ids)
+        logging.info(f"Seeded {len(historical_tx_ids)} historical transaction IDs for {character.name} to prevent old notifications.")
 
-        for tx in buy_transactions:
-            add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+        # Seed historical buy transactions for profit tracking
+        buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
+        if buy_transactions:
+            for tx in buy_transactions:
+                add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+            logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for profit tracking for {character.name}.")
+        else:
+            logging.info(f"No historical buy transactions to seed for profit tracking for {character.name}.")
 
         set_bot_state(state_key, 'true')
-        logging.info(f"Successfully seeded {len(buy_transactions)} historical buy transactions for {character.name}.")
 
 
 def initialize_order_history():
@@ -1286,7 +1294,7 @@ def main() -> None:
     job_queue = application.job_queue
     if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' or \
        getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
-        initialize_purchase_history()
+        initialize_transaction_history()
         initialize_order_history()
         for character in CHARACTERS:
             # Start the self-scheduling jobs for each character
