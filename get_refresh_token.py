@@ -3,24 +3,55 @@ import base64
 import webbrowser
 import secrets
 import string
+import os
+import re
 
 try:
+    # We only import these to check if they are set, not to use them directly.
     from config import ESI_CLIENT_ID, ESI_SECRET_KEY
 except ImportError:
-    print("Error: config.py not found.")
-    print("Please copy config.py.example to config.py and fill in your ESI_CLIENT_ID and ESI_SECRET_KEY.")
-    exit()
+    if not os.path.exists("config.py"):
+        print("Error: config.py not found.")
+        print("Please copy config.py.example to config.py and fill in your ESI_CLIENT_ID and ESI_SECRET_KEY.")
+        exit()
+    # If config.py exists but the import fails, it's likely a user error we can ignore for now.
+    ESI_CLIENT_ID = None
+    ESI_SECRET_KEY = None
 
 def generate_state_token(length=16):
     """Generates a secure random string for the state parameter."""
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for i in range(length))
 
+def get_next_token_number():
+    """Finds the next available number for ESI_REFRESH_TOKEN_X in config.py."""
+    if not os.path.exists("config.py"):
+        return 1
+
+    try:
+        with open("config.py", "r") as f:
+            content = f.read()
+
+        # Find all numbers from variables like ESI_REFRESH_TOKEN_1, ESI_REFRESH_TOKEN_2, etc.
+        token_numbers = re.findall(r"^\s*ESI_REFRESH_TOKEN_(\d+)\s*=", content, re.MULTILINE)
+
+        if not token_numbers:
+            return 1
+
+        return max(int(n) for n in token_numbers) + 1
+    except Exception as e:
+        print(f"Warning: Could not read config.py to determine next token number: {e}")
+        # Default to 1, user can manually change it.
+        return 1
+
 def main():
     """
     Guides the user through the ESI OAuth2 flow to get a refresh token.
     """
-    if not ESI_CLIENT_ID or ESI_CLIENT_ID == "your_client_id_here":
+    # Since we might not have imported them, we need to get them from the config module dynamically
+    import config
+
+    if not hasattr(config, 'ESI_CLIENT_ID') or config.ESI_CLIENT_ID == "your_client_id_here":
         print("Error: ESI_CLIENT_ID is not set in config.py.")
         print("Please add your application's Client ID to config.py.")
         return
@@ -29,6 +60,7 @@ def main():
         "esi-wallet.read_character_wallet.v1",
         "esi-markets.read_character_orders.v1",
         "esi-universe.read_structures.v1",
+        "esi-characters.read_notifications.v1" # Required for character name resolution
     ]
     scopes_string = " ".join(scopes)
     callback_url = "https://localhost/callback"
@@ -39,7 +71,7 @@ def main():
         f"https://login.eveonline.com/v2/oauth/authorize/?"
         f"response_type=code&"
         f"redirect_uri={callback_url}&"
-        f"client_id={ESI_CLIENT_ID}&"
+        f"client_id={config.ESI_CLIENT_ID}&"
         f"scope={scopes_string}&"
         f"state={state}"
     )
@@ -78,7 +110,7 @@ def main():
     # 4. Exchange the authorization code for a refresh token
     print("\n4. Exchanging authorization code for a refresh token...")
 
-    auth_header = base64.b64encode(f"{ESI_CLIENT_ID}:{ESI_SECRET_KEY}".encode()).decode()
+    auth_header = base64.b64encode(f"{config.ESI_CLIENT_ID}:{config.ESI_SECRET_KEY}".encode()).decode()
     headers = {
         "Authorization": f"Basic {auth_header}",
         "Content-Type": "application/x-www-form-urlencoded",
@@ -96,10 +128,13 @@ def main():
         refresh_token = token_data.get("refresh_token")
 
         if refresh_token:
+            token_number = get_next_token_number()
             print("\n--- SUCCESS! ---")
             print("Your refresh token has been generated.")
-            print("Copy the following line and paste it into your config.py file:\n")
-            print(f'ESI_REFRESH_TOKEN = "{refresh_token}"\n')
+            if token_number > 1:
+                print(f"This appears to be for character number {token_number}. If this is wrong, you can manually change the number.")
+            print("\nCopy the following line and paste it into your config.py file:\n")
+            print(f'ESI_REFRESH_TOKEN_{token_number} = "{refresh_token}"\n')
         else:
             print("\nError: Could not retrieve refresh token from the response.")
             print("Response:", token_data)
