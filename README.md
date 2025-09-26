@@ -15,6 +15,7 @@ This is a comprehensive Telegram bot designed to provide EVE Online players with
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed financial report, including:
   - **24-Hour Stats**: Total sales value, total fees (broker's + tax), and an estimated profit.
   - **Monthly Stats**: A summary for the current calendar month, including total sales value, total fees, and gross revenue.
+- **Multi-Character Support**: Monitor and receive notifications for multiple EVE characters from a single instance of the bot.
 - **Accurate Fee & Profit Reporting**:
   - The daily summary uses your wallet journal to provide **100% accurate** fee totals.
   - Profit is estimated by comparing sales revenue against the 30-day average purchase price of the items sold.
@@ -65,19 +66,23 @@ Follow these steps to get your bot up and running.
     -   `WALLET_BALANCE_THRESHOLD`: The ISK amount for the low-balance alert (set to `0` to disable).
     -   `ENABLE_SALES_NOTIFICATIONS`, `ENABLE_BUY_NOTIFICATIONS`, `ENABLE_DAILY_SUMMARY`: Set to `"true"` or `"false"`.
 
-### Step 3: Generate Your ESI Refresh Token
+### Step 3: Generate Your ESI Refresh Token(s)
 
-This script will guide you through the EVE Online authentication process to grant the bot access to your character's data. **If you are upgrading, you must run this again to grant the new permissions.**
+This script guides you through the EVE Online authentication process to grant the bot access to your character's data.
 
 1.  Run the token generation script:
     ```bash
     python get_refresh_token.py
     ```
 2.  The script will print a long URL. **Copy this entire URL.**
-3.  Paste the URL into your local web browser and authorize the application.
-4.  You will be redirected to a `localhost` page. Copy the **full URL** from your browser's address bar.
-5.  Paste the full callback URL back into the script prompt and press Enter.
-6.  The script will generate your `ESI_REFRESH_TOKEN`. Copy the entire line and paste it into your `config.py` file.
+3.  Paste the URL into your local web browser. **Important**: Make sure you are logged into the correct EVE Online account for the character you wish to add.
+4.  Authorize the application. You will be redirected to a `localhost` page that likely won't load.
+5.  Copy the **full URL** from your browser's address bar.
+6.  Paste the full callback URL back into the script prompt and press Enter.
+7.  The script will provide you with a line to add to your `config.py`. It will look like `ESI_REFRESH_TOKEN_X = "..."`.
+8.  Add this line to your `config.py` file.
+
+**To add multiple characters, simply run the `python get_refresh_token.py` script again for each character.** The script will tell you the correct number to use for the variable name (e.g., `ESI_REFRESH_TOKEN_2`, `ESI_REFRESH_TOKEN_3`, etc.).
 
 ### Step 4: Run the Bot
 

@@ -7,10 +7,62 @@ import os
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-from config import ESI_CLIENT_ID, ESI_SECRET_KEY, ESI_REFRESH_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID
+from dataclasses import dataclass
+import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Character Dataclass and Global List ---
+
+@dataclass
+class Character:
+    """Represents a single EVE Online character."""
+    id: int
+    name: str
+    refresh_token: str
+
+CHARACTERS: list[Character] = []
+
+
+def load_characters():
+    """Loads all character refresh tokens from the config file and populates the CHARACTERS list."""
+    global CHARACTERS
+
+    refresh_tokens = []
+    for attr in dir(config):
+        if attr.startswith("ESI_REFRESH_TOKEN_"):
+            refresh_tokens.append(getattr(config, attr))
+
+    if not refresh_tokens:
+        logging.error("No ESI_REFRESH_TOKEN_X variables found in config.py. Bot cannot run.")
+        return
+
+    logging.info(f"Found {len(refresh_tokens)} refresh tokens. Verifying and loading character details...")
+
+    for token in refresh_tokens:
+        access_token = get_access_token(token)
+        if not access_token:
+            logging.error(f"Failed to get access token for a refresh token. Skipping.")
+            continue
+
+        char_id, char_name = get_character_details_from_token(access_token)
+        if not char_id or not char_name:
+            logging.error(f"Failed to get character details for a refresh token. Skipping.")
+            continue
+
+        # Check for duplicates
+        if any(c.id == char_id for c in CHARACTERS):
+            logging.warning(f"Character '{char_name}' ({char_id}) is already loaded. Skipping duplicate.")
+            continue
+
+        character = Character(id=char_id, name=char_name, refresh_token=token)
+        CHARACTERS.append(character)
+        logging.info(f"Successfully loaded character: {character.name} ({character.id})")
+
+    if not CHARACTERS:
+        logging.error("Could not load any characters successfully. Please check your refresh tokens in config.py.")
+
 
 # --- Database Functions ---
 
@@ -27,25 +79,34 @@ def setup_database():
     conn = db_connection()
     cursor = conn.cursor()
     # Table for tracking individual transaction notifications
+    # A composite primary key is used because transaction_id is only unique per character.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_transactions (
-            transaction_id INTEGER PRIMARY KEY
+            transaction_id INTEGER NOT NULL,
+            character_id INTEGER NOT NULL,
+            PRIMARY KEY (transaction_id, character_id)
         )
     """)
     # Table for tracking journal entries for the daily summary
+    # A composite primary key is used because entry_id is only unique per character.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_journal_entries (
-            entry_id INTEGER PRIMARY KEY
+            entry_id INTEGER NOT NULL,
+            character_id INTEGER NOT NULL,
+            PRIMARY KEY (entry_id, character_id)
         )
     """)
     # Table for tracking the state of active market orders
+    # A composite primary key is used because order_id is only unique per character.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS market_orders (
-            order_id INTEGER PRIMARY KEY,
-            volume_remain INTEGER NOT NULL
+            order_id INTEGER NOT NULL,
+            character_id INTEGER NOT NULL,
+            volume_remain INTEGER NOT NULL,
+            PRIMARY KEY (order_id, character_id)
         )
     """)
-    # Key-value store for various bot states
+    # Key-value store for various bot states (e.g., last low-balance alert time per character)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS bot_state (
             key TEXT PRIMARY KEY,
@@ -68,83 +129,87 @@ def set_bot_state(key, value):
     """Sets a value in the bot_state key-value store."""
     conn = db_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)", (key, value))
+    cursor.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
 
-def get_tracked_market_orders():
-    """Retrieves all tracked market orders from the database."""
+def get_tracked_market_orders(character_id):
+    """Retrieves all tracked market orders for a specific character."""
     conn = db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT order_id, volume_remain FROM market_orders")
+    cursor.execute("SELECT order_id, volume_remain FROM market_orders WHERE character_id = ?", (character_id,))
     return {row[0]: row[1] for row in cursor.fetchall()}
 
-def update_tracked_market_orders(orders):
-    """Inserts or updates a list of market orders in the database."""
+def update_tracked_market_orders(character_id, orders):
+    """Inserts or updates a list of market orders for a character in the database."""
     if not orders:
         return
     conn = db_connection()
     cursor = conn.cursor()
+    orders_with_char_id = [(o[0], character_id, o[1]) for o in orders]
     cursor.executemany(
-        "INSERT OR REPLACE INTO market_orders (order_id, volume_remain) VALUES (?, ?)",
-        orders
+        "INSERT OR REPLACE INTO market_orders (order_id, character_id, volume_remain) VALUES (?, ?, ?)",
+        orders_with_char_id
     )
     conn.commit()
     conn.close()
 
-def remove_tracked_market_orders(order_ids):
-    """Removes a list of market orders from the database."""
+def remove_tracked_market_orders(character_id, order_ids):
+    """Removes a list of market orders for a character from the database."""
     if not order_ids:
         return
     conn = db_connection()
     cursor = conn.cursor()
+    orders_to_delete = [(order_id, character_id) for order_id in order_ids]
     cursor.executemany(
-        "DELETE FROM market_orders WHERE order_id = ?",
-        [(order_id,) for order_id in order_ids]
+        "DELETE FROM market_orders WHERE order_id = ? AND character_id = ?",
+        orders_to_delete
     )
     conn.commit()
     conn.close()
 
-def get_processed_transactions():
-    """Retrieves all processed transaction IDs from the database."""
+def get_processed_transactions(character_id):
+    """Retrieves all processed transaction IDs for a character from the database."""
     conn = db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT transaction_id FROM processed_transactions")
+    cursor.execute("SELECT transaction_id FROM processed_transactions WHERE character_id = ?", (character_id,))
     processed_ids = {row[0] for row in cursor.fetchall()}
     conn.close()
     return processed_ids
 
-def add_processed_transactions(transaction_ids):
-    """Adds a list of transaction IDs to the database."""
+def add_processed_transactions(character_id, transaction_ids):
+    """Adds a list of transaction IDs for a character to the database."""
     if not transaction_ids:
         return
     conn = db_connection()
     cursor = conn.cursor()
+    data_to_insert = [(tx_id, character_id) for tx_id in transaction_ids]
     cursor.executemany(
-        "INSERT OR IGNORE INTO processed_transactions (transaction_id) VALUES (?)",
-        [(tx_id,) for tx_id in transaction_ids]
+        "INSERT OR IGNORE INTO processed_transactions (transaction_id, character_id) VALUES (?, ?)",
+        data_to_insert
     )
     conn.commit()
     conn.close()
 
-def get_processed_journal_entries():
-    """Retrieves all processed journal entry IDs from the database."""
+def get_processed_journal_entries(character_id):
+    """Retrieves all processed journal entry IDs for a character from the database."""
     conn = db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT entry_id FROM processed_journal_entries")
+    cursor.execute("SELECT entry_id FROM processed_journal_entries WHERE character_id = ?", (character_id,))
     processed_ids = {row[0] for row in cursor.fetchall()}
     conn.close()
     return processed_ids
 
-def add_processed_journal_entries(entry_ids):
-    """Adds a list of journal entry IDs to the database."""
+def add_processed_journal_entries(character_id, entry_ids):
+    """Adds a list of journal entry IDs for a character to the database."""
     if not entry_ids:
         return
     conn = db_connection()
     cursor = conn.cursor()
+    data_to_insert = [(entry_id, character_id) for entry_id in entry_ids]
     cursor.executemany(
-        "INSERT OR IGNORE INTO processed_journal_entries (entry_id) VALUES (?)",
-        [(entry_id,) for entry_id in entry_ids]
+        "INSERT OR IGNORE INTO processed_journal_entries (entry_id, character_id) VALUES (?, ?)",
+        data_to_insert
     )
     conn.commit()
     conn.close()
@@ -186,15 +251,15 @@ def get_wallet_journal(access_token, character_id):
 
     return journal_entries
 
-def get_access_token():
-    """Refreshes the ESI access token."""
+def get_access_token(refresh_token):
+    """Refreshes the ESI access token for a given refresh token."""
     url = "https://login.eveonline.com/v2/oauth/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Host": "login.eveonline.com"}
     data = {
         "grant_type": "refresh_token",
-        "refresh_token": ESI_REFRESH_TOKEN,
-        "client_id": ESI_CLIENT_ID,
-        "client_secret": ESI_SECRET_KEY
+        "refresh_token": refresh_token,
+        "client_id": config.ESI_CLIENT_ID,
+        "client_secret": config.ESI_SECRET_KEY
     }
     try:
         response = requests.post(url, headers=headers, data=data)
@@ -204,17 +269,18 @@ def get_access_token():
         logging.error(f"Error refreshing access token: {e}")
         return None
 
-def get_character_id(access_token):
-    """Gets the character ID from the access token."""
+def get_character_details_from_token(access_token):
+    """Gets the character ID and name from the access token."""
     url = "https://login.eveonline.com/oauth/verify"
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        return response.json().get("CharacterID")
+        data = response.json()
+        return data.get("CharacterID"), data.get("CharacterName")
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error getting character ID: {e}")
-        return None
+        logging.error(f"Error getting character details: {e}")
+        return None, None
 
 def get_wallet_transactions(access_token, character_id):
     """Fetches all wallet transactions for a character."""
@@ -342,44 +408,39 @@ async def send_telegram_message(message):
 
 # --- Main Application Logic ---
 
-async def check_market_activity():
-    """Checks for filled market orders, sends notifications, and checks wallet balance."""
-    logging.info("Checking for market activity...")
-    from config import REGION_ID, WALLET_BALANCE_THRESHOLD, ENABLE_SALES_NOTIFICATIONS, ENABLE_BUY_NOTIFICATIONS
-
-    access_token = get_access_token()
+async def check_market_activity_for_character(character: Character):
+    """Checks for market activity for a single character."""
+    logging.info(f"Checking market activity for {character.name}...")
+    access_token = get_access_token(character.refresh_token)
     if not access_token:
-        logging.error("Could not obtain access token. Skipping check."); return
-
-    character_id = get_character_id(access_token)
-    if not character_id:
-        logging.error("Could not obtain character ID. Skipping check."); return
+        logging.error(f"Could not get access token for {character.name}. Skipping.")
+        return
 
     # --- Wallet Balance Check ---
-    wallet_balance = get_wallet_balance(access_token, character_id)
-    if wallet_balance is not None and WALLET_BALANCE_THRESHOLD > 0:
-        last_alert_str = get_bot_state('low_balance_alert_sent_at')
+    wallet_balance = get_wallet_balance(access_token, character.id)
+    if wallet_balance is not None and config.WALLET_BALANCE_THRESHOLD > 0:
+        state_key = f"low_balance_alert_sent_at_{character.id}"
+        last_alert_str = get_bot_state(state_key)
         alert_sent_recently = False
         if last_alert_str:
             last_alert_time = datetime.fromisoformat(last_alert_str)
             if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
                 alert_sent_recently = True
 
-        if wallet_balance < WALLET_BALANCE_THRESHOLD and not alert_sent_recently:
+        if wallet_balance < config.WALLET_BALANCE_THRESHOLD and not alert_sent_recently:
             alert_message = (
-                f"⚠️ *Low Wallet Balance Warning* ⚠️\n\n"
-                f"Your wallet balance has dropped below `{WALLET_BALANCE_THRESHOLD:,.2f}` ISK.\n"
+                f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\n"
+                f"Your wallet balance has dropped below `{config.WALLET_BALANCE_THRESHOLD:,.2f}` ISK.\n"
                 f"**Current Balance:** `{wallet_balance:,.2f}` ISK"
             )
             await send_telegram_message(alert_message)
-            set_bot_state('low_balance_alert_sent_at', datetime.now(timezone.utc).isoformat())
-        elif wallet_balance >= WALLET_BALANCE_THRESHOLD and last_alert_str:
-            # Reset the alert if balance is back up
-            set_bot_state('low_balance_alert_sent_at', '')
+            set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+        elif wallet_balance >= config.WALLET_BALANCE_THRESHOLD and last_alert_str:
+            set_bot_state(state_key, '') # Reset the alert if balance is back up
 
     # --- Market Order Check ---
-    live_orders = get_market_orders(access_token, character_id)
-    tracked_orders = get_tracked_market_orders()
+    live_orders = get_market_orders(access_token, character.id)
+    tracked_orders = get_tracked_market_orders(character.id)
 
     sales_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0, 'price': 0})
     buys_detected = defaultdict(lambda: {'quantity': 0, 'value': 0, 'location_id': 0})
@@ -410,39 +471,39 @@ async def check_market_activity():
                 })
 
     # --- Process Sales ---
-    if ENABLE_SALES_NOTIFICATIONS.lower() == 'true' and sales_detected:
-        logging.info(f"Detected {len(sales_detected)} groups of filled sell orders...")
+    if config.ENABLE_SALES_NOTIFICATIONS.lower() == 'true' and sales_detected:
+        logging.info(f"Detected {len(sales_detected)} groups of filled sell orders for {character.name}...")
         item_ids = list(sales_detected.keys())
         loc_ids = [data['location_id'] for data in sales_detected.values()]
-        id_to_name = get_names_from_ids(item_ids + loc_ids)
+        id_to_name = get_names_from_ids(item_ids + loc_ids + [config.REGION_ID])
 
         for type_id, data in sales_detected.items():
-            history = get_market_history(type_id, REGION_ID)
-            avg_price_str = f"{history['average']:.2f} ISK" if history else "N/A"
+            history = get_market_history(type_id, config.REGION_ID)
+            avg_price_str = f"{history['average']:,.2f} ISK" if history else "N/A"
             price_diff_str = f"({(data['price'] / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
 
             message = (
-                f"✅ *Market Sale!* ✅\n\n"
+                f"✅ *Market Sale ({character.name})* ✅\n\n"
                 f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                 f"**Quantity Sold:** `{data['quantity']}`\n"
                 f"**Your Price:** `{data['price']:,.2f} ISK`\n"
-                f"**{id_to_name.get(REGION_ID, 'Region')} Avg Price:** `{avg_price_str}` {price_diff_str}\n"
+                f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg Price:** `{avg_price_str}` {price_diff_str}\n"
                 f"**Location:** `{id_to_name.get(data['location_id'], 'Unknown')}`\n"
                 f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(message)
-            time.sleep(1)
+            time.sleep(1) # Avoid rate-limiting
 
     # --- Process Buys ---
-    if ENABLE_BUY_NOTIFICATIONS.lower() == 'true' and buys_detected:
-        logging.info(f"Detected {len(buys_detected)} groups of filled buy orders...")
+    if config.ENABLE_BUY_NOTIFICATIONS.lower() == 'true' and buys_detected:
+        logging.info(f"Detected {len(buys_detected)} groups of filled buy orders for {character.name}...")
         item_ids = list(buys_detected.keys())
         loc_ids = [data['location_id'] for data in buys_detected.values()]
         id_to_name = get_names_from_ids(item_ids + loc_ids)
 
         for type_id, data in buys_detected.items():
             message = (
-                f"🛒 *Market Buy!* 🛒\n\n"
+                f"🛒 *Market Buy ({character.name})* 🛒\n\n"
                 f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                 f"**Quantity Bought:** `{data['quantity']}`\n"
                 f"**Total Cost:** `{data['value']:,.2f} ISK`\n"
@@ -450,16 +511,24 @@ async def check_market_activity():
                 f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(message)
-            time.sleep(1)
+            time.sleep(1) # Avoid rate-limiting
 
     # --- Update Database State ---
-    update_tracked_market_orders(orders_to_update)
+    update_tracked_market_orders(character.id, orders_to_update)
     live_order_ids = {o['order_id'] for o in live_orders}
     stale_order_ids = set(tracked_orders.keys()) - live_order_ids
     if stale_order_ids:
-        remove_tracked_market_orders(list(stale_order_ids))
+        remove_tracked_market_orders(character.id, list(stale_order_ids))
 
-    logging.info("Finished processing market activity.")
+    logging.info(f"Finished processing market activity for {character.name}.")
+
+
+async def check_market_activity():
+    """Wrapper function to check market activity for all configured characters."""
+    logging.info("Starting market activity check for all characters...")
+    for character in CHARACTERS:
+        await check_market_activity_for_character(character)
+    logging.info("Completed market activity check for all characters.")
 
 def calculate_estimated_profit(sales_today, all_buy_transactions):
     """
@@ -501,27 +570,28 @@ def calculate_estimated_profit(sales_today, all_buy_transactions):
 
     return total_sales_value - total_estimated_cogs
 
-async def run_daily_summary():
-    """Calculates and sends a daily summary of market activities."""
-    logging.info("Running daily summary...")
-    access_token = get_access_token()
+async def run_daily_summary_for_character(character: Character, all_transactions, journal_entries):
+    """Calculates and prepares the daily summary data for a single character."""
+    logging.info(f"Calculating daily summary for {character.name}...")
+
+    # --- Fetch wallet balance ---
+    access_token = get_access_token(character.refresh_token)
     if not access_token:
-        logging.error("Could not obtain access token for daily summary."); return
+        logging.error(f"Could not get access token for {character.name} during summary. Skipping.")
+        return None
+    wallet_balance = get_wallet_balance(access_token, character.id)
 
-    character_id = get_character_id(access_token)
-    if not character_id:
-        logging.error("Could not obtain character ID for daily summary."); return
-
-    # --- Fetch all necessary data ---
-    wallet_balance = get_wallet_balance(access_token, character_id)
-    all_transactions = get_wallet_transactions(access_token, character_id)
-    journal_entries = get_wallet_journal(access_token, character_id)
-    processed_journal_entries = get_processed_journal_entries()
-
+    processed_journal_entries = get_processed_journal_entries(character.id)
     new_journal_entries = [e for e in journal_entries if e['id'] not in processed_journal_entries]
 
-    if not new_journal_entries and not any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions):
-        logging.info("No new journal or transaction entries for daily summary."); return
+    # Check if there's any new activity to report
+    has_new_transactions_24h = any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions)
+    if not new_journal_entries and not has_new_transactions_24h:
+        logging.info(f"No new journal or transaction entries for {character.name}. Skipping summary message.")
+        # Still need to mark journal entries as processed if any exist
+        if new_journal_entries:
+            add_processed_journal_entries(character.id, [e['id'] for e in new_journal_entries])
+        return None
 
     # --- Define time windows ---
     now = datetime.now(timezone.utc)
@@ -549,7 +619,8 @@ async def run_daily_summary():
 
     # --- Format and Send Message ---
     message = (
-        f"📊 *Daily Market Summary* ({now.strftime('%Y-%m-%d')})\n\n"
+        f"📊 *Daily Market Summary ({character.name})*\n"
+        f"_{now.strftime('%Y-%m-%d')}_\n\n"
         f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`\n\n"
         f"**Past 24 Hours:**\n"
         f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
@@ -562,15 +633,79 @@ async def run_daily_summary():
         f"  - **Gross Revenue (Sales - Fees):** `{gross_revenue_month:,.2f} ISK`\n\n"
         f"_\*Profit is estimated based on the average purchase price of items over the last 30 days._"
     )
-
     await send_telegram_message(message)
 
+    # Mark journal entries as processed
     processed_ids_for_this_run = [entry['id'] for entry in new_journal_entries]
-    add_processed_journal_entries(processed_ids_for_this_run)
-    logging.info(f"Daily summary sent. Processed {len(processed_ids_for_this_run)} new journal entries.")
+    add_processed_journal_entries(character.id, processed_ids_for_this_run)
+    logging.info(f"Daily summary sent for {character.name}. Processed {len(processed_ids_for_this_run)} new journal entries.")
+
+    # Return stats for combined summary
+    return {
+        "wallet_balance": wallet_balance,
+        "total_sales_24h": total_sales_24h,
+        "total_fees_24h": total_brokers_fees_24h + total_transaction_tax_24h,
+        "estimated_profit_24h": estimated_profit_24h,
+        "total_sales_month": total_sales_month,
+        "total_fees_month": total_fees_month,
+        "gross_revenue_month": gross_revenue_month
+    }
+
+async def run_daily_summary():
+    """Wrapper to run the daily summary for all characters and send a combined report."""
+    logging.info("Starting daily summary run for all characters...")
+
+    all_character_stats = []
+
+    for character in CHARACTERS:
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            logging.error(f"Could not get access token for {character.name} in daily summary. Skipping.")
+            continue
+
+        all_transactions = get_wallet_transactions(access_token, character.id)
+        journal_entries = get_wallet_journal(access_token, character.id)
+
+        char_stats = await run_daily_summary_for_character(character, all_transactions, journal_entries)
+        if char_stats:
+            all_character_stats.append(char_stats)
+
+        time.sleep(1) # Stagger requests slightly
+
+    # If more than one character has stats, send a combined summary
+    if len(all_character_stats) > 1:
+        logging.info("Generating combined daily summary...")
+
+        combined_wallet = sum(s['wallet_balance'] for s in all_character_stats)
+        combined_sales_24h = sum(s['total_sales_24h'] for s in all_character_stats)
+        combined_fees_24h = sum(s['total_fees_24h'] for s in all_character_stats)
+        combined_profit_24h = sum(s['estimated_profit_24h'] for s in all_character_stats)
+        combined_sales_month = sum(s['total_sales_month'] for s in all_character_stats)
+        combined_fees_month = sum(s['total_fees_month'] for s in all_character_stats)
+        combined_revenue_month = sum(s['gross_revenue_month'] for s in all_character_stats)
+
+        now = datetime.now(timezone.utc)
+        message = (
+            f"📈 *Combined Daily Market Summary*\n"
+            f"_{now.strftime('%Y-%m-%d')}_\n\n"
+            f"**Combined Wallet Balance:** `{combined_wallet:,.2f} ISK`\n\n"
+            f"**Past 24 Hours (All Characters):**\n"
+            f"  - Total Sales Value: `{combined_sales_24h:,.2f} ISK`\n"
+            f"  - Total Fees (Broker + Tax): `{combined_fees_24h:,.2f} ISK`\n"
+            f"  - **Total Estimated Profit:** `{combined_profit_24h:,.2f} ISK`*\n\n"
+            f"---\n\n"
+            f"🗓️ **Current Month Summary (All Characters):**\n"
+            f"  - Total Sales Value: `{combined_sales_month:,.2f} ISK`\n"
+            f"  - Total Fees (Broker + Tax): `{combined_fees_month:,.2f} ISK`\n"
+            f"  - **Total Gross Revenue:** `{combined_revenue_month:,.2f} ISK`"
+        )
+        await send_telegram_message(message)
+        logging.info("Combined daily summary sent.")
+
+    logging.info("Daily summary run completed for all characters.")
 
 def initialize_journal_history():
-    """On first run, seeds the journal history to avoid summarizing historical entries."""
+    """On first run, seeds the journal history for each character to avoid summarizing historical entries."""
     conn = db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT count(*) FROM processed_journal_entries")
@@ -581,25 +716,23 @@ def initialize_journal_history():
         logging.info(f"Existing journal history found ({count} records). Skipping seeding.")
         return
 
-    logging.info("First run for daily summary detected. Seeding journal history...")
-    access_token = get_access_token()
-    if not access_token:
-        logging.error("Could not obtain access token for journal seeding."); return
+    logging.info("First run for daily summary detected. Seeding journal history for all characters...")
+    for character in CHARACTERS:
+        logging.info(f"Seeding journal history for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            logging.error(f"Could not obtain access token for {character.name} for journal seeding. Skipping."); continue
 
-    character_id = get_character_id(access_token)
-    if not character_id:
-        logging.error("Could not obtain character ID for journal seeding."); return
+        historical_journal = get_wallet_journal(access_token, character.id)
+        if not historical_journal:
+            logging.info(f"No historical journal entries found to seed for {character.name}."); continue
 
-    historical_journal = get_wallet_journal(access_token, character_id)
-    if not historical_journal:
-        logging.info("No historical journal entries found to seed."); return
-
-    historical_ids = [entry['id'] for entry in historical_journal]
-    add_processed_journal_entries(historical_ids)
-    logging.info(f"Successfully seeded {len(historical_ids)} historical journal entries.")
+        historical_ids = [entry['id'] for entry in historical_journal]
+        add_processed_journal_entries(character.id, historical_ids)
+        logging.info(f"Successfully seeded {len(historical_ids)} historical journal entries for {character.name}.")
 
 def initialize_market_orders():
-    """On first run, seeds the market order state to avoid false positives."""
+    """On first run, seeds the market order state for each character to avoid false positives."""
     conn = db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT count(*) FROM market_orders")
@@ -610,46 +743,48 @@ def initialize_market_orders():
         logging.info(f"Existing market order history found ({count} records). Skipping seeding.")
         return
 
-    logging.info("First run for market notifications detected. Seeding initial order state...")
-    access_token = get_access_token()
-    if not access_token:
-        logging.error("Could not obtain access token for market order seeding."); return
+    logging.info("First run for market notifications detected. Seeding initial order state for all characters...")
+    for character in CHARACTERS:
+        logging.info(f"Seeding market orders for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            logging.error(f"Could not obtain access token for {character.name} for market order seeding. Skipping."); continue
 
-    character_id = get_character_id(access_token)
-    if not character_id:
-        logging.error("Could not obtain character ID for market order seeding."); return
+        live_orders = get_market_orders(access_token, character.id)
+        if not live_orders:
+            logging.info(f"No active market orders found to seed for {character.name}."); continue
 
-    live_orders = get_market_orders(access_token, character_id)
-    if not live_orders:
-        logging.info("No active market orders found to seed."); return
-
-    orders_to_track = [(order['order_id'], order['volume_remain']) for order in live_orders]
-    update_tracked_market_orders(orders_to_track)
-    logging.info(f"Successfully seeded {len(orders_to_track)} active market orders.")
+        orders_to_track = [(order['order_id'], order['volume_remain']) for order in live_orders]
+        update_tracked_market_orders(character.id, orders_to_track)
+        logging.info(f"Successfully seeded {len(orders_to_track)} active market orders for {character.name}.")
 
 if __name__ == "__main__":
+    import asyncio
     logging.info("Bot starting up...")
 
     # Create database tables if they don't exist
     setup_database()
 
-    # --- Set up schedules based on config ---
-    from config import DAILY_SUMMARY_TIME, ENABLE_SALES_NOTIFICATIONS, ENABLE_BUY_NOTIFICATIONS, ENABLE_DAILY_SUMMARY
-    import asyncio
+    # Load characters from config
+    load_characters()
+    if not CHARACTERS:
+        logging.error("No characters were loaded. Bot cannot continue. Please check your config.py and run get_refresh_token.py.")
+        exit()
 
-    if ENABLE_SALES_NOTIFICATIONS.lower() == 'true' or ENABLE_BUY_NOTIFICATIONS.lower() == 'true':
+    # --- Set up schedules based on config ---
+    if config.ENABLE_SALES_NOTIFICATIONS.lower() == 'true' or config.ENABLE_BUY_NOTIFICATIONS.lower() == 'true':
         initialize_market_orders()
         logging.info("Performing initial check for market activity...")
         asyncio.run(check_market_activity())
         schedule.every(60).seconds.do(lambda: asyncio.run(check_market_activity()))
-        logging.info(f"Market activity notifications ENABLED (Sales: {ENABLE_SALES_NOTIFICATIONS}, Buys: {ENABLE_BUY_NOTIFICATIONS}). Checking every 60 seconds.")
+        logging.info(f"Market activity notifications ENABLED (Sales: {config.ENABLE_SALES_NOTIFICATIONS}, Buys: {config.ENABLE_BUY_NOTIFICATIONS}). Checking every 60 seconds.")
     else:
         logging.info("Market activity notifications DISABLED by config.")
 
-    if ENABLE_DAILY_SUMMARY.lower() == 'true':
+    if config.ENABLE_DAILY_SUMMARY.lower() == 'true':
         initialize_journal_history()
-        schedule.every().day.at(DAILY_SUMMARY_TIME).do(lambda: asyncio.run(run_daily_summary()))
-        logging.info(f"Daily summary ENABLED: scheduled for {DAILY_SUMMARY_TIME} UTC.")
+        schedule.every().day.at(config.DAILY_SUMMARY_TIME).do(lambda: asyncio.run(run_daily_summary()))
+        logging.info(f"Daily summary ENABLED: scheduled for {config.DAILY_SUMMARY_TIME} UTC.")
     else:
         logging.info("Daily summary DISABLED by config.")
 
