@@ -269,9 +269,9 @@ async def send_telegram_message(message):
 
 # --- Main Application Logic ---
 
-async def check_for_new_orders():
-    """Checks for filled market orders and sends notifications."""
-    logging.info("Checking for filled market orders...")
+async def check_market_activity():
+    """Checks for filled market orders (both buy and sell) and sends notifications."""
+    logging.info("Checking for market activity...")
     access_token = get_access_token()
     if not access_token:
         logging.error("Could not obtain access token. Skipping check."); return
@@ -283,70 +283,80 @@ async def check_for_new_orders():
     live_orders = get_market_orders(access_token, character_id)
     tracked_orders = get_tracked_market_orders()
 
-    # --- Detect Sales and Group Them ---
-    sales_detected = defaultdict(lambda: {'quantity_sold': 0, 'total_value': 0})
+    # --- Detect Activity and Group It ---
+    sales_detected = defaultdict(lambda: {'quantity': 0, 'value': 0})
+    buys_detected = defaultdict(lambda: {'quantity': 0, 'value': 0})
     orders_to_update = []
 
     for order in live_orders:
         order_id = order['order_id']
-        # We only care about non-immediate sell orders
-        if order.get('is_buy_order') or not (1 <= order.get('duration', 0) <= 90):
-            continue
-
-        if order_id in tracked_orders:
-            if order['volume_remain'] < tracked_orders[order_id]:
-                quantity_sold = tracked_orders[order_id] - order['volume_remain']
-                price = order['price']
-
-                sales_detected[order['type_id']]['quantity_sold'] += quantity_sold
-                sales_detected[order['type_id']]['total_value'] += quantity_sold * price
 
         # Always update the order's state for the next check
         orders_to_update.append((order_id, order['volume_remain']))
 
-    if not sales_detected:
-        logging.info("No new market sales detected.");
-        # Still update tracked orders to add new ones and remove old ones
-        update_tracked_market_orders(orders_to_update)
-        # Clean up orders that are no longer live
-        live_order_ids = {o['order_id'] for o in live_orders}
-        stale_order_ids = set(tracked_orders.keys()) - live_order_ids
-        if stale_order_ids:
-            remove_tracked_market_orders(list(stale_order_ids))
-        return
+        # Ignore orders outside the 1-90 day duration
+        if not (1 <= order.get('duration', 0) <= 90):
+            continue
 
-    logging.info(f"Detected {len(sales_detected)} groups of filled orders. Preparing notifications...")
+        if order_id in tracked_orders:
+            if order['volume_remain'] < tracked_orders[order_id]:
+                quantity_changed = tracked_orders[order_id] - order['volume_remain']
+                price = order['price']
 
-    # --- Fetch Names ---
-    item_ids_to_fetch = list(sales_detected.keys())
-    id_to_name = get_names_from_ids(item_ids_to_fetch)
+                if order.get('is_buy_order'):
+                    buys_detected[order['type_id']]['quantity'] += quantity_changed
+                    buys_detected[order['type_id']]['value'] += quantity_changed * price
+                else:
+                    sales_detected[order['type_id']]['quantity'] += quantity_changed
+                    sales_detected[order['type_id']]['value'] += quantity_changed * price
 
-    # --- Send Notifications ---
-    for type_id, data in sales_detected.items():
-        item_name = id_to_name.get(type_id, "Unknown Item")
-        quantity_sold = data['quantity_sold']
-        total_value = data['total_value']
+    # --- Process Sales ---
+    from config import ENABLE_SALES_NOTIFICATIONS, ENABLE_BUY_NOTIFICATIONS
+    if ENABLE_SALES_NOTIFICATIONS.lower() == 'true' and sales_detected:
+        logging.info(f"Detected {len(sales_detected)} groups of filled sell orders. Preparing notifications...")
+        item_ids_to_fetch = list(sales_detected.keys())
+        id_to_name = get_names_from_ids(item_ids_to_fetch)
 
-        message = (
-            f"✅ *Market Sale!* ✅\n\n"
-            f"**Item:** `{item_name}` (`{type_id}`)\n"
-            f"**Quantity Sold:** `{quantity_sold}`\n"
-            f"**Total Value:** `{total_value:,.2f} ISK`"
-        )
+        for type_id, data in sales_detected.items():
+            item_name = id_to_name.get(type_id, "Unknown Item")
+            message = (
+                f"✅ *Market Sale!* ✅\n\n"
+                f"**Item:** `{item_name}` (`{type_id}`)\n"
+                f"**Quantity Sold:** `{data['quantity']}`\n"
+                f"**Total Value:** `{data['value']:,.2f} ISK`"
+            )
+            await send_telegram_message(message)
+            time.sleep(1)
+    else:
+        logging.info("No new market sales detected or sales notifications are disabled.")
 
-        await send_telegram_message(message)
-        time.sleep(1)
+    # --- Process Buys ---
+    if ENABLE_BUY_NOTIFICATIONS.lower() == 'true' and buys_detected:
+        logging.info(f"Detected {len(buys_detected)} groups of filled buy orders. Preparing notifications...")
+        item_ids_to_fetch = list(buys_detected.keys())
+        id_to_name = get_names_from_ids(item_ids_to_fetch)
+
+        for type_id, data in buys_detected.items():
+            item_name = id_to_name.get(type_id, "Unknown Item")
+            message = (
+                f"🛒 *Market Buy!* 🛒\n\n"
+                f"**Item:** `{item_name}` (`{type_id}`)\n"
+                f"**Quantity Bought:** `{data['quantity']}`\n"
+                f"**Total Cost:** `{data['value']:,.2f} ISK`"
+            )
+            await send_telegram_message(message)
+            time.sleep(1)
+    else:
+        logging.info("No new market buys detected or buy notifications are disabled.")
 
     # --- Update Database State ---
     update_tracked_market_orders(orders_to_update)
-
-    # Clean up orders that are no longer live
     live_order_ids = {o['order_id'] for o in live_orders}
     stale_order_ids = set(tracked_orders.keys()) - live_order_ids
     if stale_order_ids:
         remove_tracked_market_orders(list(stale_order_ids))
 
-    logging.info("Finished processing market sales.")
+    logging.info("Finished processing market activity.")
 
 def calculate_estimated_profit(sales_today, all_buy_transactions):
     """
@@ -519,17 +529,17 @@ if __name__ == "__main__":
     setup_database()
 
     # --- Set up schedules based on config ---
-    from config import DAILY_SUMMARY_TIME, ENABLE_SALES_NOTIFICATIONS, ENABLE_DAILY_SUMMARY
+    from config import DAILY_SUMMARY_TIME, ENABLE_SALES_NOTIFICATIONS, ENABLE_BUY_NOTIFICATIONS, ENABLE_DAILY_SUMMARY
     import asyncio
 
-    if ENABLE_SALES_NOTIFICATIONS.lower() == 'true':
+    if ENABLE_SALES_NOTIFICATIONS.lower() == 'true' or ENABLE_BUY_NOTIFICATIONS.lower() == 'true':
         initialize_market_orders()
-        logging.info("Performing initial check for any new sales orders...")
-        asyncio.run(check_for_new_orders())
-        schedule.every(60).seconds.do(lambda: asyncio.run(check_for_new_orders()))
-        logging.info("Sales notifications ENABLED: checking every 60 seconds.")
+        logging.info("Performing initial check for market activity...")
+        asyncio.run(check_market_activity())
+        schedule.every(60).seconds.do(lambda: asyncio.run(check_market_activity()))
+        logging.info(f"Market activity notifications ENABLED (Sales: {ENABLE_SALES_NOTIFICATIONS}, Buys: {ENABLE_BUY_NOTIFICATIONS}). Checking every 60 seconds.")
     else:
-        logging.info("Sales notifications DISABLED by config.")
+        logging.info("Market activity notifications DISABLED by config.")
 
     if ENABLE_DAILY_SUMMARY.lower() == 'true':
         initialize_journal_history()

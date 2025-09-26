@@ -16,6 +16,7 @@ TELEGRAM_CHANNEL_ID = "your_telegram_channel_id_here"
 DAILY_SUMMARY_TIME = "22:00"
 # Set to "true" or "false" to enable or disable notification types.
 ENABLE_SALES_NOTIFICATIONS = "true"
+ENABLE_BUY_NOTIFICATIONS = "true"
 ENABLE_DAILY_SUMMARY = "true"
 
 # 4. ESI Refresh Token

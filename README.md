@@ -4,9 +4,9 @@ This is a comprehensive Telegram bot designed to provide EVE Online players with
 
 ## Features
 
-- **Near Real-Time Sales Notifications**: Checks for sales of your active market orders every 60 seconds.
-- **Intelligent Filtering**: Sales notifications are only sent for non-immediate sell orders (1-90 day duration), ignoring instant sales to buy orders.
-- **Sales Grouping**: Multiple sales of the same item within a 60-second window are grouped into a single, summarized notification to reduce spam.
+- **Near Real-Time Market Notifications**: Checks for activity on your active market orders every 60 seconds for both sales and buys.
+- **Intelligent Filtering**: Notifications are only sent for non-immediate orders (1-90 day duration), ignoring instant transactions.
+- **Activity Grouping**: Multiple fills of the same item (e.g., 100 units of Tritanium bought or sold) within a 60-second window are grouped into a single, summarized notification to reduce spam.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed financial report, including:
   - **24-Hour Stats**: Total sales value, total fees (broker's + tax), and an estimated profit.
   - **Monthly Stats**: A summary for the current calendar month, including total sales value, total fees, and gross revenue.
@@ -15,7 +15,7 @@ This is a comprehensive Telegram bot designed to provide EVE Online players with
   - Profit is estimated by comparing sales revenue against the 30-day average purchase price of the items sold.
 - **Highly Configurable**:
   - The time of the daily summary can be easily set in the configuration file.
-  - Both the 60-second sales notifications and the daily summary can be independently enabled or disabled.
+  - Sales notifications, buy notifications, and the daily summary can all be independently enabled or disabled.
 - **Robust & Persistent**:
   - Uses a SQLite database to track market order states and processed journal entries, preventing duplicate notifications.
   - Intelligently seeds its history on the first run to ignore all past transactions and only report on new activity.
@@ -57,7 +57,7 @@ Follow these steps to get your bot up and running.
     -   `ESI_SECRET_KEY`: Your application's Secret Key from Step 1.
     -   `TELEGRAM_BOT_TOKEN`: Your Telegram bot's API token (obtained from BotFather).
     -   `TELEGRAM_CHANNEL_ID`: The ID of the channel you want the bot to post in.
-    -   You can also customize `DAILY_SUMMARY_TIME`, `ENABLE_SALES_NOTIFICATIONS`, and `ENABLE_DAILY_SUMMARY` here.
+    -   You can also customize `DAILY_SUMMARY_TIME`, `ENABLE_SALES_NOTIFICATIONS`, `ENABLE_BUY_NOTIFICATIONS`, and `ENABLE_DAILY_SUMMARY` here.
 
 ### Step 3: Generate Your ESI Refresh Token
 
@@ -90,7 +90,7 @@ The bot will now start. On its first run, it will seed its database with your hi
 ## Usage
 
 Once running, the bot will automatically perform its tasks:
-- **Sales Notifications**: Every 60 seconds, it checks for filled market orders and sends a notification if any are found.
+- **Market Notifications**: Every 60 seconds, it checks for filled market orders (both buys and sells) and sends a notification if any are found.
 - **Daily Summary**: At the time specified in your `config.py`, it will post the daily financial summary.
 
 ### Example Notifications
@@ -102,6 +102,15 @@ Once running, the bot will automatically perform its tasks:
 **Item:** `Tritanium` (`34`)
 **Quantity Sold:** `1000`
 **Total Value:** `10,000.00 ISK`
+```
+
+**Market Buy Notification:**
+```
+🛒 Market Buy! 🛒
+
+**Item:** `Pyerite` (`35`)
+**Quantity Bought:** `500`
+**Total Cost:** `5,000.00 ISK`
 ```
 
 **Daily Summary:**
