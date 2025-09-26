@@ -10,6 +10,6 @@ services:
     volumes:
       # Mount the config file to provide credentials to the bot
       - ./config.py:/app/config.py:ro
-      # Mount the database file directly to make it persistent and accessible on the host.
-      # The bot will create this file on its first run.
-      - ./bot_data.db:/app/bot_data.db
+      # Mount the entire 'data' directory to make the database persistent.
+      # Docker will create the './data' directory on the host if it doesn't exist.
+      - ./data:/app/data
