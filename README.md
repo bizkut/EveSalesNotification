@@ -96,6 +96,14 @@ The bot will now start. On its first run, it will seed its database with your hi
 
 ---
 
+## Upgrading
+
+If you are upgrading from a version of the bot prior to multi-character support, you **must** reset your database due to schema changes. The bot will not start correctly otherwise.
+
+Please follow the instructions in the **"Resetting the Bot"** section below.
+
+---
+
 ## Example Notifications
 
 **Market Sale Notification:**
