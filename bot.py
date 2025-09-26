@@ -332,56 +332,129 @@ def delete_purchase_lot(lot_id):
 
 # --- ESI API Functions ---
 
-def get_wallet_journal(access_token, character_id, processed_entry_ids=None):
+ESI_CACHE = {}
+
+def make_esi_request(url, character=None, params=None, data=None, return_headers=False):
+    """
+    Makes a request to the ESI API, handling caching via ETag and Expires headers.
+    Returns the JSON response and optionally the response headers.
+    """
+    cache_key = f"{url}:{character.id if character else 'public'}:{str(params)}"
+    cached_response = ESI_CACHE.get(cache_key)
+    headers = {"Accept": "application/json"}
+    if character:
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            logging.error(f"Failed to get access token for {character.name}")
+            return (None, None) if return_headers else None
+        headers["Authorization"] = f"Bearer {access_token}"
+
+    # Check if we have a cached response and if it's still valid
+    if cached_response and cached_response.get('expires', datetime.min.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc):
+        logging.debug(f"Returning cached data for {url}")
+        return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
+
+    # If we have an ETag, use it
+    if cached_response and 'etag' in cached_response:
+        headers['If-None-Match'] = cached_response['etag']
+
+    try:
+        if data: # POST request
+            headers["Content-Type"] = "application/json"
+            response = requests.post(url, headers=headers, json=data)
+        else: # GET request
+            response = requests.get(url, headers=headers, params=params)
+
+        # Handle 'Not Modified' response
+        if response.status_code == 304:
+            logging.debug(f"304 Not Modified for {url}. Using cached data.")
+            expires_dt = datetime.strptime(response.headers['Expires'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
+            cached_response['expires'] = expires_dt
+            ESI_CACHE[cache_key] = cached_response
+            return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
+
+        response.raise_for_status()
+
+        # Parse expires header
+        expires_header = response.headers.get('Expires')
+        if expires_header:
+            expires_dt = datetime.strptime(expires_header, '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
+        else:
+            # If no expires header, use a default short cache time
+            expires_dt = datetime.now(timezone.utc) + timedelta(seconds=60)
+
+        # Update cache
+        new_data = response.json()
+        new_cache_entry = {
+            'etag': response.headers.get('ETag'),
+            'expires': expires_dt,
+            'data': new_data,
+            'headers': dict(response.headers)
+        }
+        ESI_CACHE[cache_key] = new_cache_entry
+        logging.debug(f"Cached new data for {url}. Expires at {expires_dt}")
+
+        return (new_data, dict(response.headers)) if return_headers else new_data
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error making ESI request to {url}: {e}")
+        # On failure, return the old cached data if it exists, to prevent temporary outages from breaking the bot
+        if cached_response:
+            logging.warning(f"Returning stale data for {url} due to request failure.")
+            return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
+        return (None, None) if return_headers else None
+
+
+def get_wallet_journal(character, processed_entry_ids=None):
     """
     Fetches wallet journal entries from ESI.
     If processed_entry_ids are provided, it will stop fetching when it encounters an already processed entry.
+    Returns the list of new entries and the headers from the first page request.
     """
-    if not character_id: return []
+    if not character: return [], None
     if processed_entry_ids is None:
         processed_entry_ids = set()
 
     new_journal_entries, page = [], 1
-    url = f"https://esi.evetech.net/v6/characters/{character_id}/wallet/journal/"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"datasource": "tranquility"}
+    url = f"https://esi.evetech.net/v6/characters/{character.id}/wallet/journal/"
 
     stop_fetching = False
+    first_page_headers = None
+
     while not stop_fetching:
-        try:
-            params['page'] = page
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            data = response.json()
-            if not data:
-                break # No more pages
+        params = {"datasource": "tranquility", "page": page}
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True)
 
-            page_entries = []
-            for entry in data:
-                if entry['id'] in processed_entry_ids:
-                    stop_fetching = True
-                    break  # Stop processing entries in this page
-                page_entries.append(entry)
+        if page == 1:
+            first_page_headers = headers
 
-            new_journal_entries.extend(page_entries)
+        if not data:
+            if page == 1:
+                logging.error(f"Failed to fetch first page of wallet journal for {character.name}")
+                return [], None
+            break # Stop if a subsequent page fails
 
-            if stop_fetching:
-                logging.info(f"Found previously processed journal entry. Stopping fetch for char {character_id}.")
-                break # Stop fetching more pages
+        page_entries = []
+        for entry in data:
+            if entry['id'] in processed_entry_ids:
+                stop_fetching = True
+                break
+            page_entries.append(entry)
 
-            # Check if there are more pages from header
-            pages_header = response.headers.get('x-pages')
-            if pages_header and int(pages_header) <= page:
-                break # Last page reached
+        new_journal_entries.extend(page_entries)
 
-            page += 1
-            # Add a small delay to be nice to ESI
-            time.sleep(0.1)
+        if stop_fetching:
+            logging.info(f"Found previously processed journal entry. Stopping fetch for char {character.name}.")
+            break
 
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Error fetching wallet journal page {page} for char {character_id}: {e}")
-            return [] # Return empty list on error
-    return new_journal_entries
+        pages_header = headers.get('x-pages') if headers else None
+        if pages_header and int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1) # Still be nice between pages
+
+    return new_journal_entries, first_page_headers
 
 def get_access_token(refresh_token):
     url = "https://login.eveonline.com/v2/oauth/token"
@@ -412,72 +485,41 @@ def get_character_details_from_token(access_token):
         logging.error(f"Error getting character details: {e}")
         return None, None
 
-def get_wallet_transactions(access_token, character_id):
-    if not character_id: return []
-    url = f"https://esi.evetech.net/v1/characters/{character_id}/wallet/transactions/"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"datasource": "tranquility"}
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching wallet transactions: {e}")
-        return []
+def get_wallet_transactions(character, return_headers=False):
+    if not character: return None
+    url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/transactions/"
+    return make_esi_request(url, character=character, return_headers=return_headers)
 
-def get_market_orders(access_token, character_id):
-    if not character_id: return []
-    url = f"https://esi.evetech.net/v2/characters/{character_id}/orders/"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"datasource": "tranquility"}
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching market orders: {e}")
-        return []
+def get_market_orders(character, return_headers=False):
+    if not character: return None
+    url = f"https://esi.evetech.net/v2/characters/{character.id}/orders/"
+    return make_esi_request(url, character=character, return_headers=return_headers)
 
-def get_wallet_balance(access_token, character_id):
-    if not character_id: return None
-    url = f"https://esi.evetech.net/v1/characters/{character_id}/wallet/"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    params = {"datasource": "tranquility"}
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching wallet balance: {e}")
-        return None
+def get_wallet_balance(character, return_headers=False):
+    if not character: return None
+    url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
+    return make_esi_request(url, character=character, return_headers=return_headers)
 
 def get_market_history(type_id, region_id):
     url = f"https://esi.evetech.net/v1/markets/{region_id}/history/"
     params = {"type_id": type_id, "datasource": "tranquility"}
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        return response.json()[-1] if response.json() else None
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching market history for type_id {type_id}: {e}")
-        return None
+    history_data = make_esi_request(url, params=params)
+    return history_data[-1] if history_data else None
 
 def get_names_from_ids(id_list):
     if not id_list: return {}
     unique_ids = list(set(id_list))
     url = "https://esi.evetech.net/v3/universe/names/"
-    try:
-        id_to_name_map = {}
-        for i in range(0, len(unique_ids), 1000):
-            chunk = unique_ids[i:i+1000]
-            response = requests.post(url, headers={"Content-Type": "application/json"}, json=chunk)
-            response.raise_for_status()
-            for item in response.json():
+    id_to_name_map = {}
+    # Break the list into chunks of 1000, the ESI limit
+    for i in range(0, len(unique_ids), 1000):
+        chunk = unique_ids[i:i+1000]
+        # Note: POST requests to /names/ are publicly cached and don't need auth
+        name_data = make_esi_request(url, data=chunk)
+        if name_data:
+            for item in name_data:
                 id_to_name_map[item['id']] = item['name']
-        return id_to_name_map
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching names from IDs: {e}")
-        return {}
+    return id_to_name_map
 
 # --- Telegram Bot Functions ---
 
@@ -536,15 +578,24 @@ def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
     return cogs
 
 
-async def check_market_activity_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
-    """Checks for market activity for a single character."""
-    logging.debug(f"Checking market activity for {character.name}...")
-    access_token = get_access_token(character.refresh_token)
-    if not access_token:
-        logging.error(f"Could not get access token for {character.name}. Skipping.")
-        return
+def get_next_run_delay(headers):
+    """Calculates the delay in seconds until the cache expires, with a small buffer."""
+    if not headers or 'Expires' not in headers:
+        return 60  # Default to 60s if no header
+    try:
+        expires_dt = datetime.strptime(headers['Expires'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
+        delay = (expires_dt - datetime.now(timezone.utc)).total_seconds()
+        return max(delay, 0) + 5  # Add 5s buffer
+    except (ValueError, TypeError):
+        return 60
 
-    wallet_balance = get_wallet_balance(access_token, character.id)
+async def check_wallet_balance_job(context: ContextTypes.DEFAULT_TYPE):
+    """A self-scheduling job to check a character's wallet balance."""
+    character = context.job.data
+    logging.debug(f"Running wallet balance check for {character.name}")
+
+    wallet_balance, headers = get_wallet_balance(character, return_headers=True)
+
     if wallet_balance is not None and getattr(config, 'WALLET_BALANCE_THRESHOLD', 0) > 0:
         state_key = f"low_balance_alert_sent_at_{character.id}"
         last_alert_str = get_bot_state(state_key)
@@ -563,93 +614,87 @@ async def check_market_activity_for_character(character: Character, context: Con
             await send_telegram_message(context, alert_message)
             set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
         elif wallet_balance >= config.WALLET_BALANCE_THRESHOLD and last_alert_str:
+            # Reset the alert state if balance is back up
             set_bot_state(state_key, '')
 
-    live_orders = get_market_orders(access_token, character.id)
+    # --- Reschedule ---
+    delay = get_next_run_delay(headers)
+    context.job_queue.run_once(check_wallet_balance_job, delay, data=character)
+    logging.info(f"Wallet balance check for {character.name} complete. Next check in {delay:.2f} seconds.")
+
+async def check_market_orders_job(context: ContextTypes.DEFAULT_TYPE):
+    """A self-scheduling job to check for market order updates."""
+    character = context.job.data
+    logging.debug(f"Running market order check for {character.name}")
+
+    live_orders, headers = get_market_orders(character, return_headers=True)
+    if live_orders is None:
+        logging.error(f"Failed to fetch market orders for {character.name}. Retrying in 60s.")
+        context.job_queue.run_once(check_market_orders_job, 60, data=character)
+        return
+
     tracked_orders = get_tracked_market_orders(character.id)
     sales_detected = defaultdict(list)
     buys_detected = defaultdict(list)
     orders_to_update = []
 
     for order in live_orders:
-        order_id, location_id = order['order_id'], order['location_id']
+        order_id = order['order_id']
         orders_to_update.append((order_id, order['volume_remain']))
-        if not (1 <= order.get('duration', 0) <= 90): continue
+
         if order_id in tracked_orders and order['volume_remain'] < tracked_orders[order_id]:
             quantity = tracked_orders[order_id] - order['volume_remain']
-            price = order['price']
             if order.get('is_buy_order'):
-                buys_detected[order['type_id']].append({
-                    'quantity': quantity,
-                    'price': price,
-                    'location_id': location_id
-                })
+                buys_detected[order['type_id']].append({'quantity': quantity, 'price': order['price'], 'location_id': order['location_id']})
             else:
-                sales_detected[order['type_id']].append({
-                    'quantity': quantity,
-                    'price': price,
-                    'location_id': location_id
-                })
+                sales_detected[order['type_id']].append({'quantity': quantity, 'price': order['price'], 'location_id': order['location_id']})
 
-    if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' and sales_detected:
-        logging.debug(f"Detected {len(sales_detected)} groups of filled sell orders for {character.name}...")
+    if sales_detected and getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true':
         item_ids = list(sales_detected.keys())
         loc_ids = [sale['location_id'] for sales in sales_detected.values() for sale in sales]
         id_to_name = get_names_from_ids(item_ids + loc_ids + [config.REGION_ID])
+        wallet_balance = get_wallet_balance(character)
 
         for type_id, sales in sales_detected.items():
             total_quantity = sum(s['quantity'] for s in sales)
             total_value = sum(s['quantity'] * s['price'] for s in sales)
-            avg_sale_price = total_value / total_quantity if total_quantity else 0
-            location_id = sales[0]['location_id']
-
-            # --- FIFO Profit Calculation ---
+            avg_price = total_value / total_quantity
             cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-            profit_line = ""
-            if cogs is not None:
-                profit = total_value - cogs
-                profit_line = f"\n**Gross Profit (before fees):** `{profit:,.2f} ISK`"
-            else:
-                profit_line = "\n**Profit:** `N/A (No purchase history)`"
-            # --- End FIFO ---
-
+            profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
             history = get_market_history(type_id, config.REGION_ID)
-            avg_price_str = f"{history['average']:,.2f} ISK" if history else "N/A"
-            price_diff_str = f"({(avg_sale_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+            price_diff_str = f"({(avg_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+
             message = (
                 f"✅ *Market Sale ({character.name})* ✅\n\n"
                 f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                f"**Quantity Sold:** `{total_quantity}`\n"
-                f"**Avg. Your Price:** `{avg_sale_price:,.2f} ISK`\n"
-                f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg Price:** `{avg_price_str}` {price_diff_str}"
-                f"{profit_line}\n\n"
-                f"**Location:** `{id_to_name.get(location_id, 'Unknown')}`\n"
-                f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
+                f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
+                f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg:** `{history['average']:,.2f} ISK` {price_diff_str}"
+                f"{profit_line}\n"
+                f"**Location:** `{id_to_name.get(sales[0]['location_id'], 'Unknown')}`\n"
+                f"**Wallet:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(context, message)
             await asyncio.sleep(1)
 
-    if getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true' and buys_detected:
-        logging.debug(f"Detected {len(buys_detected)} groups of filled buy orders for {character.name}...")
+    if buys_detected and getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
         item_ids = list(buys_detected.keys())
         loc_ids = [buy['location_id'] for buys in buys_detected.values() for buy in buys]
         id_to_name = get_names_from_ids(item_ids + loc_ids)
+        wallet_balance = get_wallet_balance(character)
+
         for type_id, buys in buys_detected.items():
             total_quantity = sum(b['quantity'] for b in buys)
-            total_value = sum(b['quantity'] * b['price'] for b in buys)
-            location_id = buys[0]['location_id']
-
-            # Record each individual purchase as a lot
+            total_cost = sum(b['quantity'] * b['price'] for b in buys)
             for buy in buys:
                 add_purchase_lot(character.id, type_id, buy['quantity'], buy['price'])
 
             message = (
                 f"🛒 *Market Buy ({character.name})* 🛒\n\n"
                 f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                f"**Quantity Bought:** `{total_quantity}`\n"
-                f"**Total Cost:** `{total_value:,.2f} ISK`\n"
-                f"**Location:** `{id_to_name.get(location_id, 'Unknown')}`\n"
-                f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`"
+                f"**Quantity:** `{total_quantity}`\n"
+                f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
+                f"**Location:** `{id_to_name.get(buys[0]['location_id'], 'Unknown')}`\n"
+                f"**Wallet:** `{wallet_balance:,.2f} ISK`"
             )
             await send_telegram_message(context, message)
             await asyncio.sleep(1)
@@ -659,13 +704,11 @@ async def check_market_activity_for_character(character: Character, context: Con
     stale_order_ids = set(tracked_orders.keys()) - live_order_ids
     if stale_order_ids:
         remove_tracked_market_orders(character.id, list(stale_order_ids))
-    logging.debug(f"Finished processing market activity for {character.name}.")
 
-async def check_market_activity(context: ContextTypes.DEFAULT_TYPE):
-    """Wrapper function to check market activity for all configured characters."""
-    logging.debug("Starting market activity check for all characters...")
-    await asyncio.gather(*(check_market_activity_for_character(c, context) for c in CHARACTERS))
-    logging.debug("Completed market activity check for all characters.")
+    # --- Reschedule ---
+    delay = get_next_run_delay(headers)
+    context.job_queue.run_once(check_market_orders_job, delay, data=character)
+    logging.info(f"Market order check for {character.name} complete. Next check in {delay:.2f} seconds.")
 
 def calculate_fifo_profit_for_summary(sales_transactions, character_id):
     """
@@ -704,23 +747,28 @@ def calculate_fifo_profit_for_summary(sales_transactions, character_id):
 async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
     """Calculates and prepares the daily summary data for a single character using optimized methods."""
     logging.info(f"Calculating daily summary for {character.name}...")
-    access_token = get_access_token(character.refresh_token)
-    if not access_token:
-        logging.error(f"Could not get access token for {character.name} during summary. Skipping.")
-        return None
 
     # --- Fetch new data only ---
     processed_journal_entries = get_processed_journal_entries(character.id)
-    new_journal_entries = get_wallet_journal(access_token, character.id, processed_journal_entries)
-    all_transactions = get_wallet_transactions(access_token, character.id) # Still fetches last 30 days, but is less of a bottleneck.
+    # Note: We don't need headers here since this job runs on its own fixed daily schedule
+    new_journal_entries, _ = get_wallet_journal(character, processed_journal_entries)
+    all_transactions = get_wallet_transactions(character) # Still fetches last 30 days, but is less of a bottleneck.
 
-    if not new_journal_entries and not any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions):
+    if not all_transactions:
+        logging.warning(f"Could not fetch transactions for {character.name} for daily summary.")
+        # We might still have journal entries, so we don't return entirely
+
+    if not new_journal_entries and not (all_transactions and any(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > (datetime.now(timezone.utc) - timedelta(days=1)) for tx in all_transactions)):
         logging.info(f"No new journal or recent transaction entries for {character.name}. Skipping summary message.")
+        # Still, we should send a summary if it's manually requested, just with current balance.
+        if chat_id is not None: # Manually triggered
+             wallet_balance = get_wallet_balance(character)
+             await send_telegram_message(context, f"No new activity for {character.name} in the last 24 hours.\nCurrent balance: `{wallet_balance:,.2f} ISK`", chat_id=chat_id)
         return None
 
     now = datetime.now(timezone.utc)
     one_day_ago = now - timedelta(days=1)
-    wallet_balance = get_wallet_balance(access_token, character.id)
+    wallet_balance = get_wallet_balance(character)
 
     # --- 24-Hour Summary (from new entries) ---
     total_brokers_fees_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
@@ -831,48 +879,37 @@ def initialize_journal_history():
     """
     conn = db_connection()
     cursor = conn.cursor()
-    # Check if any character has been seeded before to prevent re-seeding for all
     cursor.execute("SELECT DISTINCT character_id FROM processed_journal_entries")
     seeded_char_ids = {row[0] for row in cursor.fetchall()}
     conn.close()
 
     logging.info("Checking for unseeded characters for summary history...")
-
     for character in CHARACTERS:
         if character.id in seeded_char_ids:
             logging.info(f"Character {character.name} already has seeded journal history. Skipping.")
             continue
 
         logging.info(f"First run for {character.name} detected. Seeding journal and summary history...")
-        access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            logging.error(f"Cannot get access token for {character.name} during seeding.")
-            continue
-
-        # Fetch all historical entries (don't pass processed_ids)
-        historical_journal = get_wallet_journal(access_token, character.id)
+        historical_journal, _ = get_wallet_journal(character) # Don't pass processed_ids
         if not historical_journal:
             logging.warning(f"No historical journal found for {character.name}. Seeding complete with no data.")
-            # Mark as processed to prevent trying again
-            add_processed_journal_entries(character.id, [-1]) # Add a dummy entry
+            add_processed_journal_entries(character.id, [-1]) # Dummy entry to mark as processed
             continue
 
         now = datetime.now(timezone.utc)
         start_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # Calculate totals for the current month from all of history
         sales_this_month = sum(e.get('amount', 0) for e in historical_journal if e.get('ref_type') == 'player_trading' and e.get('amount', 0) > 0 and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
         fees_this_month = sum(abs(e.get('amount', 0)) for e in historical_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'] and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > start_of_month)
 
-        # Store the calculated initial state
         update_monthly_summary(character.id, now.year, now.month, sales_this_month, fees_this_month)
         set_bot_state(f"last_summary_month_{character.id}", now.strftime('%Y-%m'))
         logging.info(f"Seeded monthly summary for {character.name}: Sales={sales_this_month:,.2f}, Fees={fees_this_month:,.2f}")
 
-        # Mark all historical entries as processed
         historical_ids = [entry['id'] for entry in historical_journal]
         add_processed_journal_entries(character.id, historical_ids)
         logging.info(f"Seeded {len(historical_ids)} historical journal entries for {character.name}.")
+
 
 def initialize_purchase_history():
     """On first run, seeds the database with historical buy transactions to enable profit tracking."""
@@ -884,33 +921,27 @@ def initialize_purchase_history():
             continue
 
         logging.info(f"Seeding purchase history for {character.name}...")
-        access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            logging.error(f"Cannot get access token for {character.name} during purchase history seeding.")
+        all_transactions = get_wallet_transactions(character)
+        if not all_transactions:
+            logging.info(f"No historical transactions found for {character.name}.")
+            set_bot_state(state_key, 'true')
             continue
 
-        all_transactions = get_wallet_transactions(access_token, character.id)
         buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-
         if not buy_transactions:
             logging.info(f"No historical buy transactions found for {character.name}.")
             set_bot_state(state_key, 'true')
             continue
 
         for tx in buy_transactions:
-            add_purchase_lot(
-                character.id,
-                tx['type_id'],
-                tx['quantity'],
-                tx['unit_price'],
-                purchase_date=tx['date']
-            )
+            add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
 
         set_bot_state(state_key, 'true')
         logging.info(f"Successfully seeded {len(buy_transactions)} historical buy transactions for {character.name}.")
 
 
 def initialize_market_orders():
+    """On first run, seeds the database with the current state of market orders."""
     conn = db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT count(*) FROM market_orders")
@@ -919,16 +950,14 @@ def initialize_market_orders():
     if count > 0:
         logging.info(f"Existing market order history found ({count} records). Skipping seeding.")
         return
-    logging.info("First run for market notifications detected. Seeding initial order state...")
+
+    logging.info("First run detected. Seeding initial market order state...")
     for character in CHARACTERS:
-        logging.info(f"Seeding market orders for {character.name}...")
-        access_token = get_access_token(character.refresh_token)
-        if not access_token: continue
-        live_orders = get_market_orders(access_token, character.id)
-        if not live_orders: continue
-        orders_to_track = [(order['order_id'], order['volume_remain']) for order in live_orders]
-        update_tracked_market_orders(character.id, orders_to_track)
-        logging.info(f"Seeded {len(orders_to_track)} active market orders for {character.name}.")
+        live_orders = get_market_orders(character)
+        if live_orders:
+            orders_to_track = [(order['order_id'], order['volume_remain']) for order in live_orders]
+            update_tracked_market_orders(character.id, orders_to_track)
+            logging.info(f"Seeded {len(orders_to_track)} active market orders for {character.name}.")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and displays the wallet balance for the configured character(s)."""
@@ -940,11 +969,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if len(CHARACTERS) == 1:
         character = CHARACTERS[0]
         await update.message.reply_text(f"Fetching balance for {character.name}...")
-        access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            await update.message.reply_text(f"Could not refresh token for {character.name}.")
-            return
-        balance = get_wallet_balance(access_token, character.id)
+        balance = get_wallet_balance(character)
         if balance is not None:
             message = f"💰 *Wallet Balance for {character.name}*\n\n`{balance:,.2f} ISK`"
             await update.message.reply_text(text=message, parse_mode='Markdown')
@@ -992,22 +1017,12 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if len(CHARACTERS) == 1:
         character = CHARACTERS[0]
         await update.message.reply_text(f"Fetching recent sales for {character.name}...")
-        access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            await update.message.reply_text(f"Could not refresh token for {character.name}.")
-            return
-
-        all_transactions = get_wallet_transactions(access_token, character.id)
+        all_transactions = get_wallet_transactions(character)
         if not all_transactions:
             await update.message.reply_text(f"No transaction history found for {character.name}.")
             return
 
-        filtered_tx = sorted(
-            [tx for tx in all_transactions if not tx.get('is_buy')],
-            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
-            reverse=True
-        )[:5]
-
+        filtered_tx = sorted([tx for tx in all_transactions if not tx.get('is_buy')], key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)[:5]
         if not filtered_tx:
             await update.message.reply_text(f"No recent sales found for {character.name}.")
             return
@@ -1018,9 +1033,7 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(
-                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
-            )
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
         await _show_character_selection(update, "sales")
@@ -1036,22 +1049,12 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if len(CHARACTERS) == 1:
         character = CHARACTERS[0]
         await update.message.reply_text(f"Fetching recent buys for {character.name}...")
-        access_token = get_access_token(character.refresh_token)
-        if not access_token:
-            await update.message.reply_text(f"Could not refresh token for {character.name}.")
-            return
-
-        all_transactions = get_wallet_transactions(access_token, character.id)
+        all_transactions = get_wallet_transactions(character)
         if not all_transactions:
             await update.message.reply_text(f"No transaction history found for {character.name}.")
             return
 
-        filtered_tx = sorted(
-            [tx for tx in all_transactions if tx.get('is_buy')],
-            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
-            reverse=True
-        )[:5]
-
+        filtered_tx = sorted([tx for tx in all_transactions if tx.get('is_buy')], key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)[:5]
         if not filtered_tx:
             await update.message.reply_text(f"No recent buys found for {character.name}.")
             return
@@ -1062,9 +1065,7 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(
-                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
-            )
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
         await _show_character_selection(update, "buys")
@@ -1088,8 +1089,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             message_lines = ["💰 *Wallet Balances* 💰\n"]
             total_balance = 0
             for char in CHARACTERS:
-                access_token = get_access_token(char.refresh_token)
-                balance = get_wallet_balance(access_token, char.id) if access_token else None
+                balance = get_wallet_balance(char)
                 if balance is not None:
                     message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
                     total_balance += balance
@@ -1114,13 +1114,9 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     await query.edit_message_text(text=f"Processing /{action} for {character.name}, please wait...")
-    access_token = get_access_token(character.refresh_token)
-    if not access_token:
-        await query.edit_message_text(text=f"Could not refresh token for {character.name}.")
-        return
 
     if action == "balance":
-        balance = get_wallet_balance(access_token, character.id)
+        balance = get_wallet_balance(character)
         if balance is not None:
             message = f"💰 *Wallet Balance for {character.name}*\n\n`{balance:,.2f} ISK`"
             await query.edit_message_text(text=message, parse_mode='Markdown')
@@ -1129,18 +1125,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif action == "summary":
         await run_daily_summary_for_character(character, context, chat_id=chat_id)
     elif action in ["sales", "buys"]:
-        all_transactions = get_wallet_transactions(access_token, character.id)
+        all_transactions = get_wallet_transactions(character)
         if not all_transactions:
             await query.edit_message_text(text=f"No transaction history found for {character.name}.")
             return
 
         is_buy = True if action == 'buys' else False
-        filtered_tx = sorted(
-            [tx for tx in all_transactions if tx.get('is_buy') == is_buy],
-            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
-            reverse=True
-        )[:5]
-
+        filtered_tx = sorted([tx for tx in all_transactions if tx.get('is_buy') == is_buy], key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)[:5]
         if not filtered_tx:
             await query.edit_message_text(text=f"No recent {action} found for {character.name}.")
             return
@@ -1151,9 +1142,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(
-                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
-            )
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
         await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
 
 async def post_init(application: Application):
@@ -1192,9 +1181,11 @@ def main() -> None:
        getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
         initialize_purchase_history()
         initialize_market_orders()
-        job_queue.run_once(check_market_activity, 5)
-        job_queue.run_repeating(check_market_activity, interval=60, first=60)
-        logging.info("Market activity notifications ENABLED. Checking every 60 seconds.")
+        for character in CHARACTERS:
+            # Start the self-scheduling jobs for each character
+            job_queue.run_once(check_market_orders_job, 5, data=character, name=f"market_orders_{character.id}")
+            job_queue.run_once(check_wallet_balance_job, 10, data=character, name=f"wallet_balance_{character.id}")
+        logging.info("Market activity notifications ENABLED. Jobs are now self-scheduling based on cache timers.")
     else:
         logging.info("Market activity notifications DISABLED by config.")
 
