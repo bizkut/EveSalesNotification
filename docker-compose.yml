@@ -9,7 +9,11 @@ services:
     # from the 'config.py.example' template and fill in your details.
     volumes:
       # Mount the config file to provide credentials to the bot
-      - ./config.py:/app/config.py:ro
-      # Mount the entire 'data' directory to make the database persistent.
-      # Docker will create the './data' directory on the host if it doesn't exist.
-      - ./data:/app/data
+      - ./config.py:/app/config.py
+      # Use a named volume to persist the processed transactions data inside the 'data' directory
+      - processed_data:/app/data
+
+# Defines the named volume for persisting data
+volumes:
+  processed_data:
+    driver: local
