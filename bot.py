@@ -7,8 +7,8 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta, time as dt_time
 from dataclasses import dataclass
 import asyncio
-from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 
 import config
 
@@ -665,11 +665,92 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # This might take a few seconds, so it's good to give user feedback.
     await run_daily_summary(context)
 
+async def _show_character_selection(update: Update, action: str) -> None:
+    """Displays an inline keyboard for character selection for a given action (sales/buys)."""
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot perform this action.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(character.name, callback_data=f"{action}:{character.id}")]
+        for character in CHARACTERS
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(f"Please select a character to view recent {action}:", reply_markup=reply_markup)
+
+
+async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays a character selection menu for viewing recent sales."""
+    logging.info(f"Received /sales command from user {update.effective_user.name}")
+    await _show_character_selection(update, "sales")
+
+
+async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays a character selection menu for viewing recent buys."""
+    logging.info(f"Received /buys command from user {update.effective_user.name}")
+    await _show_character_selection(update, "buys")
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles button clicks for character selection."""
+    query = update.callback_query
+    await query.answer()  # Acknowledge the button press
+
+    try:
+        action, character_id_str = query.data.split(':')
+        character_id = int(character_id_str)
+    except (ValueError, IndexError):
+        await query.edit_message_text(text="Invalid callback data. Please try the command again.")
+        return
+
+    character = next((c for c in CHARACTERS if c.id == character_id), None)
+    if not character:
+        await query.edit_message_text(text="Could not find the selected character. Please try again.")
+        return
+
+    await query.edit_message_text(text=f"Fetching recent {action} for {character.name}, please wait...")
+
+    access_token = get_access_token(character.refresh_token)
+    if not access_token:
+        await query.edit_message_text(text=f"Could not refresh token for {character.name}.")
+        return
+
+    all_transactions = get_wallet_transactions(access_token, character.id)
+    if not all_transactions:
+        await query.edit_message_text(text=f"No transaction history found for {character.name}.")
+        return
+
+    is_buy = True if action == 'buys' else False
+    filtered_tx = sorted(
+        [tx for tx in all_transactions if tx.get('is_buy') == is_buy],
+        key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+        reverse=True
+    )[:5]
+
+    if not filtered_tx:
+        await query.edit_message_text(text=f"No recent {action} found for {character.name}.")
+        return
+
+    item_ids = [tx['type_id'] for tx in filtered_tx]
+    id_to_name = get_names_from_ids(item_ids)
+
+    action_verb = "Bought" if is_buy else "Sold"
+    message_lines = [f"✅ *Last 5 {action.capitalize()} for {character.name}* ✅\n"]
+    for tx in filtered_tx:
+        item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+        message_lines.append(
+            f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
+        )
+
+    await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
+
 async def post_init(application: Application):
     """Sets the bot's commands in the Telegram menu after initialization."""
     commands = [
         BotCommand("balance", "Check wallet balances for all characters."),
         BotCommand("summary", "Manually trigger the daily summary report."),
+        BotCommand("sales", "View recent sales for a character."),
+        BotCommand("buys", "View recent buys for a character."),
     ]
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands have been set in the Telegram menu.")
@@ -689,6 +770,9 @@ def main() -> None:
     # --- Add command handlers ---
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("summary", summary_command))
+    application.add_handler(CommandHandler("sales", sales_command))
+    application.add_handler(CommandHandler("buys", buys_command))
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
 
     # --- Schedule Jobs ---
     job_queue = application.job_queue
