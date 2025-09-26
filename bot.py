@@ -970,30 +970,32 @@ async def run_daily_summary_for_character(character: Character, context: Context
 
     # --- Fetch data ---
     all_transactions = get_wallet_transactions(character)
-    processed_journal_entries = get_processed_journal_entries(character.id)
-    new_journal_entries_24h, _ = get_wallet_journal(character, processed_journal_entries)
     all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
 
-    # --- 24-Hour Summary ---
-    total_sales_24h = 0
-    profit_24h = 0
+    # --- 24-Hour Summary (Stateless) ---
+    total_sales_24h, total_fees_24h, profit_24h = 0, 0, 0
     if all_transactions:
         sales_past_24_hours = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago]
         total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
-        total_brokers_fees_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries_24h if e.get('ref_type') == 'brokers_fee' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
-        total_transaction_tax_24h = sum(abs(e.get('amount', 0)) for e in new_journal_entries_24h if e.get('ref_type') == 'transaction_tax' and datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago)
+
+    if all_journal_entries:
+        journal_past_24_hours = [e for e in all_journal_entries if datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago]
+        total_brokers_fees_24h = sum(abs(e.get('amount', 0)) for e in journal_past_24_hours if e.get('ref_type') == 'brokers_fee')
+        total_transaction_tax_24h = sum(abs(e.get('amount', 0)) for e in journal_past_24_hours if e.get('ref_type') == 'transaction_tax')
         total_fees_24h = total_brokers_fees_24h + total_transaction_tax_24h
+
+    if all_transactions:
         profit_24h = calculate_fifo_profit_for_summary(sales_past_24_hours, character.id) - total_fees_24h
-    else:
-        total_fees_24h = 0
 
     # --- Monthly Summary (Stateless) ---
-    total_sales_month = 0
-    total_fees_month = 0
+    total_sales_month, total_fees_month = 0, 0
+    if all_transactions:
+        sales_this_month = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == now.month and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == now.year]
+        total_sales_month = sum(s['quantity'] * s['unit_price'] for s in sales_this_month)
+
     if all_journal_entries:
-        current_month_entries = [e for e in all_journal_entries if datetime.fromisoformat(e['date'].replace('Z', '+00:00')).month == now.month and datetime.fromisoformat(e['date'].replace('Z', '+00:00')).year == now.year]
-        total_sales_month = sum(e.get('amount', 0) for e in current_month_entries if e.get('ref_type') == 'player_trading' and e.get('amount', 0) > 0)
-        total_fees_month = sum(abs(e.get('amount', 0)) for e in current_month_entries if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
+        journal_this_month = [e for e in all_journal_entries if datetime.fromisoformat(e['date'].replace('Z', '+00:00')).month == now.month and datetime.fromisoformat(e['date'].replace('Z', '+00:00')).year == now.year]
+        total_fees_month = sum(abs(e.get('amount', 0)) for e in journal_this_month if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
 
     gross_revenue_month = total_sales_month - total_fees_month
     wallet_balance = get_wallet_balance(character)
@@ -1015,11 +1017,7 @@ async def run_daily_summary_for_character(character: Character, context: Context
     )
     await send_telegram_message(context, message, chat_id=chat_id)
 
-    # Persist the newly processed journal entries for the next 24h summary
-    new_entry_ids = [entry['id'] for entry in new_journal_entries_24h]
-    if new_entry_ids:
-        add_processed_journal_entries(character.id, new_entry_ids)
-    logging.info(f"Daily summary sent for {character.name}. Processed {len(new_entry_ids)} new journal entries for 24h summary.")
+    logging.info(f"Daily summary sent for {character.name}.")
 
     return {
         "wallet_balance": wallet_balance, "total_sales_24h": total_sales_24h,
