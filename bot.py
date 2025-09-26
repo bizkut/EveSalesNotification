@@ -606,7 +606,7 @@ async def check_market_activity_for_character(character: Character, context: Con
             profit_line = ""
             if cogs is not None:
                 profit = total_value - cogs
-                profit_line = f"\n**Profit:** `{profit:,.2f} ISK`"
+                profit_line = f"\n**Gross Profit (before fees):** `{profit:,.2f} ISK`"
             else:
                 profit_line = "\n**Profit:** `N/A (No purchase history)`"
             # --- End FIFO ---
