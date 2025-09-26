@@ -665,28 +665,39 @@ async def check_market_activity(context: ContextTypes.DEFAULT_TYPE):
     await asyncio.gather(*(check_market_activity_for_character(c, context) for c in CHARACTERS))
     logging.info("Completed market activity check for all characters.")
 
-def calculate_estimated_profit(sales_today, all_buy_transactions):
-    if not sales_today: return 0
-    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    avg_buy_prices = {}
-    item_types_sold = {sale['type_id'] for sale in sales_today}
-    for type_id in item_types_sold:
-        relevant_buys = [
-            tx for tx in all_buy_transactions
-            if tx['type_id'] == type_id and
-            datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > thirty_days_ago
-        ]
-        if relevant_buys:
-            total_isk_spent = sum(buy['quantity'] * buy['unit_price'] for buy in relevant_buys)
-            total_quantity_bought = sum(buy['quantity'] for buy in relevant_buys)
-            avg_buy_prices[type_id] = total_isk_spent / total_quantity_bought if total_quantity_bought else 0
-        else:
-            avg_buy_prices[type_id] = 0
-    total_sales_value = sum(sale['quantity'] * sale['unit_price'] for sale in sales_today)
-    total_estimated_cogs = sum(
-        sale['quantity'] * avg_buy_prices.get(sale['type_id'], 0) for sale in sales_today
-    )
-    return total_sales_value - total_estimated_cogs
+def calculate_fifo_profit_for_summary(sales_transactions, character_id):
+    """
+    Calculates the total profit for a given list of sales transactions using
+    a read-only FIFO simulation. Does not modify the database.
+    """
+    if not sales_transactions:
+        return 0
+
+    total_sales_value = sum(s['quantity'] * s['unit_price'] for s in sales_transactions)
+    total_cogs = 0
+
+    # Group sales by type_id to process them efficiently
+    sales_by_type = defaultdict(int)
+    for sale in sales_transactions:
+        sales_by_type[sale['type_id']] += sale['quantity']
+
+    for type_id, quantity_sold in sales_by_type.items():
+        lots = get_purchase_lots(character_id, type_id)
+        if not lots:
+            # No purchase history for this item, so we can't calculate its COGS
+            continue
+
+        remaining_to_account_for = quantity_sold
+        for lot in lots:
+            if remaining_to_account_for <= 0:
+                break
+
+            quantity_from_lot = min(remaining_to_account_for, lot['quantity'])
+            total_cogs += quantity_from_lot * lot['price']
+            remaining_to_account_for -= quantity_from_lot
+
+    return total_sales_value - total_cogs
+
 
 async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE, chat_id: int = None):
     """Calculates and prepares the daily summary data for a single character using optimized methods."""
@@ -716,8 +727,7 @@ async def run_daily_summary_for_character(character: Character, context: Context
 
     sales_past_24_hours = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago]
     total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
-    all_buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-    estimated_profit_24h = calculate_estimated_profit(sales_past_24_hours, all_buy_transactions) - total_fees_24h
+    profit_24h = calculate_fifo_profit_for_summary(sales_past_24_hours, character.id) - total_fees_24h
 
     # --- Monthly Summary (Optimized) ---
     last_summary_month_str = get_bot_state(f"last_summary_month_{character.id}")
@@ -751,13 +761,12 @@ async def run_daily_summary_for_character(character: Character, context: Context
         f"*Past 24 Hours:*\n"
         f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{total_fees_24h:,.2f} ISK`\n"
-        f"  - *Estimated Profit:* `{estimated_profit_24h:,.2f} ISK`\n\n"
+        f"  - **Profit (FIFO):** `{profit_24h:,.2f} ISK`\n\n"
         f"---\n\n"
         f"🗓️ *Current Month Summary ({now.strftime('%B %Y')}):*\n"
         f"  - Total Sales Value: `{total_sales_month:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{total_fees_month:,.2f} ISK`\n"
-        f"  - *Gross Revenue (Sales - Fees):* `{gross_revenue_month:,.2f} ISK`\n\n"
-        f"_Profit is estimated based on the average purchase price of items over the last 30 days._"
+        f"  - *Gross Revenue (Sales - Fees):* `{gross_revenue_month:,.2f} ISK`"
     )
     await send_telegram_message(context, message, chat_id=chat_id)
 
@@ -769,7 +778,7 @@ async def run_daily_summary_for_character(character: Character, context: Context
     logging.info(f"Daily summary sent for {character.name}. Processed {len(new_entry_ids)} new journal entries.")
     return {
         "wallet_balance": wallet_balance, "total_sales_24h": total_sales_24h,
-        "total_fees_24h": total_fees_24h, "estimated_profit_24h": estimated_profit_24h,
+        "total_fees_24h": total_fees_24h, "profit_24h": profit_24h,
         "total_sales_month": total_sales_month, "total_fees_month": total_fees_month,
         "gross_revenue_month": gross_revenue_month
     }
@@ -790,7 +799,7 @@ async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int = N
         combined_wallet = sum(s['wallet_balance'] for s in all_character_stats)
         combined_sales_24h = sum(s['total_sales_24h'] for s in all_character_stats)
         combined_fees_24h = sum(s['total_fees_24h'] for s in all_character_stats)
-        combined_profit_24h = sum(s['estimated_profit_24h'] for s in all_character_stats)
+        combined_profit_24h = sum(s['profit_24h'] for s in all_character_stats)
         combined_sales_month = sum(s['total_sales_month'] for s in all_character_stats)
         combined_fees_month = sum(s['total_fees_month'] for s in all_character_stats)
         combined_revenue_month = sum(s['gross_revenue_month'] for s in all_character_stats)
@@ -802,7 +811,7 @@ async def run_daily_summary(context: ContextTypes.DEFAULT_TYPE, chat_id: int = N
             f"**Past 24 Hours (All Characters):**\n"
             f"  - Total Sales Value: `{combined_sales_24h:,.2f} ISK`\n"
             f"  - Total Fees (Broker + Tax): `{combined_fees_24h:,.2f} ISK`\n"
-            f"  - **Total Estimated Profit:** `{combined_profit_24h:,.2f} ISK`*\n\n"
+            f"  - **Total Profit (FIFO):** `{combined_profit_24h:,.2f} ISK`\n\n"
             f"---\n\n"
             f"🗓️ **Current Month Summary (All Characters):**\n"
             f"  - Total Sales Value: `{combined_sales_month:,.2f} ISK`\n"
