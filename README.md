@@ -47,7 +47,6 @@ Follow these steps to get your bot up and running.
 3.  Fill in the details. For the **Callback URL**, you **must** use `https://localhost/callback`.
 4.  Once the application is created, click on it to view its details. Under the "Scopes" section, add the following required scopes:
     -   `esi-wallet.read_character_wallet.v1`
-    -   `esi-wallet.read_character_journal.v1`
     -   `esi-markets.read_character_orders.v1`
     -   `esi-universe.read_structures.v1`
 5.  Keep the **Client ID** and **Secret Key** handy for the next step.
