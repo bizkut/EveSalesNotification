@@ -150,6 +150,12 @@ def setup_database():
             PRIMARY KEY (order_id, character_id)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS esi_names (
+            item_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -323,6 +329,37 @@ def delete_purchase_lot(lot_id):
     cursor.execute("DELETE FROM purchase_lots WHERE lot_id = ?", (lot_id,))
     conn.commit()
     conn.close()
+
+
+def get_names_from_db(id_list):
+    """Retrieves a mapping of id -> name from the local database for the given IDs."""
+    if not id_list:
+        return {}
+    conn = db_connection()
+    cursor = conn.cursor()
+    # Create a string of placeholders for the query
+    placeholders = ','.join('?' for _ in id_list)
+    cursor.execute(f"SELECT item_id, name FROM esi_names WHERE item_id IN ({placeholders})", id_list)
+    id_to_name_map = {row[0]: row[1] for row in cursor.fetchall()}
+    conn.close()
+    logging.debug(f"Resolved {len(id_to_name_map)} names from local DB cache.")
+    return id_to_name_map
+
+
+def save_names_to_db(id_to_name_map):
+    """Saves a mapping of id -> name to the local database."""
+    if not id_to_name_map:
+        return
+    conn = db_connection()
+    cursor = conn.cursor()
+    data_to_insert = list(id_to_name_map.items())
+    cursor.executemany(
+        "INSERT OR IGNORE INTO esi_names (item_id, name) VALUES (?, ?)",
+        data_to_insert
+    )
+    conn.commit()
+    conn.close()
+    logging.debug(f"Saved {len(data_to_insert)} new names to local DB cache.")
 
 
 # --- ESI API Functions ---
@@ -540,24 +577,59 @@ def get_market_history(type_id, region_id):
     return history_data[-1] if history_data else None
 
 def get_names_from_ids(id_list):
-    if not id_list: return {}
-    # Filter for valid, positive integer IDs and remove duplicates.
-    # Also exclude IDs > 10^10, which are typically player-owned structures and not resolvable by this endpoint.
-    valid_ids = list(set(id for id in id_list if isinstance(id, int) and 0 < id < 10000000000))
-    if not valid_ids:
+    """
+    Resolves a list of IDs to names, using a local database cache
+    to avoid unnecessary ESI calls.
+    """
+    if not id_list:
         return {}
 
-    url = "https://esi.evetech.net/v3/universe/names/"
-    id_to_name_map = {}
-    # Break the list into chunks of 1000, the ESI limit
-    for i in range(0, len(valid_ids), 1000):
-        chunk = valid_ids[i:i+1000]
-        # Note: POST requests to /names/ are publicly cached and don't need auth
-        name_data = make_esi_request(url, data=chunk)
-        if name_data:
-            for item in name_data:
-                id_to_name_map[item['id']] = item['name']
-    return id_to_name_map
+    # Filter for unique, valid, positive integer IDs.
+    unique_ids = list(set(id for id in id_list if isinstance(id, int) and id > 0))
+    if not unique_ids:
+        logging.warning("get_names_from_ids: No valid IDs provided.")
+        return {}
+
+    logging.debug(f"get_names_from_ids called for {len(unique_ids)} unique IDs.")
+
+    # 1. Check local database cache first
+    all_resolved_names = get_names_from_db(unique_ids)
+
+    # 2. Identify which names are missing from the cache
+    missing_ids = [id for id in unique_ids if id not in all_resolved_names]
+
+    # 3. If there are missing IDs, fetch them from ESI
+    if missing_ids:
+        # Filter out IDs > 10^10, which are typically player-owned structures
+        # and not resolvable by the /universe/names/ endpoint.
+        valid_esi_ids = [id for id in missing_ids if id < 10000000000]
+
+        if valid_esi_ids:
+            logging.info(f"Resolving {len(valid_esi_ids)} new names from ESI.")
+            url = "https://esi.evetech.net/v3/universe/names/"
+            newly_resolved_names = {}
+
+            # Break the list into chunks of 1000 (ESI limit)
+            for i in range(0, len(valid_esi_ids), 1000):
+                chunk = valid_esi_ids[i:i+1000]
+                logging.debug(f"Requesting ESI names for chunk of {len(chunk)} IDs.")
+                name_data = make_esi_request(url, data=chunk)
+                if name_data:
+                    for item in name_data:
+                        newly_resolved_names[item['id']] = item['name']
+                else:
+                    logging.error(f"Failed to resolve ESI names for chunk starting with ID {chunk[0]}.")
+
+            # 4. Save the newly resolved names to the database cache
+            if newly_resolved_names:
+                save_names_to_db(newly_resolved_names)
+                all_resolved_names.update(newly_resolved_names)
+
+        else:
+            logging.debug("All missing IDs were filtered out before ESI request (e.g., structure IDs).")
+
+    logging.info(f"get_names_from_ids resolved a total of {len(all_resolved_names)}/{len(unique_ids)} names.")
+    return all_resolved_names
 
 # --- Telegram Bot Functions ---
 
@@ -1141,12 +1213,15 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         item_ids = [tx['type_id'] for tx in filtered_tx]
-        id_to_name = get_names_from_ids(item_ids)
-        message_lines = [f"✅ *Last 5 Sales for {character.name}* ✅\n"]
+        loc_ids = [tx['location_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
+        icon = "🛒" if is_buy else "✅"
+        message_lines = [f"{icon} *Last 5 {action.capitalize()} for {character.name}* {icon}\n"]
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
         await _show_character_selection(update, "sales")
@@ -1173,12 +1248,14 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
         item_ids = [tx['type_id'] for tx in filtered_tx]
-        id_to_name = get_names_from_ids(item_ids)
+        loc_ids = [tx['location_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
         message_lines = [f"🛒 *Last 5 Buys for {character.name}* 🛒\n"]
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
         await _show_character_selection(update, "buys")
@@ -1250,12 +1327,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             return
 
         item_ids = [tx['type_id'] for tx in filtered_tx]
-        id_to_name = get_names_from_ids(item_ids)
-        message_lines = [f"✅ *Last 5 {action.capitalize()} for {character.name}* ✅\n"]
+        loc_ids = [tx['location_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
+        icon = "🛒" if is_buy else "✅"
+        message_lines = [f"{icon} *Last 5 {action.capitalize()} for {character.name}* {icon}\n"]
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
 
 async def post_init(application: Application):
