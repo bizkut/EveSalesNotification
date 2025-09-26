@@ -150,6 +150,36 @@ def setup_database():
             purchase_date TEXT NOT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS processed_orders (
+            order_id INTEGER NOT NULL,
+            character_id INTEGER NOT NULL,
+            PRIMARY KEY (order_id, character_id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_processed_orders(character_id):
+    """Retrieves all processed order IDs for a character from the database."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT order_id FROM processed_orders WHERE character_id = ?", (character_id,))
+    processed_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return processed_ids
+
+def add_processed_orders(character_id, order_ids):
+    """Adds a list of order IDs for a character to the database."""
+    if not order_ids:
+        return
+    conn = db_connection()
+    cursor = conn.cursor()
+    data_to_insert = [(o_id, character_id) for o_id in order_ids]
+    cursor.executemany(
+        "INSERT OR IGNORE INTO processed_orders (order_id, character_id) VALUES (?, ?)",
+        data_to_insert
+    )
     conn.commit()
     conn.close()
 
@@ -500,6 +530,41 @@ def get_wallet_balance(character, return_headers=False):
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
     return make_esi_request(url, character=character, return_headers=return_headers)
 
+def get_market_orders_history(character, return_headers=False):
+    """
+    Fetches all pages of historical market orders from ESI.
+    """
+    if not character:
+        return (None, None) if return_headers else None
+
+    all_orders = []
+    page = 1
+    url = f"https://esi.evetech.net/v1/characters/{character.id}/orders/history/"
+    first_page_headers = None
+
+    while True:
+        params = {"datasource": "tranquility", "page": page}
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True)
+
+        if page == 1:
+            first_page_headers = headers
+
+        if not data:
+            break
+
+        all_orders.extend(data)
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1)
+
+    if return_headers:
+        return all_orders, first_page_headers
+    return all_orders
+
 def get_market_history(type_id, region_id):
     url = f"https://esi.evetech.net/v1/markets/{region_id}/history/"
     params = {"type_id": type_id, "datasource": "tranquility"}
@@ -622,132 +687,157 @@ async def check_wallet_balance_job(context: ContextTypes.DEFAULT_TYPE):
     context.job_queue.run_once(check_wallet_balance_job, delay, data=character)
     logging.info(f"Wallet balance check for {character.name} complete. Next check in {delay:.2f} seconds.")
 
-async def check_market_orders_job(context: ContextTypes.DEFAULT_TYPE):
-    """A self-scheduling job to check for market order updates."""
-    character = context.job.data
-    logging.debug(f"Running market order check for {character.name}")
 
-    live_orders, headers = get_market_orders(character, return_headers=True)
-    if live_orders is None:
-        logging.error(f"Failed to fetch market orders for {character.name}. Retrying in 60s.")
-        context.job_queue.run_once(check_market_orders_job, 60, data=character)
+async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    A self-scheduling job that checks for new wallet transactions and sends notifications.
+    This is the primary, accurate source for sales and buy notifications.
+    """
+    character = context.job.data
+    logging.debug(f"Running wallet transaction check for {character.name}")
+
+    all_transactions, headers = get_wallet_transactions(character, return_headers=True)
+    if all_transactions is None:
+        logging.error(f"Failed to fetch wallet transactions for {character.name}. Retrying in 60s.")
+        context.job_queue.run_once(check_wallet_transactions_job, 60, data=character)
         return
 
-    tracked_orders = get_tracked_market_orders(character.id)
-    sales_detected = defaultdict(list)
-    buys_detected = defaultdict(list)
-    orders_to_update = []
+    processed_tx_ids = get_processed_transactions(character.id)
+    new_transactions = [tx for tx in all_transactions if tx['transaction_id'] not in processed_tx_ids]
 
-    for order in live_orders:
-        order_id = order['order_id']
-        orders_to_update.append((order_id, order['volume_remain']))
-
-        if order_id in tracked_orders and order['volume_remain'] < tracked_orders[order_id]:
-            quantity = tracked_orders[order_id] - order['volume_remain']
-            if order.get('is_buy_order'):
-                buys_detected[order['type_id']].append({'quantity': quantity, 'price': order['price'], 'location_id': order['location_id']})
+    if new_transactions:
+        logging.info(f"Detected {len(new_transactions)} new transactions for {character.name}.")
+        sales = defaultdict(list)
+        buys = defaultdict(list)
+        for tx in new_transactions:
+            if tx['is_buy']:
+                buys[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price'], 'location_id': tx['location_id']})
             else:
-                sales_detected[order['type_id']].append({'quantity': quantity, 'price': order['price'], 'location_id': order['location_id']})
+                sales[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price'], 'location_id': tx['location_id']})
 
-    batch_threshold = getattr(config, 'NOTIFICATION_BATCH_THRESHOLD', 3)
-    enable_sales = getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true'
-    enable_buys = getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true'
+        all_type_ids = list(sales.keys()) + list(buys.keys())
+        all_loc_ids = [t['location_id'] for txs in sales.values() for t in txs] + [t['location_id'] for txs in buys.values() for t in txs]
+        id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [config.REGION_ID])))
 
-    if sales_detected and enable_sales:
-        item_ids = list(sales_detected.keys())
-        loc_ids = [sale['location_id'] for sales in sales_detected.values() for sale in sales]
-        id_to_name = get_names_from_ids(item_ids + loc_ids + [config.REGION_ID])
         wallet_balance = get_wallet_balance(character)
+        batch_threshold = getattr(config, 'NOTIFICATION_BATCH_THRESHOLD', 3)
+        enable_sales = getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true'
+        enable_buys = getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true'
 
-        if len(sales_detected) > batch_threshold:
-            # --- Batched Sales Notification ---
-            message_lines = [f"✅ *Multiple Market Sales ({character.name})* ✅\n"]
-            grand_total_value = 0
-            grand_total_cogs = 0
-            for type_id, sales in sales_detected.items():
-                total_quantity = sum(s['quantity'] for s in sales)
-                total_value = sum(s['quantity'] * s['price'] for s in sales)
-                grand_total_value += total_value
-                cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-                if cogs is not None: grand_total_cogs += cogs
-                message_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+        if sales and enable_sales:
+            if len(sales) > batch_threshold:
+                message_lines = [f"✅ *Multiple Market Sales ({character.name})* ✅\n"]
+                grand_total_value, grand_total_cogs = 0, 0
+                for type_id, tx_group in sales.items():
+                    total_quantity = sum(t['quantity'] for t in tx_group)
+                    total_value = sum(t['quantity'] * t['price'] for t in tx_group)
+                    grand_total_value += total_value
+                    cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
+                    if cogs is not None: grand_total_cogs += cogs
+                    message_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+                profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
+                message_lines.append(f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}")
+                if wallet_balance is not None: message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+                await send_telegram_message(context, "\n".join(message_lines))
+            else:
+                for type_id, tx_group in sales.items():
+                    total_quantity = sum(t['quantity'] for t in tx_group)
+                    total_value = sum(t['quantity'] * t['price'] for t in tx_group)
+                    avg_price = total_value / total_quantity
+                    cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
+                    profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
+                    history = get_market_history(type_id, config.REGION_ID)
+                    price_diff_str = f"({(avg_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+                    message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
+                               f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
+                               f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
+                               f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg:** `{history['average'] if history else 'N/A':,.2f} ISK` {price_diff_str}\n"
+                               f"{profit_line}\n"
+                               f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
+                               f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+                    await send_telegram_message(context, message)
+                    await asyncio.sleep(1)
 
-            profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
-            message_lines.append(f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}")
-            message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-            await send_telegram_message(context, "\n".join(message_lines))
-        else:
-            # --- Individual Sales Notifications ---
-            for type_id, sales in sales_detected.items():
-                total_quantity = sum(s['quantity'] for s in sales)
-                total_value = sum(s['quantity'] * s['price'] for s in sales)
-                avg_price = total_value / total_quantity
-                cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-                profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
-                history = get_market_history(type_id, config.REGION_ID)
-                price_diff_str = f"({(avg_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
-                message = (
-                    f"✅ *Market Sale ({character.name})* ✅\n\n"
-                    f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                    f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
-                    f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg:** `{history['average']:,.2f} ISK` {price_diff_str}"
-                    f"{profit_line}\n"
-                    f"**Location:** `{id_to_name.get(sales[0]['location_id'], 'Unknown')}`\n"
-                    f"**Wallet:** `{wallet_balance:,.2f} ISK`"
-                )
-                await send_telegram_message(context, message)
-                await asyncio.sleep(1)
+        if buys and enable_buys:
+            for type_id, tx_group in buys.items():
+                for tx in tx_group:
+                    add_purchase_lot(character.id, type_id, tx['quantity'], tx['price'])
+            if len(buys) > batch_threshold:
+                message_lines = [f"🛒 *Multiple Market Buys ({character.name})* 🛒\n"]
+                grand_total_cost = 0
+                for type_id, tx_group in buys.items():
+                    total_quantity = sum(t['quantity'] for t in tx_group)
+                    grand_total_cost += sum(t['quantity'] * t['price'] for t in tx_group)
+                    message_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+                message_lines.append(f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`")
+                if wallet_balance is not None: message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+                await send_telegram_message(context, "\n".join(message_lines))
+            else:
+                for type_id, tx_group in buys.items():
+                    total_quantity = sum(t['quantity'] for t in tx_group)
+                    total_cost = sum(t['quantity'] * t['price'] for t in tx_group)
+                    message = (f"🛒 *Market Buy ({character.name})* 🛒\n\n"
+                               f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
+                               f"**Quantity:** `{total_quantity}`\n"
+                               f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
+                               f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
+                               f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+                    await send_telegram_message(context, message)
+                    await asyncio.sleep(1)
 
-    if buys_detected and enable_buys:
-        item_ids = list(buys_detected.keys())
-        loc_ids = [buy['location_id'] for buys in buys_detected.values() for buy in buys]
-        id_to_name = get_names_from_ids(item_ids + loc_ids)
-        wallet_balance = get_wallet_balance(character)
+        add_processed_transactions(character.id, [tx['transaction_id'] for tx in new_transactions])
 
-        # Record all purchases first for FIFO
-        for type_id, buys in buys_detected.items():
-            for buy in buys:
-                add_purchase_lot(character.id, type_id, buy['quantity'], buy['price'])
-
-        if len(buys_detected) > batch_threshold:
-            # --- Batched Buy Notification ---
-            message_lines = [f"🛒 *Multiple Market Buys ({character.name})* 🛒\n"]
-            grand_total_cost = 0
-            for type_id, buys in buys_detected.items():
-                total_quantity = sum(b['quantity'] for b in buys)
-                total_cost = sum(b['quantity'] * b['price'] for b in buys)
-                grand_total_cost += total_cost
-                message_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
-
-            message_lines.append(f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`")
-            message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-            await send_telegram_message(context, "\n".join(message_lines))
-        else:
-            # --- Individual Buy Notifications ---
-            for type_id, buys in buys_detected.items():
-                total_quantity = sum(b['quantity'] for b in buys)
-                total_cost = sum(b['quantity'] * b['price'] for b in buys)
-                message = (
-                    f"🛒 *Market Buy ({character.name})* 🛒\n\n"
-                    f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                    f"**Quantity:** `{total_quantity}`\n"
-                    f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
-                    f"**Location:** `{id_to_name.get(buys[0]['location_id'], 'Unknown')}`\n"
-                    f"**Wallet:** `{wallet_balance:,.2f} ISK`"
-                )
-                await send_telegram_message(context, message)
-                await asyncio.sleep(1)
-
-    update_tracked_market_orders(character.id, orders_to_update)
-    live_order_ids = {o['order_id'] for o in live_orders}
-    stale_order_ids = set(tracked_orders.keys()) - live_order_ids
-    if stale_order_ids:
-        remove_tracked_market_orders(character.id, list(stale_order_ids))
-
-    # --- Reschedule ---
     delay = get_next_run_delay(headers)
-    context.job_queue.run_once(check_market_orders_job, delay, data=character)
-    logging.info(f"Market order check for {character.name} complete. Next check in {delay:.2f} seconds.")
+    context.job_queue.run_once(check_wallet_transactions_job, delay, data=character)
+    logging.info(f"Wallet transaction check for {character.name} complete. Next check in {delay:.2f} seconds.")
+
+
+async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    A self-scheduling job that checks for cancelled or expired orders.
+    """
+    character = context.job.data
+    logging.debug(f"Running order history check for {character.name}")
+
+    order_history, headers = get_market_orders_history(character, return_headers=True)
+    if order_history is None:
+        logging.error(f"Failed to fetch order history for {character.name}. Retrying in 3600s.")
+        context.job_queue.run_once(check_order_history_job, 3600, data=character)
+        return
+
+    processed_order_ids = get_processed_orders(character.id)
+    new_orders = [o for o in order_history if o['order_id'] not in processed_order_ids]
+
+    if new_orders:
+        logging.info(f"Detected {len(new_orders)} new historical orders for {character.name}.")
+        # We only care about non-filled orders here. Fills are handled by the transaction job.
+        cancelled_orders = [o for o in new_orders if o.get('state') == 'cancelled']
+        expired_orders = [o for o in new_orders if o.get('state') == 'expired']
+
+        if cancelled_orders:
+            item_ids = [o['type_id'] for o in cancelled_orders]
+            id_to_name = get_names_from_ids(item_ids)
+            for order in cancelled_orders:
+                message = (f"ℹ️ *Order Cancelled ({character.name})* ℹ️\n"
+                           f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled.")
+                await send_telegram_message(context, message)
+                await asyncio.sleep(1)
+
+        if expired_orders:
+            item_ids = [o['type_id'] for o in expired_orders]
+            id_to_name = get_names_from_ids(item_ids)
+            for order in expired_orders:
+                message = (f"ℹ️ *Order Expired ({character.name})* ℹ️\n"
+                           f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired.")
+                await send_telegram_message(context, message)
+                await asyncio.sleep(1)
+
+        add_processed_orders(character.id, [o['order_id'] for o in new_orders])
+
+    delay = get_next_run_delay(headers)
+    context.job_queue.run_once(check_order_history_job, delay, data=character)
+    logging.info(f"Order history check for {character.name} complete. Next check in {delay:.2f} seconds.")
+
 
 def calculate_fifo_profit_for_summary(sales_transactions, character_id):
     """
@@ -979,24 +1069,26 @@ def initialize_purchase_history():
         logging.info(f"Successfully seeded {len(buy_transactions)} historical buy transactions for {character.name}.")
 
 
-def initialize_market_orders():
-    """On first run, seeds the database with the current state of market orders."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT count(*) FROM market_orders")
-    count = cursor.fetchone()[0]
-    conn.close()
-    if count > 0:
-        logging.info(f"Existing market order history found ({count} records). Skipping seeding.")
-        return
-
-    logging.info("First run detected. Seeding initial market order state...")
+def initialize_order_history():
+    """On first run, seeds the database with all historical orders to prevent old notifications."""
+    logging.info("Checking for unseeded characters for order history...")
     for character in CHARACTERS:
-        live_orders = get_market_orders(character)
-        if live_orders:
-            orders_to_track = [(order['order_id'], order['volume_remain']) for order in live_orders]
-            update_tracked_market_orders(character.id, orders_to_track)
-            logging.info(f"Seeded {len(orders_to_track)} active market orders for {character.name}.")
+        state_key = f"order_history_seeded_{character.id}"
+        if get_bot_state(state_key) == 'true':
+            logging.info(f"Order history already seeded for {character.name}. Skipping.")
+            continue
+
+        logging.info(f"Seeding order history for {character.name}...")
+        all_historical_orders = get_market_orders_history(character)
+        if all_historical_orders:
+            order_ids = [o['order_id'] for o in all_historical_orders]
+            add_processed_orders(character.id, order_ids)
+            logging.info(f"Successfully seeded {len(order_ids)} historical orders for {character.name}.")
+        else:
+            logging.info(f"No historical orders found to seed for {character.name}.")
+
+        set_bot_state(state_key, 'true')
+
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and displays the wallet balance for the configured character(s)."""
@@ -1219,11 +1311,12 @@ def main() -> None:
     if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' or \
        getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
         initialize_purchase_history()
-        initialize_market_orders()
+        initialize_order_history()
         for character in CHARACTERS:
             # Start the self-scheduling jobs for each character
-            job_queue.run_once(check_market_orders_job, 5, data=character, name=f"market_orders_{character.id}")
-            job_queue.run_once(check_wallet_balance_job, 10, data=character, name=f"wallet_balance_{character.id}")
+            job_queue.run_once(check_wallet_transactions_job, 5, data=character, name=f"wallet_transactions_{character.id}")
+            job_queue.run_once(check_order_history_job, 15, data=character, name=f"order_history_{character.id}")
+            job_queue.run_once(check_wallet_balance_job, 25, data=character, name=f"wallet_balance_{character.id}")
         logging.info("Market activity notifications ENABLED. Jobs are now self-scheduling based on cache timers.")
     else:
         logging.info("Market activity notifications DISABLED by config.")
