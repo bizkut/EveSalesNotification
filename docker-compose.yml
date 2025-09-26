@@ -9,11 +9,7 @@ services:
     # from the 'config.py.example' template and fill in your details.
     volumes:
       # Mount the config file to provide credentials to the bot
-      - ./config.py:/app/config.py
-      # Use a named volume to persist the processed transactions data inside the 'data' directory
-      - processed_data:/app/data
-
-# Defines the named volume for persisting data
-volumes:
-  processed_data:
-    driver: local
+      - ./config.py:/app/config.py:ro
+      # Mount the database file directly to make it persistent and accessible on the host.
+      # The bot will create this file on its first run.
+      - ./bot_data.db:/app/bot_data.db
