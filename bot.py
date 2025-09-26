@@ -1217,8 +1217,7 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         item_ids = [tx['type_id'] for tx in filtered_tx]
         loc_ids = [tx['location_id'] for tx in filtered_tx]
         id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
-        icon = "🛒" if is_buy else "✅"
-        message_lines = [f"{icon} *Last 5 {action.capitalize()} for {character.name}* {icon}\n"]
+        message_lines = [f"✅ *Last 5 Sales for {character.name}* ✅\n"]
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
             loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
