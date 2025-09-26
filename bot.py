@@ -371,7 +371,16 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
     Makes a request to the ESI API, handling caching via ETag and Expires headers.
     Returns the JSON response and optionally the response headers.
     """
-    cache_key = f"{url}:{character.id if character else 'public'}:{str(params)}"
+    # Create a cache key that includes request parameters and the POST body (if any)
+    # to ensure uniqueness for different API calls.
+    data_key_part = ""
+    if data:
+        # For POST requests with a list of IDs, sort them to ensure cache key consistency.
+        if isinstance(data, list):
+            data_key_part = str(sorted(data))
+        else:
+            data_key_part = str(data)
+    cache_key = f"{url}:{character.id if character else 'public'}:{str(params)}:{data_key_part}"
     cached_response = ESI_CACHE.get(cache_key)
     headers = {"Accept": "application/json"}
     if character:
