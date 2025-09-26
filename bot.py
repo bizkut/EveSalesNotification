@@ -75,9 +75,29 @@ def db_connection():
     return sqlite3.connect(DB_FILE)
 
 def setup_database():
-    """Creates the necessary database tables if they don't exist."""
+    """Creates the necessary database tables if they don't exist and handles schema migration."""
     conn = db_connection()
     cursor = conn.cursor()
+
+    # --- Schema Migration Check ---
+    # Check if the 'market_orders' table exists and lacks the 'character_id' column.
+    # This indicates an old schema that needs to be updated.
+    try:
+        cursor.execute("SELECT character_id FROM market_orders LIMIT 1")
+    except sqlite3.OperationalError as e:
+        if "no such column: character_id" in str(e):
+            logging.info("Old database schema detected. Dropping and recreating tables.")
+            # Drop old tables that are affected by the schema change
+            cursor.execute("DROP TABLE IF EXISTS market_orders")
+            cursor.execute("DROP TABLE IF EXISTS processed_transactions")
+            cursor.execute("DROP TABLE IF EXISTS processed_journal_entries")
+            conn.commit()
+            logging.info("Old tables dropped successfully.")
+        else:
+            # Re-raise other operational errors
+            raise
+
+    # --- Table Creation ---
     # Table for tracking individual transaction notifications
     # A composite primary key is used because transaction_id is only unique per character.
     cursor.execute("""
@@ -631,7 +651,7 @@ async def run_daily_summary_for_character(character: Character, all_transactions
         f"  - Total Sales Value: `{total_sales_month:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{total_fees_month:,.2f} ISK`\n"
         f"  - **Gross Revenue (Sales - Fees):** `{gross_revenue_month:,.2f} ISK`\n\n"
-        f"_\*Profit is estimated based on the average purchase price of items over the last 30 days._"
+        f"_*Profit is estimated based on the average purchase price of items over the last 30 days._"
     )
     await send_telegram_message(message)
 
