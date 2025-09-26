@@ -127,7 +127,7 @@ async def check_for_new_orders():
     if not new_orders:
         logging.info("No new sales orders found."); return
 
-    logging.info(f"Found {len(new_orders)} new sales orders. Grouping and processing...")
+    logging.info(f"Found {len(new_orders)} new sales orders. Grouping them by item and buyer before sending notifications...")
 
     grouped_sales = defaultdict(lambda: {'total_quantity': 0, 'total_value': 0, 'transaction_ids': []})
     for order in new_orders:
@@ -202,6 +202,19 @@ if __name__ == "__main__":
     schedule.every(5).minutes.do(lambda: asyncio.run(check_for_new_orders()))
     logging.info("Scheduler started. Will check for new orders every 5 minutes.")
 
+    logging.info("Entering main loop to run scheduler...")
     while True:
+        # This runs any jobs that are due.
         schedule.run_pending()
-        time.sleep(1)
+
+        # This finds out how long to wait until the next scheduled job.
+        idle_seconds = schedule.idle_seconds()
+        if idle_seconds is not None and idle_seconds > 1:
+            # We log the wait time and then sleep to be resource-friendly.
+            # The log message confirms that we are waiting and not processing instantly.
+            logging.info(f"Next check in {int(idle_seconds)} seconds. Waiting...")
+            time.sleep(idle_seconds)
+        else:
+            # If jobs are very close together, or if there are no jobs,
+            # we still wait a moment to prevent a fast, resource-intensive loop.
+            time.sleep(1)
