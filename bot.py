@@ -163,10 +163,39 @@ async def check_for_new_orders():
 
     logging.info(f"Check complete. Processed {len(all_new_transaction_ids)} new orders in {len(grouped_sales)} groups.")
 
+def initialize_transaction_history():
+    """On first run, seeds the transaction history to avoid notifying for historical orders."""
+    if os.path.exists(PROCESSED_TRANSACTIONS_FILE):
+        logging.info("Existing transaction history found.")
+        return
+
+    logging.info("First run detected. Seeding transaction history to ignore past orders...")
+    access_token = get_access_token()
+    if not access_token:
+        logging.error("Could not obtain access token. Failed to seed history."); return
+
+    character_id = get_character_id(access_token)
+    if not character_id:
+        logging.error("Could not obtain character ID. Failed to seed history."); return
+
+    historical_orders = get_filled_orders(access_token, character_id)
+    if not historical_orders:
+        logging.info("No historical orders found to seed.")
+        save_processed_transactions(set()) # Create empty file to mark as initialized
+        return
+
+    historical_ids = {order['transaction_id'] for order in historical_orders}
+    save_processed_transactions(historical_ids)
+    logging.info(f"Successfully seeded {len(historical_ids)} historical transactions. The bot will now only notify for new sales.")
+
 if __name__ == "__main__":
     logging.info("Bot starting up...")
 
-    logging.info("Performing initial check...")
+    # This will seed the history on the very first run
+    initialize_transaction_history()
+
+    # The first check will now only find orders created after initialization
+    logging.info("Performing initial check for any orders created since startup...")
     import asyncio
     asyncio.run(check_for_new_orders())
 
