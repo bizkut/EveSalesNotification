@@ -650,7 +650,7 @@ def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
 
     if remaining_to_sell > 0:
         # This can happen if the user sells items they acquired before the bot started tracking
-        logging.warning(
+        logging.debug(
             f"Could not find enough purchase history for char {character_id} to account for sale of {quantity_sold} of type {type_id}. "
             f"Profit calculation may be incomplete for this sale."
         )
@@ -1016,33 +1016,39 @@ def initialize_journal_history():
         logging.info(f"Seeded {len(historical_ids)} historical journal entries for {character.name}.")
 
 
-def initialize_purchase_history():
-    """On first run, seeds the database with historical buy transactions to enable profit tracking."""
-    logging.info("Checking for unseeded characters for purchase history...")
+def initialize_all_transactions():
+    """
+    On first run, seeds the database with all historical wallet transactions.
+    This populates purchase history for profit tracking and marks all initial
+    transactions as 'processed' to prevent a flood of old notifications.
+    """
+    logging.info("Checking for unseeded characters for transaction history...")
     for character in CHARACTERS:
-        state_key = f"purchase_history_seeded_{character.id}"
+        state_key = f"transactions_seeded_{character.id}"
         if get_bot_state(state_key) == 'true':
-            logging.info(f"Purchase history already seeded for {character.name}. Skipping.")
+            logging.info(f"Transaction history already seeded for {character.name}. Skipping.")
             continue
 
-        logging.info(f"Seeding purchase history for {character.name}...")
+        logging.info(f"Seeding transaction history for {character.name}...")
         all_transactions = get_wallet_transactions(character)
         if not all_transactions:
-            logging.info(f"No historical transactions found for {character.name}.")
+            logging.info(f"No historical transactions found to seed for {character.name}.")
             set_bot_state(state_key, 'true')
             continue
 
+        # Seed purchase lots for future profit calculation
         buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-        if not buy_transactions:
-            logging.info(f"No historical buy transactions found for {character.name}.")
-            set_bot_state(state_key, 'true')
-            continue
+        if buy_transactions:
+            for tx in buy_transactions:
+                add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+            logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for {character.name}.")
 
-        for tx in buy_transactions:
-            add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+        # Mark all transactions as processed to prevent initial notification spam
+        transaction_ids = [tx['transaction_id'] for tx in all_transactions]
+        add_processed_transactions(character.id, transaction_ids)
+        logging.info(f"Seeded and marked {len(transaction_ids)} historical transactions as processed for {character.name}.")
 
         set_bot_state(state_key, 'true')
-        logging.info(f"Successfully seeded {len(buy_transactions)} historical buy transactions for {character.name}.")
 
 
 def initialize_order_history():
@@ -1286,7 +1292,7 @@ def main() -> None:
     job_queue = application.job_queue
     if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' or \
        getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
-        initialize_purchase_history()
+        initialize_all_transactions()
         initialize_order_history()
         for character in CHARACTERS:
             # Start the self-scheduling jobs for each character
