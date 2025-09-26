@@ -25,7 +25,12 @@ def main():
         print("Please add your application's Client ID to config.py.")
         return
 
-    scopes = "esi-wallet.read_character_wallet.v1"
+    scopes = [
+        "esi-wallet.read_character_wallet.v1",
+        "esi-wallet.read_character_journal.v1",
+        "esi-markets.read_character_orders.v1",
+    ]
+    scopes_string = " ".join(scopes)
     callback_url = "https://localhost/callback"
 
     # 1. Generate the authorization URL with a state parameter
@@ -35,7 +40,7 @@ def main():
         f"response_type=code&"
         f"redirect_uri={callback_url}&"
         f"client_id={ESI_CLIENT_ID}&"
-        f"scope={scopes}&"
+        f"scope={scopes_string}&"
         f"state={state}"
     )
 
