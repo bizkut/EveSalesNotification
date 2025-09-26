@@ -881,22 +881,46 @@ def initialize_market_orders():
         logging.info(f"Seeded {len(orders_to_track)} active market orders for {character.name}.")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays a character selection menu for viewing wallet balance(s)."""
+    """Fetches and displays the wallet balance for the configured character(s)."""
     logging.info(f"Received /balance command from user {update.effective_user.name}")
-    await _show_character_selection(update, "balance", include_all=True)
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot fetch balances.")
+        return
+
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Fetching balance for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            await update.message.reply_text(f"Could not refresh token for {character.name}.")
+            return
+        balance = get_wallet_balance(access_token, character.id)
+        if balance is not None:
+            message = f"💰 *Wallet Balance for {character.name}*\n\n`{balance:,.2f} ISK`"
+            await update.message.reply_text(text=message, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"Error fetching balance for {character.name}.")
+    else:
+        await _show_character_selection(update, "balance", include_all=True)
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays a character selection menu for triggering the daily summary."""
+    """Manually triggers the daily summary report for the configured character(s)."""
     logging.info(f"Received /summary command from user {update.effective_user.name}")
-    await _show_character_selection(update, "summary", include_all=True)
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot run summary.")
+        return
+
+    chat_id = update.effective_chat.id
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Generating summary for {character.name}...")
+        await run_daily_summary_for_character(character, context, chat_id=chat_id)
+    else:
+        await _show_character_selection(update, "summary", include_all=True)
 
 async def _show_character_selection(update: Update, action: str, include_all: bool = False) -> None:
     """Displays an inline keyboard for character selection for a given action."""
-    if not CHARACTERS:
-        await update.message.reply_text("No characters are loaded. Cannot perform this action.")
-        return
-
     keyboard = [
         [InlineKeyboardButton(character.name, callback_data=f"{action}:{character.id}")]
         for character in CHARACTERS
@@ -909,15 +933,91 @@ async def _show_character_selection(update: Update, action: str, include_all: bo
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays a character selection menu for viewing recent sales."""
+    """Displays the 5 most recent sales for the configured character(s)."""
     logging.info(f"Received /sales command from user {update.effective_user.name}")
-    await _show_character_selection(update, "sales")
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot fetch sales.")
+        return
+
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Fetching recent sales for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            await update.message.reply_text(f"Could not refresh token for {character.name}.")
+            return
+
+        all_transactions = get_wallet_transactions(access_token, character.id)
+        if not all_transactions:
+            await update.message.reply_text(f"No transaction history found for {character.name}.")
+            return
+
+        filtered_tx = sorted(
+            [tx for tx in all_transactions if not tx.get('is_buy')],
+            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+            reverse=True
+        )[:5]
+
+        if not filtered_tx:
+            await update.message.reply_text(f"No recent sales found for {character.name}.")
+            return
+
+        item_ids = [tx['type_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(item_ids)
+        message_lines = [f"✅ *Last 5 Sales for {character.name}* ✅\n"]
+        for tx in filtered_tx:
+            item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+            message_lines.append(
+                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
+            )
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+    else:
+        await _show_character_selection(update, "sales")
 
 
 async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays a character selection menu for viewing recent buys."""
+    """Displays the 5 most recent buys for the configured character(s)."""
     logging.info(f"Received /buys command from user {update.effective_user.name}")
-    await _show_character_selection(update, "buys")
+    if not CHARACTERS:
+        await update.message.reply_text("No characters are loaded. Cannot fetch buys.")
+        return
+
+    if len(CHARACTERS) == 1:
+        character = CHARACTERS[0]
+        await update.message.reply_text(f"Fetching recent buys for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            await update.message.reply_text(f"Could not refresh token for {character.name}.")
+            return
+
+        all_transactions = get_wallet_transactions(access_token, character.id)
+        if not all_transactions:
+            await update.message.reply_text(f"No transaction history found for {character.name}.")
+            return
+
+        filtered_tx = sorted(
+            [tx for tx in all_transactions if tx.get('is_buy')],
+            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+            reverse=True
+        )[:5]
+
+        if not filtered_tx:
+            await update.message.reply_text(f"No recent buys found for {character.name}.")
+            return
+
+        item_ids = [tx['type_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(item_ids)
+        message_lines = [f"🛒 *Last 5 Buys for {character.name}* 🛒\n"]
+        for tx in filtered_tx:
+            item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+            message_lines.append(
+                f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each."
+            )
+        await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+    else:
+        await _show_character_selection(update, "buys")
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles button clicks for character selection."""
