@@ -278,20 +278,23 @@ def add_processed_journal_entries(character_id, entry_ids):
     conn.close()
 
 
-def add_purchase_lot(character_id, type_id, quantity, price):
-    """Adds a new purchase lot to the database."""
+def add_purchase_lot(character_id, type_id, quantity, price, purchase_date=None):
+    """Adds a new purchase lot to the database, with an optional historical date."""
     conn = db_connection()
     cursor = conn.cursor()
+    if purchase_date is None:
+        purchase_date = datetime.now(timezone.utc).isoformat()
+
     cursor.execute(
         """
         INSERT INTO purchase_lots (character_id, type_id, quantity, price, purchase_date)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (character_id, type_id, quantity, price, datetime.now(timezone.utc).isoformat())
+        (character_id, type_id, quantity, price, purchase_date)
     )
     conn.commit()
     conn.close()
-    logging.info(f"Recorded purchase for char {character_id}: {quantity} of type {type_id} at {price:,.2f} ISK each.")
+    logging.info(f"Recorded purchase for char {character_id}: {quantity} of type {type_id} at {price:,.2f} ISK each on {purchase_date}.")
 
 
 def get_purchase_lots(character_id, type_id):
@@ -860,6 +863,42 @@ def initialize_journal_history():
         add_processed_journal_entries(character.id, historical_ids)
         logging.info(f"Seeded {len(historical_ids)} historical journal entries for {character.name}.")
 
+def initialize_purchase_history():
+    """On first run, seeds the database with historical buy transactions to enable profit tracking."""
+    logging.info("Checking for unseeded characters for purchase history...")
+    for character in CHARACTERS:
+        state_key = f"purchase_history_seeded_{character.id}"
+        if get_bot_state(state_key) == 'true':
+            logging.info(f"Purchase history already seeded for {character.name}. Skipping.")
+            continue
+
+        logging.info(f"Seeding purchase history for {character.name}...")
+        access_token = get_access_token(character.refresh_token)
+        if not access_token:
+            logging.error(f"Cannot get access token for {character.name} during purchase history seeding.")
+            continue
+
+        all_transactions = get_wallet_transactions(access_token, character.id)
+        buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
+
+        if not buy_transactions:
+            logging.info(f"No historical buy transactions found for {character.name}.")
+            set_bot_state(state_key, 'true')
+            continue
+
+        for tx in buy_transactions:
+            add_purchase_lot(
+                character.id,
+                tx['type_id'],
+                tx['quantity'],
+                tx['unit_price'],
+                purchase_date=tx['date']
+            )
+
+        set_bot_state(state_key, 'true')
+        logging.info(f"Successfully seeded {len(buy_transactions)} historical buy transactions for {character.name}.")
+
+
 def initialize_market_orders():
     conn = db_connection()
     cursor = conn.cursor()
@@ -1140,6 +1179,7 @@ def main() -> None:
     job_queue = application.job_queue
     if getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true' or \
        getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
+        initialize_purchase_history()
         initialize_market_orders()
         job_queue.run_once(check_market_activity, 5)
         job_queue.run_repeating(check_market_activity, interval=60, first=60)
