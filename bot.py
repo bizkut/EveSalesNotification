@@ -649,55 +649,94 @@ async def check_market_orders_job(context: ContextTypes.DEFAULT_TYPE):
             else:
                 sales_detected[order['type_id']].append({'quantity': quantity, 'price': order['price'], 'location_id': order['location_id']})
 
-    if sales_detected and getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true':
+    batch_threshold = getattr(config, 'NOTIFICATION_BATCH_THRESHOLD', 3)
+    enable_sales = getattr(config, 'ENABLE_SALES_NOTIFICATIONS', 'false').lower() == 'true'
+    enable_buys = getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true'
+
+    if sales_detected and enable_sales:
         item_ids = list(sales_detected.keys())
         loc_ids = [sale['location_id'] for sales in sales_detected.values() for sale in sales]
         id_to_name = get_names_from_ids(item_ids + loc_ids + [config.REGION_ID])
         wallet_balance = get_wallet_balance(character)
 
-        for type_id, sales in sales_detected.items():
-            total_quantity = sum(s['quantity'] for s in sales)
-            total_value = sum(s['quantity'] * s['price'] for s in sales)
-            avg_price = total_value / total_quantity
-            cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-            profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
-            history = get_market_history(type_id, config.REGION_ID)
-            price_diff_str = f"({(avg_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+        if len(sales_detected) > batch_threshold:
+            # --- Batched Sales Notification ---
+            message_lines = [f"✅ *Multiple Market Sales ({character.name})* ✅\n"]
+            grand_total_value = 0
+            grand_total_cogs = 0
+            for type_id, sales in sales_detected.items():
+                total_quantity = sum(s['quantity'] for s in sales)
+                total_value = sum(s['quantity'] * s['price'] for s in sales)
+                grand_total_value += total_value
+                cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
+                if cogs is not None: grand_total_cogs += cogs
+                message_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
 
-            message = (
-                f"✅ *Market Sale ({character.name})* ✅\n\n"
-                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
-                f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg:** `{history['average']:,.2f} ISK` {price_diff_str}"
-                f"{profit_line}\n"
-                f"**Location:** `{id_to_name.get(sales[0]['location_id'], 'Unknown')}`\n"
-                f"**Wallet:** `{wallet_balance:,.2f} ISK`"
-            )
-            await send_telegram_message(context, message)
-            await asyncio.sleep(1)
+            profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
+            message_lines.append(f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}")
+            message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+            await send_telegram_message(context, "\n".join(message_lines))
+        else:
+            # --- Individual Sales Notifications ---
+            for type_id, sales in sales_detected.items():
+                total_quantity = sum(s['quantity'] for s in sales)
+                total_value = sum(s['quantity'] * s['price'] for s in sales)
+                avg_price = total_value / total_quantity
+                cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
+                profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
+                history = get_market_history(type_id, config.REGION_ID)
+                price_diff_str = f"({(avg_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+                message = (
+                    f"✅ *Market Sale ({character.name})* ✅\n\n"
+                    f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
+                    f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
+                    f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg:** `{history['average']:,.2f} ISK` {price_diff_str}"
+                    f"{profit_line}\n"
+                    f"**Location:** `{id_to_name.get(sales[0]['location_id'], 'Unknown')}`\n"
+                    f"**Wallet:** `{wallet_balance:,.2f} ISK`"
+                )
+                await send_telegram_message(context, message)
+                await asyncio.sleep(1)
 
-    if buys_detected and getattr(config, 'ENABLE_BUY_NOTIFICATIONS', 'false').lower() == 'true':
+    if buys_detected and enable_buys:
         item_ids = list(buys_detected.keys())
         loc_ids = [buy['location_id'] for buys in buys_detected.values() for buy in buys]
         id_to_name = get_names_from_ids(item_ids + loc_ids)
         wallet_balance = get_wallet_balance(character)
 
+        # Record all purchases first for FIFO
         for type_id, buys in buys_detected.items():
-            total_quantity = sum(b['quantity'] for b in buys)
-            total_cost = sum(b['quantity'] * b['price'] for b in buys)
             for buy in buys:
                 add_purchase_lot(character.id, type_id, buy['quantity'], buy['price'])
 
-            message = (
-                f"🛒 *Market Buy ({character.name})* 🛒\n\n"
-                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                f"**Quantity:** `{total_quantity}`\n"
-                f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
-                f"**Location:** `{id_to_name.get(buys[0]['location_id'], 'Unknown')}`\n"
-                f"**Wallet:** `{wallet_balance:,.2f} ISK`"
-            )
-            await send_telegram_message(context, message)
-            await asyncio.sleep(1)
+        if len(buys_detected) > batch_threshold:
+            # --- Batched Buy Notification ---
+            message_lines = [f"🛒 *Multiple Market Buys ({character.name})* 🛒\n"]
+            grand_total_cost = 0
+            for type_id, buys in buys_detected.items():
+                total_quantity = sum(b['quantity'] for b in buys)
+                total_cost = sum(b['quantity'] * b['price'] for b in buys)
+                grand_total_cost += total_cost
+                message_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+
+            message_lines.append(f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`")
+            message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+            await send_telegram_message(context, "\n".join(message_lines))
+        else:
+            # --- Individual Buy Notifications ---
+            for type_id, buys in buys_detected.items():
+                total_quantity = sum(b['quantity'] for b in buys)
+                total_cost = sum(b['quantity'] * b['price'] for b in buys)
+                message = (
+                    f"🛒 *Market Buy ({character.name})* 🛒\n\n"
+                    f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
+                    f"**Quantity:** `{total_quantity}`\n"
+                    f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
+                    f"**Location:** `{id_to_name.get(buys[0]['location_id'], 'Unknown')}`\n"
+                    f"**Wallet:** `{wallet_balance:,.2f} ISK`"
+                )
+                await send_telegram_message(context, message)
+                await asyncio.sleep(1)
 
     update_tracked_market_orders(character.id, orders_to_update)
     live_order_ids = {o['order_id'] for o in live_orders}

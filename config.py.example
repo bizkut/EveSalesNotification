@@ -24,6 +24,8 @@ WALLET_BALANCE_THRESHOLD = 0
 ENABLE_SALES_NOTIFICATIONS = "true"
 ENABLE_BUY_NOTIFICATIONS = "true"
 ENABLE_DAILY_SUMMARY = "true"
+# The threshold for batching multiple transaction notifications into a single summary message.
+NOTIFICATION_BATCH_THRESHOLD = 3
 
 # 4. ESI Refresh Tokens for EVE Online Characters
 # Run the get_refresh_token.py script for each character you want to monitor.
