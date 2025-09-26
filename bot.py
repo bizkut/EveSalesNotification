@@ -518,31 +518,35 @@ if __name__ == "__main__":
     # Create database tables if they don't exist
     setup_database()
 
-    # Seed history for both market orders and journal on the very first run
-    initialize_market_orders()
-    initialize_journal_history()
-
-    # Perform an initial check for sales notifications on startup
-    logging.info("Performing initial check for any new sales orders...")
+    # --- Set up schedules based on config ---
+    from config import DAILY_SUMMARY_TIME, ENABLE_SALES_NOTIFICATIONS, ENABLE_DAILY_SUMMARY
     import asyncio
-    asyncio.run(check_for_new_orders())
 
-    # --- Set up schedules ---
-    from config import DAILY_SUMMARY_TIME
+    if ENABLE_SALES_NOTIFICATIONS.lower() == 'true':
+        initialize_market_orders()
+        logging.info("Performing initial check for any new sales orders...")
+        asyncio.run(check_for_new_orders())
+        schedule.every(60).seconds.do(lambda: asyncio.run(check_for_new_orders()))
+        logging.info("Sales notifications ENABLED: checking every 60 seconds.")
+    else:
+        logging.info("Sales notifications DISABLED by config.")
 
-    schedule.every(60).seconds.do(lambda: asyncio.run(check_for_new_orders()))
-    logging.info("Scheduled sales check: every 60 seconds.")
+    if ENABLE_DAILY_SUMMARY.lower() == 'true':
+        initialize_journal_history()
+        schedule.every().day.at(DAILY_SUMMARY_TIME).do(lambda: asyncio.run(run_daily_summary()))
+        logging.info(f"Daily summary ENABLED: scheduled for {DAILY_SUMMARY_TIME} UTC.")
+    else:
+        logging.info("Daily summary DISABLED by config.")
 
-    # Schedule the daily summary using the time from the config file
-    schedule.every().day.at(DAILY_SUMMARY_TIME).do(lambda: asyncio.run(run_daily_summary()))
-    logging.info(f"Scheduled daily summary: every day at {DAILY_SUMMARY_TIME} UTC.")
-
-    logging.info("Entering main loop to run scheduler...")
-    while True:
-        schedule.run_pending()
-        idle_seconds = schedule.idle_seconds()
-        if idle_seconds is not None and idle_seconds > 1:
-            logging.info(f"Next check in {int(idle_seconds)} seconds. Waiting...")
-            time.sleep(idle_seconds)
-        else:
-            time.sleep(1)
+    if not schedule.jobs:
+        logging.info("No features enabled. Bot will now exit.")
+    else:
+        logging.info("Entering main loop to run scheduler...")
+        while True:
+            schedule.run_pending()
+            idle_seconds = schedule.idle_seconds()
+            if idle_seconds is not None and idle_seconds > 1:
+                logging.info(f"Next check in {int(idle_seconds)} seconds. Waiting...")
+                time.sleep(idle_seconds)
+            else:
+                time.sleep(1)
