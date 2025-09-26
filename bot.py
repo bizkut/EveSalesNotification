@@ -576,6 +576,48 @@ async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str
 
 # --- Main Application Logic ---
 
+async def send_paginated_message(context: ContextTypes.DEFAULT_TYPE, header: str, item_lines: list, footer: str, chat_id: int = None):
+    """
+    Sends a potentially long message by splitting the item_lines into chunks,
+    ensuring each message respects Telegram's character limit.
+    """
+    # A safe number of lines per message to avoid hitting the character limit.
+    CHUNK_SIZE = 30
+
+    if not item_lines:
+        message = header + "\n" + footer
+        await send_telegram_message(context, message, chat_id)
+        return
+
+    # Send the first chunk with the header
+    first_chunk = item_lines[:CHUNK_SIZE]
+    message = header + "\n" + "\n".join(first_chunk)
+
+    # If this is the only message, add the footer and send
+    if len(item_lines) <= CHUNK_SIZE:
+        message += "\n" + footer
+        await send_telegram_message(context, message, chat_id)
+        return
+    else:
+        # Send the first part (header + first chunk)
+        await send_telegram_message(context, message, chat_id)
+        # Give telegram a moment
+        await asyncio.sleep(0.5)
+
+    # Send the intermediate chunks
+    remaining_lines = item_lines[CHUNK_SIZE:]
+    for i in range(0, len(remaining_lines), CHUNK_SIZE):
+        chunk = remaining_lines[i:i + CHUNK_SIZE]
+
+        # If this is the last chunk, append the footer
+        if (i + CHUNK_SIZE) >= len(remaining_lines):
+            message = "\n".join(chunk) + "\n" + footer
+        else:
+            message = "\n".join(chunk)
+
+        await send_telegram_message(context, message, chat_id)
+        await asyncio.sleep(0.5)
+
 def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
     """
     Calculates the Cost of Goods Sold (COGS) for a sale using FIFO and updates the database.
@@ -687,7 +729,8 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
 
         if sales and enable_sales:
             if len(sales) > batch_threshold:
-                message_lines = [f"✅ *Multiple Market Sales ({character.name})* ✅\n"]
+                header = f"✅ *Multiple Market Sales ({character.name})* ✅"
+                item_lines = []
                 grand_total_value, grand_total_cogs = 0, 0
                 for type_id, tx_group in sales.items():
                     total_quantity = sum(t['quantity'] for t in tx_group)
@@ -695,11 +738,12 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
                     grand_total_value += total_value
                     cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
                     if cogs is not None: grand_total_cogs += cogs
-                    message_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+                    item_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+
                 profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
-                message_lines.append(f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}")
-                if wallet_balance is not None: message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                await send_telegram_message(context, "\n".join(message_lines))
+                footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}"
+                if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                await send_paginated_message(context, header, item_lines, footer)
             else:
                 for type_id, tx_group in sales.items():
                     total_quantity = sum(t['quantity'] for t in tx_group)
@@ -724,15 +768,17 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
                 for tx in tx_group:
                     add_purchase_lot(character.id, type_id, tx['quantity'], tx['price'])
             if len(buys) > batch_threshold:
-                message_lines = [f"🛒 *Multiple Market Buys ({character.name})* 🛒\n"]
+                header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
+                item_lines = []
                 grand_total_cost = 0
                 for type_id, tx_group in buys.items():
                     total_quantity = sum(t['quantity'] for t in tx_group)
                     grand_total_cost += sum(t['quantity'] * t['price'] for t in tx_group)
-                    message_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
-                message_lines.append(f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`")
-                if wallet_balance is not None: message_lines.append(f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                await send_telegram_message(context, "\n".join(message_lines))
+                    item_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+
+                footer = f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`"
+                if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                await send_paginated_message(context, header, item_lines, footer)
             else:
                 for type_id, tx_group in buys.items():
                     total_quantity = sum(t['quantity'] for t in tx_group)
