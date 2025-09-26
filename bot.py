@@ -617,17 +617,17 @@ async def run_daily_summary_for_character(character: Character, context: Context
     message = (
         f"📊 *Daily Market Summary ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d')}_\n\n"
-        f"**Wallet Balance:** `{wallet_balance:,.2f} ISK`\n\n"
-        f"**Past 24 Hours:**\n"
+        f"*Wallet Balance:* `{wallet_balance:,.2f} ISK`\n\n"
+        f"*Past 24 Hours:*\n"
         f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{total_fees_24h:,.2f} ISK`\n"
-        f"  - **Estimated Profit:** `{estimated_profit_24h:,.2f} ISK`*\n\n"
+        f"  - *Estimated Profit:* `{estimated_profit_24h:,.2f} ISK`\n\n"
         f"---\n\n"
-        f"🗓️ **Current Month Summary ({now.strftime('%B %Y')}):**\n"
+        f"🗓️ *Current Month Summary ({now.strftime('%B %Y')}):*\n"
         f"  - Total Sales Value: `{total_sales_month:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{total_fees_month:,.2f} ISK`\n"
-        f"  - **Gross Revenue (Sales - Fees):** `{gross_revenue_month:,.2f} ISK`\n\n"
-        f"_*Profit is estimated based on the average purchase price of items over the last 30 days._"
+        f"  - *Gross Revenue (Sales - Fees):* `{gross_revenue_month:,.2f} ISK`\n\n"
+        f"_Profit is estimated based on the average purchase price of items over the last 30 days._"
     )
     await send_telegram_message(context, message)
 
