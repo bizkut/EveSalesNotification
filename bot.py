@@ -541,22 +541,31 @@ def get_market_history(type_id, region_id):
 
 def get_names_from_ids(id_list):
     if not id_list: return {}
+    logging.debug(f"get_names_from_ids called with {len(id_list)} IDs.")
     # Filter for valid, positive integer IDs and remove duplicates.
     # Also exclude IDs > 10^10, which are typically player-owned structures and not resolvable by this endpoint.
     valid_ids = list(set(id for id in id_list if isinstance(id, int) and 0 < id < 10000000000))
     if not valid_ids:
+        logging.warning("get_names_from_ids: No valid IDs found after filtering.")
         return {}
+    logging.debug(f"Found {len(valid_ids)} valid IDs to resolve.")
 
     url = "https://esi.evetech.net/v3/universe/names/"
     id_to_name_map = {}
     # Break the list into chunks of 1000, the ESI limit
     for i in range(0, len(valid_ids), 1000):
         chunk = valid_ids[i:i+1000]
+        logging.debug(f"Requesting names for chunk of {len(chunk)} IDs.")
         # Note: POST requests to /names/ are publicly cached and don't need auth
         name_data = make_esi_request(url, data=chunk)
         if name_data:
+            logging.debug(f"Received {len(name_data)} names from ESI.")
             for item in name_data:
                 id_to_name_map[item['id']] = item['name']
+        else:
+            logging.error(f"Failed to resolve names for chunk starting with ID {chunk[0]}.")
+
+    logging.debug(f"Resolved {len(id_to_name_map)} names out of {len(valid_ids)} valid IDs.")
     return id_to_name_map
 
 # --- Telegram Bot Functions ---
@@ -1143,12 +1152,15 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         item_ids = [tx['type_id'] for tx in filtered_tx]
-        id_to_name = get_names_from_ids(item_ids)
-        message_lines = [f"✅ *Last 5 Sales for {character.name}* ✅\n"]
+        loc_ids = [tx['location_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
+        icon = "🛒" if is_buy else "✅"
+        message_lines = [f"{icon} *Last 5 {action.capitalize()} for {character.name}* {icon}\n"]
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
         await _show_character_selection(update, "sales")
@@ -1175,12 +1187,14 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
         item_ids = [tx['type_id'] for tx in filtered_tx]
-        id_to_name = get_names_from_ids(item_ids)
+        loc_ids = [tx['location_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
         message_lines = [f"🛒 *Last 5 Buys for {character.name}* 🛒\n"]
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
         await _show_character_selection(update, "buys")
@@ -1252,12 +1266,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             return
 
         item_ids = [tx['type_id'] for tx in filtered_tx]
-        id_to_name = get_names_from_ids(item_ids)
-        message_lines = [f"✅ *Last 5 {action.capitalize()} for {character.name}* ✅\n"]
+        loc_ids = [tx['location_id'] for tx in filtered_tx]
+        id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
+        icon = "🛒" if is_buy else "✅"
+        message_lines = [f"{icon} *Last 5 {action.capitalize()} for {character.name}* {icon}\n"]
         for tx in filtered_tx:
             item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+            loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each.")
+            message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
 
 async def post_init(application: Application):
