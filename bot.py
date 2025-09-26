@@ -97,6 +97,9 @@ def setup_database():
             cursor.execute("DROP TABLE IF EXISTS processed_journal_entries")
             conn.commit()
             logging.info("Old tables dropped successfully.")
+        elif "no such table" in str(e):
+            # This is expected on a fresh database, so we can ignore it and let the table creation proceed.
+            logging.info("Fresh database detected. Proceeding with table creation.")
         else:
             # Re-raise other operational errors
             raise
