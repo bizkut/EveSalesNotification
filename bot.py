@@ -289,8 +289,8 @@ async def check_for_new_orders():
 
     for order in live_orders:
         order_id = order['order_id']
-        # We only care about sell orders
-        if order.get('is_buy_order'):
+        # We only care about non-immediate sell orders
+        if order.get('is_buy_order') or not (1 <= order.get('duration', 0) <= 90):
             continue
 
         if order_id in tracked_orders:
@@ -530,8 +530,8 @@ if __name__ == "__main__":
     # --- Set up schedules ---
     from config import DAILY_SUMMARY_TIME
 
-    schedule.every(5).minutes.do(lambda: asyncio.run(check_for_new_orders()))
-    logging.info("Scheduled sales check: every 5 minutes.")
+    schedule.every(60).seconds.do(lambda: asyncio.run(check_for_new_orders()))
+    logging.info("Scheduled sales check: every 60 seconds.")
 
     # Schedule the daily summary using the time from the config file
     schedule.every().day.at(DAILY_SUMMARY_TIME).do(lambda: asyncio.run(run_daily_summary()))
