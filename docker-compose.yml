@@ -1,19 +1,28 @@
 version: '3.8'
 
 services:
-  sales-order-bot:
+  bot:
     build: .
-    container_name: sales-order-bot
+    container_name: eve-market-bot
     restart: unless-stopped
-    # Before running 'docker-compose up', you must create a 'config.py' file
-    # from the 'config.py.example' template and fill in your details.
+    command: ["python", "bot.py"]
     volumes:
-      # Mount the config file to provide credentials to the bot
-      - ./config.py:/app/config.py
-      # Use a named volume to persist the processed transactions data inside the 'data' directory
+      - ./config.py:/app/config.py:ro
       - processed_data:/app/data
+    depends_on:
+      - webapp
 
-# Defines the named volume for persisting data
+  webapp:
+    build: .
+    container_name: eve-market-webapp
+    restart: unless-stopped
+    command: ["gunicorn", "--bind", "0.0.0.0:5000", "webapp:app"]
+    volumes:
+      - ./config.py:/app/config.py:ro
+      - processed_data:/app/data
+    ports:
+      - "5000:5000"
+
 volumes:
   processed_data:
     driver: local

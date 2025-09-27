@@ -25,47 +25,48 @@ class Character:
     id: int
     name: str
     refresh_token: str
+    telegram_user_id: int
+    notifications_enabled: bool
 
 CHARACTERS: list[Character] = []
 
 
-def load_characters():
-    """Loads all character refresh tokens from the config file and populates the CHARACTERS list."""
+def load_characters_from_db():
+    """Loads all characters from the database and populates the CHARACTERS list."""
     global CHARACTERS
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT character_id, character_name, refresh_token, telegram_user_id, notifications_enabled FROM characters")
+    rows = cursor.fetchall()
+    conn.close()
 
-    refresh_tokens = []
-    for attr in dir(config):
-        if attr.startswith("ESI_REFRESH_TOKEN_"):
-            refresh_tokens.append(getattr(config, attr))
-
-    if not refresh_tokens:
-        logging.error("No ESI_REFRESH_TOKEN_X variables found in config.py. Bot cannot run.")
+    if not rows:
+        logging.warning("No characters found in the database. Bot is running but will not monitor anyone yet.")
         return
 
-    logging.info(f"Found {len(refresh_tokens)} refresh tokens. Verifying and loading character details...")
+    logging.info(f"Loading {len(rows)} characters from the database...")
+    CHARACTERS = [] # Clear the list to allow for reloading
+    for row in rows:
+        char_id, char_name, refresh_token, telegram_user_id, notifications_enabled_int = row
+        notifications_enabled = bool(notifications_enabled_int)
 
-    for token in refresh_tokens:
-        access_token = get_access_token(token)
-        if not access_token:
-            logging.error(f"Failed to get access token for a refresh token. Skipping.")
-            continue
-
-        char_id, char_name = get_character_details_from_token(access_token)
-        if not char_id or not char_name:
-            logging.error(f"Failed to get character details for a refresh token. Skipping.")
-            continue
-
-        # Check for duplicates
+        # Simple validation and duplicate check
         if any(c.id == char_id for c in CHARACTERS):
             logging.warning(f"Character '{char_name}' ({char_id}) is already loaded. Skipping duplicate.")
             continue
 
-        character = Character(id=char_id, name=char_name, refresh_token=token)
+        character = Character(
+            id=char_id,
+            name=char_name,
+            refresh_token=refresh_token,
+            telegram_user_id=telegram_user_id,
+            notifications_enabled=notifications_enabled
+        )
         CHARACTERS.append(character)
-        logging.info(f"Successfully loaded character: {character.name} ({character.id})")
+        logging.info(f"Successfully loaded character: {character.name} ({character.id}) for user {character.telegram_user_id} (Notifications: {'On' if character.notifications_enabled else 'Off'})")
 
     if not CHARACTERS:
-        logging.error("Could not load any characters successfully. Please check your refresh tokens in config.py.")
+        logging.error("Could not load any characters successfully from the database.")
 
 
 # --- Database Functions ---
@@ -79,32 +80,29 @@ def db_connection():
     return sqlite3.connect(DB_FILE)
 
 def setup_database():
-    """Creates the necessary database tables if they don't exist and handles schema migration."""
+    """Creates the necessary database tables if they don't exist."""
     conn = db_connection()
     cursor = conn.cursor()
 
-    # --- Schema Migration Check ---
-    # Check if the 'market_orders' table exists and lacks the 'character_id' column.
-    # This indicates an old schema that needs to be updated.
-    try:
-        cursor.execute("SELECT character_id FROM market_orders LIMIT 1")
-    except sqlite3.OperationalError as e:
-        if "no such column: character_id" in str(e):
-            logging.info("Old database schema detected. Dropping and recreating tables.")
-            # Drop old tables that are affected by the schema change
-            cursor.execute("DROP TABLE IF EXISTS market_orders")
-            cursor.execute("DROP TABLE IF EXISTS processed_transactions")
-            cursor.execute("DROP TABLE IF EXISTS processed_journal_entries")
-            conn.commit()
-            logging.info("Old tables dropped successfully.")
-        elif "no such table" in str(e):
-            # This is expected on a fresh database, so we can ignore it and let the table creation proceed.
-            logging.info("Fresh database detected. Proceeding with table creation.")
-        else:
-            # Re-raise other operational errors
-            raise
+    # --- New Tables for Multi-User Support ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_users (
+            telegram_id INTEGER PRIMARY KEY
+        )
+    """)
 
-    # --- Table Creation ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS characters (
+            character_id INTEGER PRIMARY KEY,
+            character_name TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            telegram_user_id INTEGER NOT NULL,
+            notifications_enabled BOOLEAN DEFAULT 1,
+            FOREIGN KEY (telegram_user_id) REFERENCES telegram_users (telegram_id)
+        )
+    """)
+
+    # --- Existing Tables ---
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS processed_transactions (
             transaction_id INTEGER NOT NULL,
@@ -158,6 +156,7 @@ def setup_database():
     """)
     conn.commit()
     conn.close()
+    logging.info("Database setup/verification complete. All tables are present.")
 
 def get_processed_orders(character_id):
     """Retrieves all processed order IDs for a character from the database."""
@@ -676,22 +675,26 @@ def get_names_from_ids(id_list):
 
 # --- Telegram Bot Functions ---
 
-async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str, chat_id: int = None):
-    """Sends a message. If chat_id is provided, sends to that chat. Otherwise, defaults to the configured channel."""
-    target_chat_id = chat_id if chat_id is not None else config.TELEGRAM_CHANNEL_ID
-    if not target_chat_id:
-        logging.error("No chat_id provided and no default TELEGRAM_CHANNEL_ID configured. Cannot send message.")
+async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str, chat_id: int):
+    """Sends a message to a specific chat_id."""
+    if not chat_id:
+        logging.error("No chat_id provided. Cannot send message.")
         return
 
     try:
-        await context.bot.send_message(chat_id=target_chat_id, text=message, parse_mode='Markdown')
-        logging.info(f"Sent message to chat_id: {target_chat_id}.")
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        logging.info(f"Sent message to chat_id: {chat_id}.")
     except Exception as e:
-        logging.error(f"Error sending Telegram message to {target_chat_id}: {e}")
+        if "bot was blocked by the user" in str(e).lower():
+            logging.warning(f"Could not send message to {chat_id}: Bot was blocked by the user.")
+            # Future improvement: Disable notifications for this user in the database.
+        else:
+            logging.error(f"Error sending Telegram message to {chat_id}: {e}")
+
 
 # --- Main Application Logic ---
 
-async def send_paginated_message(context: ContextTypes.DEFAULT_TYPE, header: str, item_lines: list, footer: str, chat_id: int = None):
+async def send_paginated_message(context: ContextTypes.DEFAULT_TYPE, header: str, item_lines: list, footer: str, chat_id: int):
     """
     Sends a potentially long message by splitting the item_lines into chunks,
     ensuring each message respects Telegram's character limit.
@@ -789,13 +792,19 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
     A self-scheduling job that checks for new wallet transactions and sends notifications.
     This is the primary, accurate source for sales and buy notifications.
     """
-    character = context.job.data
+    character: Character = context.job.data
+
+    if not character.notifications_enabled:
+        logging.debug(f"Skipping wallet transaction check for {character.name} as notifications are disabled.")
+        context.job_queue.run_once(check_wallet_transactions_job, 60, data=character, name=f"wallet_transactions_{character.id}")
+        return
+
     logging.debug(f"Running wallet transaction check for {character.name}")
 
     all_transactions, headers = get_wallet_transactions(character, return_headers=True, force_revalidate=True)
     if all_transactions is None:
         logging.error(f"Failed to fetch wallet transactions for {character.name}. Retrying in 60s.")
-        context.job_queue.run_once(check_wallet_transactions_job, 60, data=character)
+        context.job_queue.run_once(check_wallet_transactions_job, 60, data=character, name=f"wallet_transactions_{character.id}")
         return
 
     processed_tx_ids = get_processed_transactions(character.id)
@@ -833,7 +842,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
                     f"Your wallet balance has dropped below `{config.WALLET_BALANCE_THRESHOLD:,.2f}` ISK.\n"
                     f"**Current Balance:** `{wallet_balance:,.2f}` ISK"
                 )
-                await send_telegram_message(context, alert_message)
+                await send_telegram_message(context, alert_message, chat_id=character.telegram_user_id)
                 set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
             elif wallet_balance >= config.WALLET_BALANCE_THRESHOLD and last_alert_str:
                 set_bot_state(state_key, '')
@@ -858,7 +867,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
                 profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
                 footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}"
                 if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                await send_paginated_message(context, header, item_lines, footer)
+                await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
             else:
                 for type_id, tx_group in sales.items():
                     total_quantity = sum(t['quantity'] for t in tx_group)
@@ -896,7 +905,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
                                f"{profit_line}\n"
                                f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
                                f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                    await send_telegram_message(context, message)
+                    await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                     await asyncio.sleep(1)
 
         if buys and enable_buys:
@@ -914,7 +923,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
 
                 footer = f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`"
                 if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                await send_paginated_message(context, header, item_lines, footer)
+                await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
             else:
                 for type_id, tx_group in buys.items():
                     total_quantity = sum(t['quantity'] for t in tx_group)
@@ -925,7 +934,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
                                f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
                                f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
                                f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                    await send_telegram_message(context, message)
+                    await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                     await asyncio.sleep(1)
 
         add_processed_transactions(character.id, [tx['transaction_id'] for tx in new_transactions])
@@ -935,7 +944,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
     # changed, the bot receives a lightweight '304 Not Modified' response, respecting
     # the API server while still allowing for near real-time notifications.
     delay = 60
-    context.job_queue.run_once(check_wallet_transactions_job, delay, data=character)
+    context.job_queue.run_once(check_wallet_transactions_job, delay, data=character, name=f"wallet_transactions_{character.id}")
     logging.info(f"Wallet transaction check for {character.name} complete. Next check in {delay} seconds.")
 
 
@@ -943,13 +952,19 @@ async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
     """
     A self-scheduling job that checks for cancelled or expired orders.
     """
-    character = context.job.data
+    character: Character = context.job.data
+
+    if not character.notifications_enabled:
+        logging.debug(f"Skipping order history check for {character.name} as notifications are disabled.")
+        context.job_queue.run_once(check_order_history_job, 60, data=character, name=f"order_history_{character.id}")
+        return
+
     logging.debug(f"Running order history check for {character.name}")
 
     order_history, headers = get_market_orders_history(character, return_headers=True, force_revalidate=True)
     if order_history is None:
         logging.error(f"Failed to fetch order history for {character.name}. Retrying in 3600s.")
-        context.job_queue.run_once(check_order_history_job, 3600, data=character)
+        context.job_queue.run_once(check_order_history_job, 3600, data=character, name=f"order_history_{character.id}")
         return
 
     processed_order_ids = get_processed_orders(character.id)
@@ -967,7 +982,7 @@ async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
             for order in cancelled_orders:
                 message = (f"ℹ️ *Order Cancelled ({character.name})* ℹ️\n"
                            f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled.")
-                await send_telegram_message(context, message)
+                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                 await asyncio.sleep(1)
 
         if expired_orders:
@@ -976,7 +991,7 @@ async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
             for order in expired_orders:
                 message = (f"ℹ️ *Order Expired ({character.name})* ℹ️\n"
                            f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired.")
-                await send_telegram_message(context, message)
+                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                 await asyncio.sleep(1)
 
         add_processed_orders(character.id, [o['order_id'] for o in new_orders])
@@ -986,7 +1001,7 @@ async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
     # changed, the bot receives a lightweight '304 Not Modified' response, respecting
     # the API server while still allowing for near real-time notifications.
     delay = 60
-    context.job_queue.run_once(check_order_history_job, delay, data=character)
+    context.job_queue.run_once(check_order_history_job, delay, data=character, name=f"order_history_{character.id}")
     logging.info(f"Order history check for {character.name} complete. Next check in {delay} seconds.")
 
 
@@ -1214,6 +1229,30 @@ def initialize_order_history():
         set_bot_state(state_key, 'true')
 
 
+async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Provides a link for the user to add a new EVE Online character.
+    """
+    user_id = update.effective_user.id
+    logging.info(f"Received /addcharacter command from user {user_id}")
+
+    # The base URL of the webapp, where the /login route is.
+    # This should match the address exposed in docker-compose.yml.
+    # In a real deployment, this would be the public-facing URL.
+    webapp_base_url = getattr(config, 'WEBAPP_URL', 'http://localhost:5000')
+    login_url = f"{webapp_base_url}/login?user={user_id}"
+
+    keyboard = [[InlineKeyboardButton("Authorize with EVE Online", url=login_url)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    message = (
+        "To add a new character, please click the button below and authorize with EVE Online.\n\n"
+        "You will be redirected to the official EVE Online login page. After logging in and "
+        "authorizing, you can close the browser window."
+    )
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and displays the wallet balance for the configured character(s)."""
     logging.info(f"Received /balance command from user {update.effective_user.name}")
@@ -1410,7 +1449,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 async def post_init(application: Application):
     """Sets the bot's commands in the Telegram menu after initialization."""
     commands = [
-        BotCommand("balance", "Check wallet balances for all characters."),
+        BotCommand("addcharacter", "Add a new EVE character."),
+        BotCommand("balance", "Check wallet balances for your characters."),
         BotCommand("summary", "Manually trigger the daily summary report."),
         BotCommand("sales", "View recent sales for a character."),
         BotCommand("buys", "View recent buys for a character."),
@@ -1423,14 +1463,13 @@ def main() -> None:
     logging.info("Bot starting up...")
 
     setup_database()
-    load_characters()
-    if not CHARACTERS:
-        logging.error("No characters were loaded. Bot cannot continue.")
-        return
+    load_characters_from_db()
+    # The bot can now start without characters and wait for them to be added.
 
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # --- Add command handlers ---
+    application.add_handler(CommandHandler("addcharacter", add_character_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("sales", sales_command))
