@@ -39,7 +39,7 @@ Follow these steps to deploy your own instance of the bot.
 1.  Go to the [EVE Online Developers Portal](https://developers.eveonline.com/applications) and log in.
 2.  Create a new application.
 3.  Fill in the application details.
-4.  For the **Callback URL**, you must enter the public-facing URL of your server where the bot will be hosted, followed by `/callback`. For example: `http://your.server.ip.or.domain:5000/callback`.
+4.  For the **Callback URL**, you must enter the public-facing URL of your server where the bot will be hosted, followed by `/callback`. For example: `http://eve.gametrader.my:5000/callback`.
 5.  Once the application is created, view its details. Under the "Scopes" section, add the following required scopes:
     -   `esi-wallet.read_character_wallet.v1`
     -   `esi-markets.read_character_orders.v1`
@@ -57,7 +57,7 @@ Follow these steps to deploy your own instance of the bot.
     -   `ESI_CLIENT_ID` & `ESI_SECRET_KEY`: From your EVE application.
     -   `CALLBACK_URL`: The **exact same** callback URL you entered in the EVE application portal.
     -   `TELEGRAM_BOT_TOKEN`: From your Telegram bot setup (via BotFather).
-    -   `WEBAPP_URL`: The public base URL for the webapp. This should be the address of your server. (e.g., `http://your.server.ip.or.domain:5000`).
+    -   `WEBAPP_URL`: The public base URL for the webapp. This should be the address of your server. (e.g., `http://eve.gametrader.my:5000`).
     -   `REGION_ID`: The region ID for your main trade hub (e.g., `10000002` for The Forge/Jita).
 
 ### Step 3: Run the Bot
