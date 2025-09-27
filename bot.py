@@ -1564,8 +1564,47 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(message, reply_markup=reply_markup)
 
 
+async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
+    """Helper function to fetch and display balances for a list of characters."""
+    char_names = ", ".join([c.name for c in characters])
+    await update.message.reply_text(f"Fetching balance(s) for {char_names}...")
+
+    message_lines = ["💰 *Wallet Balances* 💰\n"]
+    total_balance = 0
+    errors = False
+    for char in characters:
+        balance = get_wallet_balance(char)
+        if balance is not None:
+            message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
+            total_balance += balance
+        else:
+            message_lines.append(f"• `{char.name}`: `Error fetching balance`")
+            errors = True
+
+    if len(characters) > 1 and not errors:
+        message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
+
+    # Use the main menu keyboard for the reply
+    keyboard = [
+        ["/balance", "/summary"],
+        ["/sales", "/buys"],
+        ["/notifications", "/settings"],
+        ["/add_character"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    await update.message.reply_text(
+        text="\n".join(message_lines),
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetches and displays the wallet balance for all the user's characters."""
+    """
+    Fetches and displays wallet balance. Prompts for character selection
+    if the user has multiple characters.
+    """
     user_id = update.effective_user.id
     logging.info(f"Received /balance command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
@@ -1576,26 +1615,38 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    await update.message.reply_text("Fetching balances for all your characters...")
+    if len(user_characters) == 1:
+        await _show_balance_for_characters(update, context, user_characters)
+    else:
+        keyboard = [[char.name] for char in user_characters]
+        keyboard.append(["All Characters"])
+        keyboard.append(["/start"])  # Option to go back
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        context.user_data['next_action'] = ('select_char_for_balance', {char.name: char.id for char in user_characters})
+        await update.message.reply_text(
+            "Please select a character (or all) to view the balance:",
+            reply_markup=reply_markup
+        )
 
-    message_lines = ["💰 *Wallet Balances* 💰\n"]
-    total_balance = 0
-    for char in user_characters:
-        balance = get_wallet_balance(char)
-        if balance is not None:
-            message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
-            total_balance += balance
-        else:
-            message_lines.append(f"• `{char.name}`: `Error fetching balance`")
 
-    if len(user_characters) > 1:
-        message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
+async def _run_summary_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
+    """Helper to run and send summary for a list of characters."""
+    char_names = ", ".join([c.name for c in characters])
+    await update.message.reply_text(f"Generating summary for {char_names}...")
 
-    await update.message.reply_text(text="\n".join(message_lines), parse_mode='Markdown')
+    for char in characters:
+        # This function sends its own message
+        await run_daily_summary_for_character(char, context)
+        await asyncio.sleep(1) # Be nice to Telegram
+
+    await update.message.reply_text(f"✅ Summaries sent for {char_names}!")
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually triggers the daily summary report for all the user's characters."""
+    """
+    Manually triggers the daily summary report. Prompts for character
+    selection if the user has multiple characters.
+    """
     user_id = update.effective_user.id
     logging.info(f"Received /summary command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
@@ -1606,33 +1657,31 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    await update.message.reply_text("Generating summary for all your characters...")
-    for char in user_characters:
-        # This function sends its own message
-        await run_daily_summary_for_character(char, context)
-        await asyncio.sleep(1) # Be nice to Telegram
+    if len(user_characters) == 1:
+        await _run_summary_for_characters(update, context, user_characters)
+    else:
+        keyboard = [[char.name] for char in user_characters]
+        keyboard.append(["All Characters"])
+        keyboard.append(["/start"])
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        context.user_data['next_action'] = ('select_char_for_summary', {char.name: char.id for char in user_characters})
+        await update.message.reply_text(
+            "Please select a character (or all) to generate a summary for:",
+            reply_markup=reply_markup
+        )
 
-    await update.message.reply_text("✅ Summaries sent for all characters!")
 
-
-async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool) -> None:
-    """Helper function to get the last 5 transactions (sales or buys)."""
+async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool, characters: list[Character]) -> None:
+    """Helper function to get the last 5 transactions (sales or buys) for a specific list of characters."""
     user_id = update.effective_user.id
     action = "buys" if is_buy else "sales"
     icon = "🛒" if is_buy else "✅"
-    logging.info(f"Received /{action} command from user {user_id}")
-    user_characters = get_characters_for_user(user_id)
 
-    if not user_characters:
-        await update.message.reply_text(
-            "You have no characters added. Please use `/add_character` first."
-        )
-        return
-
-    await update.message.reply_text(f"Fetching recent {action} for all characters...")
+    char_names = ", ".join([c.name for c in characters])
+    await update.message.reply_text(f"Fetching recent {action} for {char_names}...")
 
     all_transactions = []
-    for char in user_characters:
+    for char in characters:
         transactions = get_wallet_transactions(char)
         if transactions:
             for tx in transactions:
@@ -1640,7 +1689,7 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
             all_transactions.extend(transactions)
 
     if not all_transactions:
-        await update.message.reply_text(f"No transaction history found for any character.")
+        await update.message.reply_text(f"No transaction history found for {char_names}.")
         return
 
     filtered_tx = sorted(
@@ -1650,32 +1699,89 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
     )[:5]
 
     if not filtered_tx:
-        await update.message.reply_text(f"No recent {action} found for any character.")
+        await update.message.reply_text(f"No recent {action} found for {char_names}.")
         return
 
     item_ids = [tx['type_id'] for tx in filtered_tx]
     loc_ids = [tx['location_id'] for tx in filtered_tx]
     id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
 
-    message_lines = [f"{icon} *Last 5 {action.capitalize()} (All Characters)* {icon}\n"]
+    title_char_name = char_names if len(characters) == 1 else "All Characters"
+    message_lines = [f"{icon} *Last 5 {action.capitalize()} ({title_char_name})* {icon}\n"]
     for tx in filtered_tx:
         item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
         loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
         date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-        char_name_str = f" ({tx['character_name']})" if len(user_characters) > 1 else ""
+        char_name_str = f" ({tx['character_name']})" if len(characters) > 1 else ""
         message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.{char_name_str}")
 
-    await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
+    # Use the main menu keyboard for the reply
+    keyboard = [
+        ["/balance", "/summary"],
+        ["/sales", "/buys"],
+        ["/notifications", "/settings"],
+        ["/add_character"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the 5 most recent sales across all characters."""
-    await _get_last_5_transactions(update, context, is_buy=False)
+    """
+    Displays the 5 most recent sales. Prompts for character selection
+    if the user has multiple characters.
+    """
+    user_id = update.effective_user.id
+    logging.info(f"Received /sales command from user {user_id}")
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text(
+            "You have no characters added. Please use `/add_character` first."
+        )
+        return
+
+    if len(user_characters) == 1:
+        await _get_last_5_transactions(update, context, is_buy=False, characters=user_characters)
+    else:
+        keyboard = [[char.name] for char in user_characters]
+        keyboard.append(["All Characters"])
+        keyboard.append(["/start"])
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        context.user_data['next_action'] = ('select_char_for_sales', {char.name: char.id for char in user_characters})
+        await update.message.reply_text(
+            "Please select a character (or all) to view recent sales:",
+            reply_markup=reply_markup
+        )
 
 
 async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the 5 most recent buys across all characters."""
-    await _get_last_5_transactions(update, context, is_buy=True)
+    """
+    Displays the 5 most recent buys. Prompts for character selection
+    if the user has multiple characters.
+    """
+    user_id = update.effective_user.id
+    logging.info(f"Received /buys command from user {user_id}")
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text(
+            "You have no characters added. Please use `/add_character` first."
+        )
+        return
+
+    if len(user_characters) == 1:
+        await _get_last_5_transactions(update, context, is_buy=True, characters=user_characters)
+    else:
+        keyboard = [[char.name] for char in user_characters]
+        keyboard.append(["All Characters"])
+        keyboard.append(["/start"])
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        context.user_data['next_action'] = ('select_char_for_buys', {char.name: char.id for char in user_characters})
+        await update.message.reply_text(
+            "Please select a character (or all) to view recent buys:",
+            reply_markup=reply_markup
+        )
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -1770,7 +1876,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     action_type, data = next_action_tuple
 
-    # --- Character Selection ---
+    # --- Character Selection for Data Views (Balance, Summary, etc.) ---
+    if action_type in ['select_char_for_balance', 'select_char_for_summary', 'select_char_for_sales', 'select_char_for_buys']:
+        char_map = data
+        characters_to_query = []
+        if text == "All Characters":
+            characters_to_query = get_characters_for_user(user_id)
+        else:
+            char_id = char_map.get(text)
+            if char_id:
+                characters_to_query.append(get_character_by_id(char_id))
+
+        if not characters_to_query:
+            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
+            return
+
+        if action_type == 'select_char_for_balance':
+            await _show_balance_for_characters(update, context, characters_to_query)
+        elif action_type == 'select_char_for_summary':
+            await _run_summary_for_characters(update, context, characters_to_query)
+        elif action_type == 'select_char_for_sales':
+            await _get_last_5_transactions(update, context, is_buy=False, characters=characters_to_query)
+        elif action_type == 'select_char_for_buys':
+            await _get_last_5_transactions(update, context, is_buy=True, characters=characters_to_query)
+
+        context.user_data.clear()
+        return
+
+    # --- Character Selection for Settings ---
     if action_type == 'select_char_for_notifications':
         char_id = data.get(text)
         if char_id:
