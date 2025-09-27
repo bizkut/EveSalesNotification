@@ -30,12 +30,12 @@ services:
       - webapp
     command: >
       sh -c '
-        TOKEN=$$(grep -oP "CLOUDFLARE_TOKEN = \\"\K[^\"]+" /etc/config.py || echo "");
+        TOKEN=$$(awk -F ''"'' ''/CLOUDFLARE_TOKEN/ {print $$2}'' /etc/config.py);
         if [ -z "$$TOKEN" ] || [ "$$TOKEN" = "your_cloudflare_token_here" ]; then
           echo "CLOUDFLARE_TOKEN not found or is default. Tunnel not starting.";
           sleep infinity;
         else
-          echo "Starting Cloudflare tunnel...";
+          echo "Starting Cloudflare tunnel with token...";
           cloudflared tunnel --no-autoupdate run --token $$TOKEN;
         fi
       '
