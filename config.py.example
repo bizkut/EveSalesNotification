@@ -16,12 +16,7 @@ TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"
 # Example: "http://your_domain_or_ip:5000"
 WEBAPP_URL = "http://localhost:5000"
 
-# 3. Cloudflare Tunnel (Optional)
-# If you are using a Cloudflare Tunnel to expose your webapp, paste the token here.
-# Get this from your Cloudflare Zero Trust dashboard.
-CLOUDFLARE_TOKEN = "your_cloudflare_token_here"
-
-# 4. Bot Configuration
+# 3. Bot Configuration
 # The desired logging level. Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR'.
 LOG_LEVEL = 'INFO'
 

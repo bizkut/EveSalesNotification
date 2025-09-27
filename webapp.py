@@ -127,8 +127,8 @@ def login():
     scopes = [
         "esi-wallet.read_character_wallet.v1",
         "esi-markets.read_character_orders.v1",
-        "esi-universe.read_structures.v1",
-        "esi-markets.structure_markets.v1"
+        "esi-wallet.read_character_journal.v1",
+        "esi-universe.read_structures.v1"
     ]
     scope_string = " ".join(scopes)
 

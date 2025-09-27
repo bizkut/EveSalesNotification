@@ -45,8 +45,8 @@ Follow these steps to deploy your own instance of the bot.
 5.  Once the application is created, view its details. Under the "Scopes" section, add the following required scopes:
     -   `esi-wallet.read_character_wallet.v1`
     -   `esi-markets.read_character_orders.v1`
+    -   `esi-wallet.read_character_journal.v1`
     -   `esi-universe.read_structures.v1`
-    -   `esi-markets.structure_markets.v1`
 6.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
 ### Step 2: Configure the Bot
@@ -78,10 +78,11 @@ This bot includes an integrated [Cloudflare Tunnel](https://www.cloudflare.com/p
 1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel.
 2.  In your tunnel's configuration, set the **Public Hostname** (e.g., `eve.gametrader.my`) to point to the `webapp` service at `http://webapp:5000`.
 3.  Once the tunnel is created, copy the token for it.
-4.  Open your `config.py` file and paste the token into the `CLOUDFLARE_TOKEN` variable.
-5.  Ensure your `CALLBACK_URL` and `WEBAPP_URL` in `config.py` use your public `https` hostname (e.g., `https://eve.gametrader.my`).
+4.  Create a `.env` file by copying the example: `cp .env.example .env`
+5.  Open the new `.env` file and paste your token into the `CLOUDFLARE_TOKEN` variable.
+6.  Ensure your `CALLBACK_URL` and `WEBAPP_URL` in `config.py` use your public `https` hostname (e.g., `https://eve.gametrader.my`).
 
-If you choose not to use the tunnel, you will need to configure your own reverse proxy (like Nginx) and can safely ignore the `CLOUDFLARE_TOKEN` setting.
+If you choose not to use the tunnel, you can safely ignore the `.env` file.
 
 ---
 
