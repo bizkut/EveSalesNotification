@@ -1913,26 +1913,35 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
 
 async def remove_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Allows a user to select a character to remove.
+    Allows a user to select a character to remove. If only one character exists,
+    it proceeds directly to confirmation.
     """
     user_id = update.effective_user.id
     logging.info(f"Received /remove command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
-        await update.message.reply_text(
-            "You have no characters to remove."
-        )
+        await update.message.reply_text("You have no characters to remove.")
         return
 
-    keyboard = [[char.name] for char in user_characters]
-    keyboard.append(["/start"]) # Option to go back
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-    context.user_data['next_action'] = ('select_char_for_removal', {char.name: char.id for char in user_characters})
-    await update.message.reply_text(
-        "Please select a character to remove. This action is permanent and will delete all of their data.",
-        reply_markup=reply_markup
-    )
+    if len(user_characters) == 1:
+        character = user_characters[0]
+        context.user_data['next_action'] = ('confirm_removal', character.id)
+        await update.message.reply_text(
+            f"⚠️ *This is permanent and cannot be undone.* ⚠️\n\n"
+            f"Are you sure you want to remove your character **{character.name}** and all their associated data?\n\n"
+            f"Type `YES` to confirm.",
+            parse_mode='Markdown'
+        )
+    else:
+        keyboard = [[char.name] for char in user_characters]
+        keyboard.append(["/start"])  # Option to go back
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+        context.user_data['next_action'] = ('select_char_for_removal', {char.name: char.id for char in user_characters})
+        await update.message.reply_text(
+            "Please select a character to remove. This action is permanent and will delete all of their data.",
+            reply_markup=reply_markup
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2047,15 +2056,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(f"Removing character {char_name} and deleting all associated data...")
 
             delete_character(character_id)
-            load_characters_from_db() # Refresh the global list
+            load_characters_from_db()  # Refresh the global list
 
             await update.message.reply_text(f"✅ Character {char_name} has been successfully removed.")
-            await start_command(update, context) # Show main menu
+            context.user_data.clear()
+            await start_command(update, context)
         else:
             await update.message.reply_text("Removal cancelled. Returning to the main menu.")
+            context.user_data.clear()
             await start_command(update, context)
-
-        context.user_data.clear()
         return
 
     # --- General Settings Management ---
