@@ -53,6 +53,8 @@ MAIN_MENU_KEYBOARD = [
     [SALES_TEXT, BUYS_TEXT]
 ]
 
+NO_CHARACTERS_KEYBOARD = [[ADD_CHARACTER_TEXT]]
+
 def load_characters_from_db():
     """Loads all characters and their settings from the database."""
     global CHARACTERS
@@ -1422,14 +1424,24 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Displays the main menu keyboard.
+    Displays the main menu keyboard, adapting it based on whether the user
+    has registered characters.
     """
+    user_id = update.effective_user.id
     user_name = update.effective_user.first_name
-    reply_markup = ReplyKeyboardMarkup(MAIN_MENU_KEYBOARD, resize_keyboard=True)
-    await update.message.reply_text(
-        f"Welcome, {user_name}! Please choose an option from the menu below.",
-        reply_markup=reply_markup
-    )
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        reply_markup = ReplyKeyboardMarkup(NO_CHARACTERS_KEYBOARD, resize_keyboard=True)
+        message = (
+            f"Welcome, {user_name}! It looks like you don't have any EVE Online characters "
+            "added to the bot yet. Please add one to get started."
+        )
+    else:
+        reply_markup = ReplyKeyboardMarkup(MAIN_MENU_KEYBOARD, resize_keyboard=True)
+        message = f"Welcome back, {user_name}! Please choose an option from the menu below."
+
+    await update.message.reply_text(message, reply_markup=reply_markup)
 
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1442,7 +1454,7 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
-        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
+        await update.message.reply_text("You have no characters added. Please use the '➕ Add Character' button to add one.")
         return
 
     keyboard = []
@@ -1480,7 +1492,9 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
     message = (
         "To add a new character, please click the button below and authorize with EVE Online.\n\n"
         "You will be redirected to the official EVE Online login page. After logging in and "
-        "authorizing, you can close the browser window."
+        "authorizing, you can close the browser window.\n\n"
+        "*Please note:* It may take a minute or two for the character to be fully registered "
+        "with the bot after authorization."
     )
     await update.message.reply_text(message, reply_markup=reply_markup)
 
@@ -1492,7 +1506,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
-        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
+        await update.message.reply_text("You have no characters added. Please use the '➕ Add Character' button to add one.")
         return
 
     if len(user_characters) == 1:
@@ -1515,7 +1529,7 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
-        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
+        await update.message.reply_text("You have no characters added. Please use the '➕ Add Character' button to add one.")
         return
 
     if len(user_characters) == 1:
@@ -1546,7 +1560,7 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
-        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
+        await update.message.reply_text("You have no characters added. Please use the '➕ Add Character' button to add one.")
         return
 
     if len(user_characters) == 1:
@@ -1583,7 +1597,7 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
-        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
+        await update.message.reply_text("You have no characters added. Please use the '➕ Add Character' button to add one.")
         return
 
     if len(user_characters) == 1:
@@ -1619,7 +1633,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     user_characters = get_characters_for_user(user_id)
     if not user_characters:
-        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
+        await update.message.reply_text("You have no characters added. Please use the '➕ Add Character' button to add one.")
         return
 
     keyboard = [[InlineKeyboardButton(char.name, callback_data=f"settings:{char.id}")] for char in user_characters]
@@ -1673,6 +1687,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # If not a settings reply, handle as a main menu button press
+    user_characters = get_characters_for_user(user_id)
+    if not user_characters:
+        if text == ADD_CHARACTER_TEXT:
+            await add_character_command(update, context)
+        else:
+            # If they don't have characters, they shouldn't see other buttons,
+            # but we handle it just in case.
+            await start_command(update, context)
+        return
+
+    # User has characters, so handle all menu buttons
     if text == ADD_CHARACTER_TEXT:
         await add_character_command(update, context)
     elif text == NOTIFICATIONS_TEXT:
@@ -1688,7 +1713,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif text == BUYS_TEXT:
         await buys_command(update, context)
     else:
-        await update.message.reply_text("Please use one of the menu buttons.")
+        # Fallback for any other text is to just show the main menu
+        await start_command(update, context)
 
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1857,6 +1883,7 @@ async def post_init(application: Application):
     """Sets the bot's commands in the Telegram menu after initialization."""
     commands = [
         BotCommand("start", "Show the main menu"),
+        BotCommand("addcharacter", "Add a new character"),
     ]
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands have been set in the Telegram menu.")
@@ -1873,6 +1900,7 @@ def main() -> None:
 
     # --- Add command handlers ---
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("addcharacter", add_character_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
 
