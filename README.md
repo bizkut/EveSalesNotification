@@ -60,7 +60,6 @@ Follow these steps to deploy your own instance of the bot.
     -   `CALLBACK_URL`: The **exact same** callback URL you entered in the EVE application portal.
     -   `TELEGRAM_BOT_TOKEN`: From your Telegram bot setup (via BotFather).
     -   `WEBAPP_URL`: The public base URL for the webapp. This should be the address of your server. (e.g., `http://eve.gametrader.my:5000`).
-    -   `REGION_ID`: The region ID for your main trade hub (e.g., `10000002` for The Forge/Jita).
 
 ### Step 3: Run the Bot
 
