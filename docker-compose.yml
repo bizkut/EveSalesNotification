@@ -29,7 +29,7 @@ services:
     depends_on:
       - webapp
     environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TOKEN}
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
     command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
 
 volumes:
