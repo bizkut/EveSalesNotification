@@ -368,7 +368,10 @@ def add_purchase_lot(character_id, type_id, quantity, price, purchase_date=None)
 
 
 def get_purchase_lots(character_id, type_id):
-    """Retrieves all purchase lots for a specific item, oldest first."""
+    """
+    Retrieves all purchase lots for a specific item, oldest first.
+    Converts price from Decimal to float.
+    """
     conn = database.get_db_connection()
     lots = []
     try:
@@ -377,7 +380,8 @@ def get_purchase_lots(character_id, type_id):
                 "SELECT lot_id, quantity, price FROM purchase_lots WHERE character_id = %s AND type_id = %s ORDER BY purchase_date ASC",
                 (character_id, type_id)
             )
-            lots = [{"lot_id": row[0], "quantity": row[1], "price": row[2]} for row in cursor.fetchall()]
+            # Convert Decimal price from DB to float to prevent type errors during calculation
+            lots = [{"lot_id": row[0], "quantity": row[1], "price": float(row[2])} for row in cursor.fetchall()]
     finally:
         database.release_db_connection(conn)
     return lots
