@@ -4,12 +4,12 @@ This is a comprehensive Telegram bot designed to provide EVE Online players with
 
 ## Features
 
-- **Near Real-Time Market Notifications**: Checks for activity on your active market orders every 60 seconds for both sales and buys.
+- **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds. Uses efficient ETag-based polling to get data as soon as it's updated by the EVE Online servers, often much faster than the standard cache timer.
 - **Intelligent Filtering**: Notifications are only sent for non-immediate orders (1-90 day duration), ignoring instant transactions.
 - **Activity Grouping**: Multiple fills of the same item within a 60-second window are grouped into a single, summarized notification.
 - **Rich Contextual Data**:
   - **Real-Time Profit Tracking**: Sales notifications include the gross profit for the transaction, calculated using the First-In, First-Out (FIFO) method against your historical purchases.
-  - **Market Price Context**: Sale notifications include the average price for that item in your chosen trade hub, showing you how your sale compares to the market.
+  - **Live Market Price Context**: Sales notifications compare your price against the current best buy order in your main trade hub, giving you a real-time view of how your sale stacks up against the competition.
   - **Trade Location**: All notifications include the name of the station or Citadel where the trade occurred.
   - **Wallet Balance**: All notifications display your current wallet balance for at-a-glance financial awareness.
 - **Low Wallet Balance Alert**: Sends a one-time warning if your wallet drops below a configurable threshold, helping you avoid running out of ISK for new orders.
@@ -126,7 +126,7 @@ You can interact with the bot by sending it commands in a private chat or in a c
 **Item:** `Tritanium` (`34`)
 **Quantity Sold:** `1000`
 **Avg. Your Price:** `10.50 ISK`
-**Jita Avg Price:** `10.25 ISK` (+2.4%)
+**Jita Best Buy:** `10.45 ISK` (+0.48%)
 **Gross Profit (before fees):** `500.00 ISK`
 
 **Location:** `Jita 4-4 - Caldari Navy Assembly Plant`
