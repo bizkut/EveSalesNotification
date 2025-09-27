@@ -1,5 +1,9 @@
 # EVE Online Market Notification Telegram Bot
 
+> **Public Bot Available!**
+>
+> Don't want to host the bot yourself? You can use the public instance for free by sending a message to **[@Evegametraderbot](https://t.me/Evegametraderbot)** on Telegram!
+
 This is a comprehensive, multi-user Telegram bot designed to provide EVE Online players with detailed, real-time notifications and daily summaries of their market activities. The bot is fully containerized with Docker for easy deployment and uses a persistent SQLite database to ensure data integrity across restarts.
 
 ## Features
