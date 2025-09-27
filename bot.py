@@ -368,7 +368,10 @@ def add_purchase_lot(character_id, type_id, quantity, price, purchase_date=None)
 
 
 def get_purchase_lots(character_id, type_id):
-    """Retrieves all purchase lots for a specific item, oldest first."""
+    """
+    Retrieves all purchase lots for a specific item, oldest first.
+    Converts price from Decimal to float.
+    """
     conn = database.get_db_connection()
     lots = []
     try:
@@ -377,7 +380,8 @@ def get_purchase_lots(character_id, type_id):
                 "SELECT lot_id, quantity, price FROM purchase_lots WHERE character_id = %s AND type_id = %s ORDER BY purchase_date ASC",
                 (character_id, type_id)
             )
-            lots = [{"lot_id": row[0], "quantity": row[1], "price": row[2]} for row in cursor.fetchall()]
+            # Convert Decimal price from DB to float to prevent type errors during calculation
+            lots = [{"lot_id": row[0], "quantity": row[1], "price": float(row[2])} for row in cursor.fetchall()]
     finally:
         database.release_db_connection(conn)
     return lots
@@ -1540,6 +1544,7 @@ async def notifications_command(query: "CallbackQuery", context: ContextTypes.DE
     Edits the message with an inline keyboard.
     """
     user_id = query.from_user.id
+    logging.info(f"Received notifications command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
@@ -1566,6 +1571,7 @@ async def add_character_command(query: "CallbackQuery", context: ContextTypes.DE
     Edits the message with an inline keyboard.
     """
     user_id = query.from_user.id
+    logging.info(f"Received add_character command from user {user_id}")
     webapp_base_url = os.getenv('WEBAPP_URL', 'http://localhost:5000')
     login_url = f"{webapp_base_url}/login?user={user_id}"
 
@@ -1588,6 +1594,7 @@ async def add_character_command(query: "CallbackQuery", context: ContextTypes.DE
 async def balance_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetches and displays the wallet balance for the user's character(s)."""
     user_id = query.from_user.id
+    logging.info(f"Received balance command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
@@ -1617,6 +1624,7 @@ async def balance_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_
 async def summary_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYPE) -> None:
     """Manually triggers the daily summary report for the user's character(s)."""
     user_id = query.from_user.id
+    logging.info(f"Received summary command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
@@ -1664,6 +1672,7 @@ async def _show_character_selection(query: "CallbackQuery", action: str, charact
 async def sales_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays the 5 most recent sales for the user's character(s)."""
     user_id = query.from_user.id
+    logging.info(f"Received sales command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
@@ -1709,6 +1718,7 @@ async def sales_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TY
 async def buys_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays the 5 most recent buys for the user's character(s)."""
     user_id = query.from_user.id
+    logging.info(f"Received buys command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
@@ -1756,6 +1766,7 @@ async def settings_command(query: "CallbackQuery", context: ContextTypes.DEFAULT
     Edits the message with an inline keyboard.
     """
     user_id = query.from_user.id
+    logging.info(f"Received settings command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
