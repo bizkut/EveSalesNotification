@@ -8,6 +8,8 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta, time as dt_time
 from dataclasses import dataclass
 import asyncio
+import telegram
+from telegram.error import BadRequest
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
@@ -15,6 +17,21 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
 log_level = getattr(logging, log_level_str, logging.WARNING)
 logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Helper Functions ---
+
+async def _edit_message(query: "CallbackQuery", *args, **kwargs):
+    """A wrapper for query.edit_message_text that handles the 'message is not modified' error."""
+    try:
+        await query.edit_message_text(*args, **kwargs)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            # This error is expected when the user clicks a button that doesn't change the message
+            # (e.g., hitting a "Back" button that was already on the screen). We can safely ignore it.
+            pass
+        else:
+            # Log other BadRequest errors for debugging, but don't crash the bot.
+            logging.error(f"An unexpected BadRequest error occurred: {e}")
 
 # --- Character Dataclass and Global List ---
 
@@ -1532,7 +1549,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # If it's a callback, edit the message. Otherwise, send a new one.
     if query:
-        await query.edit_message_text(text=message, reply_markup=reply_markup)
+        await _edit_message(query, text=message, reply_markup=reply_markup)
     else:
         # Also remove the reply keyboard if a user is migrating from the old version
         await update.message.reply_text(text=message, reply_markup=reply_markup)
@@ -1553,7 +1570,8 @@ async def notifications_command(query: "CallbackQuery", context: ContextTypes.DE
             [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             "You have no characters added. Please add one first.",
             reply_markup=reply_markup
         )
@@ -1562,7 +1580,7 @@ async def notifications_command(query: "CallbackQuery", context: ContextTypes.DE
     keyboard = [[InlineKeyboardButton(char.name, callback_data=f"notify_menu:{char.id}")] for char in user_characters]
     keyboard.append([InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text("Please select a character to manage their notification settings:", reply_markup=reply_markup)
+    await _edit_message(query, "Please select a character to manage their notification settings:", reply_markup=reply_markup)
 
 
 async def add_character_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1588,7 +1606,7 @@ async def add_character_command(query: "CallbackQuery", context: ContextTypes.DE
         "*Please note:* It may take a minute or two for the character to be fully registered "
         "with the bot after authorization."
     )
-    await query.edit_message_text(message, reply_markup=reply_markup)
+    await _edit_message(query, message, reply_markup=reply_markup)
 
 
 async def balance_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1603,7 +1621,8 @@ async def balance_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             "You have no characters added. Please add one first.",
             reply_markup=reply_markup
         )
@@ -1611,12 +1630,12 @@ async def balance_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_
 
     if len(user_characters) == 1:
         character = user_characters[0]
-        await query.edit_message_text(f"Fetching balance for {character.name}...")
+        await _edit_message(query, f"Fetching balance for {character.name}...")
         balance = get_wallet_balance(character)
         message = f"💰 *Wallet Balance for {character.name}*\n\n`{balance:,.2f} ISK`" if balance is not None else f"Error fetching balance for {character.name}."
         keyboard = [[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(text=message, parse_mode='Markdown', reply_markup=reply_markup)
+        await _edit_message(query, text=message, parse_mode='Markdown', reply_markup=reply_markup)
     else:
         await _show_character_selection(query, "balance", user_characters, include_all=True)
 
@@ -1633,7 +1652,8 @@ async def summary_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             "You have no characters added. Please add one first.",
             reply_markup=reply_markup
         )
@@ -1641,10 +1661,11 @@ async def summary_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_
 
     if len(user_characters) == 1:
         character = user_characters[0]
-        await query.edit_message_text(f"Generating summary for {character.name}...")
+        await _edit_message(query, f"Generating summary for {character.name}...")
         # The summary function sends its own message. We'll just confirm it was sent.
         await run_daily_summary_for_character(character, context)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             f"✅ Summary sent for {character.name}!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]])
         )
@@ -1666,7 +1687,7 @@ async def _show_character_selection(query: "CallbackQuery", action: str, charact
 
     keyboard.append([InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(f"Please select a character:", reply_markup=reply_markup)
+    await _edit_message(query, f"Please select a character:", reply_markup=reply_markup)
 
 
 async def sales_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1681,7 +1702,8 @@ async def sales_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             "You have no characters added. Please add one first.",
             reply_markup=reply_markup
         )
@@ -1689,7 +1711,7 @@ async def sales_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TY
 
     if len(user_characters) == 1:
         character = user_characters[0]
-        await query.edit_message_text(f"Fetching recent sales for {character.name}...")
+        await _edit_message(query, f"Fetching recent sales for {character.name}...")
         all_transactions = get_wallet_transactions(character)
         message_lines = [f"✅ *Last 5 Sales for {character.name}* ✅\n"]
         if not all_transactions:
@@ -1710,7 +1732,7 @@ async def sales_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TY
 
         keyboard = [[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
+        await _edit_message(query, "\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
     else:
         await _show_character_selection(query, "sales", user_characters)
 
@@ -1727,7 +1749,8 @@ async def buys_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             "You have no characters added. Please add one first.",
             reply_markup=reply_markup
         )
@@ -1735,7 +1758,7 @@ async def buys_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYP
 
     if len(user_characters) == 1:
         character = user_characters[0]
-        await query.edit_message_text(f"Fetching recent buys for {character.name}...")
+        await _edit_message(query, f"Fetching recent buys for {character.name}...")
         all_transactions = get_wallet_transactions(character)
         message_lines = [f"🛒 *Last 5 Buys for {character.name}* 🛒\n"]
         if not all_transactions:
@@ -1756,7 +1779,7 @@ async def buys_command(query: "CallbackQuery", context: ContextTypes.DEFAULT_TYP
 
         keyboard = [[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
+        await _edit_message(query, "\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
     else:
         await _show_character_selection(query, "buys", user_characters)
 
@@ -1775,7 +1798,8 @@ async def settings_command(query: "CallbackQuery", context: ContextTypes.DEFAULT
             [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             "You have no characters added. Please add one first.",
             reply_markup=reply_markup
         )
@@ -1784,7 +1808,7 @@ async def settings_command(query: "CallbackQuery", context: ContextTypes.DEFAULT
     keyboard = [[InlineKeyboardButton(char.name, callback_data=f"settings:{char.id}")] for char in user_characters]
     keyboard.append([InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text("Please select a character to manage their settings:", reply_markup=reply_markup)
+    await _edit_message(query, "Please select a character to manage their settings:", reply_markup=reply_markup)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1840,7 +1864,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         parts = query.data.split(':')
         action = parts[0]
     except (ValueError, IndexError):
-        await query.edit_message_text(text="Invalid callback data.")
+        await _edit_message(query, text="Invalid callback data.")
         return
 
     user_id = update.effective_user.id
@@ -1851,13 +1875,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             notify_type = parts[1]  # 'sales', 'buys', or 'summary'
             character_id = int(parts[2])
         except (ValueError, IndexError):
-            await query.edit_message_text(text="Invalid notification toggle callback.")
+            await _edit_message(query, text="Invalid notification toggle callback.")
             return
 
         # Security check: ensure the user owns this character
         character = get_character_by_id(character_id)
         if not character or character.telegram_user_id != user_id:
-            await query.edit_message_text(text="Error: You do not own this character.")
+            await _edit_message(query, text="Error: You do not own this character.")
             return
 
         # Determine which setting to toggle and its new value
@@ -1927,7 +1951,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         # Re-fetch character to ensure we have the latest settings
         character = get_character_by_id(character_id)
         if not character or character.telegram_user_id != user_id:
-            await query.edit_message_text(text="Error: Could not find this character.")
+            await _edit_message(query, text="Error: Could not find this character.")
             return
 
         keyboard = [
@@ -1946,7 +1970,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("⬅️ Back to Character List", callback_data="notify_back")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"Notification settings for {character.name}:", reply_markup=reply_markup)
+        await _edit_message(query, f"Notification settings for {character.name}:", reply_markup=reply_markup)
         return
 
     # --- Back Button to Settings Character List ---
@@ -1955,7 +1979,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         user_characters = get_characters_for_user(user_id)
         keyboard = [[InlineKeyboardButton(char.name, callback_data=f"settings:{char.id}")] for char in user_characters]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Please select a character to manage their settings:", reply_markup=reply_markup)
+        await _edit_message(query, "Please select a character to manage their settings:", reply_markup=reply_markup)
         return
 
     # --- Main Settings Menu ---
@@ -1963,7 +1987,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         character_id = int(parts[1])
         character = next((c for c in CHARACTERS if c.id == character_id and c.telegram_user_id == user_id), None)
         if not character:
-            await query.edit_message_text(text="Error: Could not find this character.")
+            await _edit_message(query, text="Error: Could not find this character.")
             return
 
         keyboard = [
@@ -1972,7 +1996,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("⬅️ Back to Character List", callback_data="settings_back")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"Settings for {character.name}:", reply_markup=reply_markup)
+        await _edit_message(query, f"Settings for {character.name}:", reply_markup=reply_markup)
         return
 
     # --- Prompts for Changing a Setting ---
@@ -1984,13 +2008,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             "set_region": "Please enter the new Region ID for market price comparisons (e.g., 10000002 for Jita).",
             "set_wallet": "Please enter the new wallet balance threshold for low-balance warnings (e.g., 100000000 for 100m ISK)."
         }
-        await query.edit_message_text(prompt_text[action])
+        await _edit_message(query, prompt_text[action])
         return
 
     character_id_str = parts[1]
     if character_id_str == "all":
         if action == "balance":
-            await query.edit_message_text(text="Fetching balances for all your characters...")
+            await _edit_message(query, text="Fetching balances for all your characters...")
             user_characters = get_characters_for_user(user_id)
             message_lines = ["💰 *Wallet Balances* 💰\n"]
             total_balance = 0
@@ -2003,15 +2027,16 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                     message_lines.append(f"• `{char.name}`: `Error fetching balance`")
             message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
             reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]])
-            await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
+            await _edit_message(query, text="\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
         elif action == "summary":
-            await query.edit_message_text(text="Generating summary for all your characters...")
+            await _edit_message(query, text="Generating summary for all your characters...")
             user_characters = get_characters_for_user(user_id)
             for char in user_characters:
                 # This function sends its own message
                 await run_daily_summary_for_character(char, context)
                 await asyncio.sleep(1) # Be nice to Telegram
-            await query.edit_message_text(
+            await _edit_message(
+                query,
                 "✅ Summaries sent for all characters!",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]])
             )
@@ -2020,41 +2045,42 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     try:
         character_id = int(character_id_str)
     except ValueError:
-        await query.edit_message_text(text="Invalid character ID.")
+        await _edit_message(query, text="Invalid character ID.")
         return
 
     character = next((c for c in CHARACTERS if c.id == character_id), None)
     if not character:
-        await query.edit_message_text(text="Could not find the selected character.")
+        await _edit_message(query, text="Could not find the selected character.")
         return
 
-    await query.edit_message_text(text=f"Processing /{action} for {character.name}, please wait...")
+    await _edit_message(query, text=f"Processing /{action} for {character.name}, please wait...")
 
     if action == "balance":
         balance = get_wallet_balance(character)
         if balance is not None:
             message = f"💰 *Wallet Balance for {character.name}*\n\n`{balance:,.2f} ISK`"
-            await query.edit_message_text(text=message, parse_mode='Markdown')
+            await _edit_message(query, text=message, parse_mode='Markdown')
         else:
-            await query.edit_message_text(text=f"Error fetching balance for {character.name}.")
+            await _edit_message(query, text=f"Error fetching balance for {character.name}.")
     elif action == "summary":
-        await query.edit_message_text(f"Generating summary for {character.name}...")
+        await _edit_message(query, f"Generating summary for {character.name}...")
         # This function sends its own message
         await run_daily_summary_for_character(character, context)
-        await query.edit_message_text(
+        await _edit_message(
+            query,
             f"✅ Summary sent for {character.name}!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main_menu")]])
         )
     elif action in ["sales", "buys"]:
         all_transactions = get_wallet_transactions(character)
         if not all_transactions:
-            await query.edit_message_text(text=f"No transaction history found for {character.name}.")
+            await _edit_message(query, text=f"No transaction history found for {character.name}.")
             return
 
         is_buy = True if action == 'buys' else False
         filtered_tx = sorted([tx for tx in all_transactions if tx.get('is_buy') == is_buy], key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)[:5]
         if not filtered_tx:
-            await query.edit_message_text(text=f"No recent {action} found for {character.name}.")
+            await _edit_message(query, text=f"No recent {action} found for {character.name}.")
             return
 
         item_ids = [tx['type_id'] for tx in filtered_tx]
@@ -2067,7 +2093,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
             date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
             message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
-        await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
+        await _edit_message(query, text="\n".join(message_lines), parse_mode='Markdown')
 
 async def post_init(application: Application):
     """
