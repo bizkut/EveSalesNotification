@@ -3,6 +3,7 @@ import time
 import logging
 import os
 import sqlite3
+import json
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta, time as dt_time
 from dataclasses import dataclass
@@ -194,6 +195,17 @@ def setup_database():
         CREATE TABLE IF NOT EXISTS esi_names (
             item_id INTEGER PRIMARY KEY,
             name TEXT NOT NULL
+        )
+    """)
+
+    # --- New Table for Persistent ESI Caching ---
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS esi_cache (
+            cache_key TEXT PRIMARY KEY,
+            response TEXT NOT NULL,
+            etag TEXT,
+            expires TEXT NOT NULL,
+            headers TEXT
         )
     """)
     conn.commit()
@@ -506,7 +518,46 @@ def update_character_setting(character_id: int, setting: str, value: any):
 
 # --- ESI API Functions ---
 
-ESI_CACHE = {}
+def get_esi_cache_from_db(cache_key):
+    """Retrieves a cached ESI response from the database."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT response, etag, expires, headers FROM esi_cache WHERE cache_key = ?", (cache_key,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    response_json, etag, expires_str, headers_json = row
+    return {
+        'data': json.loads(response_json),
+        'etag': etag,
+        'expires': datetime.fromisoformat(expires_str),
+        'headers': json.loads(headers_json) if headers_json else None
+    }
+
+
+def save_esi_cache_to_db(cache_key, data, etag, expires_dt, headers):
+    """Saves an ESI response to the database cache."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO esi_cache (cache_key, response, etag, expires, headers)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            cache_key,
+            json.dumps(data),
+            etag,
+            expires_dt.isoformat(),
+            json.dumps(headers) if headers else None
+        )
+    )
+    conn.commit()
+    conn.close()
+
 
 def make_esi_request(url, character=None, params=None, data=None, return_headers=False, force_revalidate=False):
     """
@@ -514,18 +565,17 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
     If force_revalidate is True, it will ignore the time-based cache and use an ETag.
     Returns the JSON response and optionally the response headers.
     """
-    # Create a cache key that includes request parameters and the POST body (if any)
-    # to ensure uniqueness for different API calls.
     data_key_part = ""
     if data:
-        # For POST requests with a list of IDs, sort them to ensure cache key consistency.
         if isinstance(data, list):
             data_key_part = str(sorted(data))
         else:
             data_key_part = str(data)
     cache_key = f"{url}:{character.id if character else 'public'}:{str(params)}:{data_key_part}"
-    cached_response = ESI_CACHE.get(cache_key)
+
+    cached_response = get_esi_cache_from_db(cache_key)
     headers = {"Accept": "application/json"}
+
     if character:
         access_token = get_access_token(character.refresh_token)
         if not access_token:
@@ -533,58 +583,48 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
             return (None, None) if return_headers else None
         headers["Authorization"] = f"Bearer {access_token}"
 
-    # Check if we have a cached response and if it's still valid
     if not force_revalidate and cached_response and cached_response.get('expires', datetime.min.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc):
-        logging.debug(f"Returning cached data for {url}")
+        logging.debug(f"Returning DB-cached data for {url}")
         return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
 
-    # If we have an ETag, use it. This is the core of revalidation.
     if cached_response and 'etag' in cached_response:
         headers['If-None-Match'] = cached_response['etag']
 
     try:
-        if data: # POST request
+        if data:
             headers["Content-Type"] = "application/json"
             response = requests.post(url, headers=headers, json=data)
-        else: # GET request
+        else:
             response = requests.get(url, headers=headers, params=params)
 
-        # Handle 'Not Modified' response
         if response.status_code == 304:
-            logging.debug(f"304 Not Modified for {url}. Using cached data.")
-            expires_dt = datetime.strptime(response.headers['Expires'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
-            cached_response['expires'] = expires_dt
-            ESI_CACHE[cache_key] = cached_response
+            logging.debug(f"304 Not Modified for {url}. Using DB-cached data.")
+            new_expires_dt = datetime.strptime(response.headers['Expires'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
+            # Update the expiry time in the cache for the existing data
+            save_esi_cache_to_db(cache_key, cached_response['data'], cached_response['etag'], new_expires_dt, dict(response.headers))
             return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
 
         response.raise_for_status()
 
-        # Parse expires header
         expires_header = response.headers.get('Expires')
         if expires_header:
             expires_dt = datetime.strptime(expires_header, '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
         else:
-            # If no expires header, use a default short cache time
             expires_dt = datetime.now(timezone.utc) + timedelta(seconds=60)
 
-        # Update cache
         new_data = response.json()
-        new_cache_entry = {
-            'etag': response.headers.get('ETag'),
-            'expires': expires_dt,
-            'data': new_data,
-            'headers': dict(response.headers)
-        }
-        ESI_CACHE[cache_key] = new_cache_entry
-        logging.debug(f"Cached new data for {url}. Expires at {expires_dt}")
+        response_headers = dict(response.headers)
+        new_etag = response_headers.get('ETag')
 
-        return (new_data, dict(response.headers)) if return_headers else new_data
+        save_esi_cache_to_db(cache_key, new_data, new_etag, expires_dt, response_headers)
+        logging.debug(f"Cached new data for {url} to DB. Expires at {expires_dt}")
+
+        return (new_data, response_headers) if return_headers else new_data
 
     except requests.exceptions.RequestException as e:
         logging.error(f"Error making ESI request to {url}: {e}")
-        # On failure, return the old cached data if it exists, to prevent temporary outages from breaking the bot
         if cached_response:
-            logging.warning(f"Returning stale data for {url} due to request failure.")
+            logging.warning(f"Returning stale DB-cached data for {url} due to request failure.")
             return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
         return (None, None) if return_headers else None
 
@@ -1084,7 +1124,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
     # the API server while still allowing for near real-time notifications.
     delay = 60
     context.job_queue.run_once(check_wallet_transactions_job, delay, data=character, name=f"wallet_transactions_{character.id}")
-    logging.info(f"Wallet transaction check for {character.name} complete. Next check in {delay} seconds.")
+    logging.debug(f"Wallet transaction check for {character.name} complete. Next check in {delay} seconds.")
 
 
 async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1141,7 +1181,7 @@ async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
     # the API server while still allowing for near real-time notifications.
     delay = 60
     context.job_queue.run_once(check_order_history_job, delay, data=character, name=f"order_history_{character.id}")
-    logging.info(f"Order history check for {character.name} complete. Next check in {delay} seconds.")
+    logging.debug(f"Order history check for {character.name} complete. Next check in {delay} seconds.")
 
 
 def calculate_fifo_profit_for_summary(sales_transactions, character_id):
