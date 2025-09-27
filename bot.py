@@ -1266,7 +1266,7 @@ async def master_order_history_poll(application: Application):
             for character in characters_to_poll:
                 logging.debug(f"Polling order history for {character.name}")
                 try:
-                    order_history, _ = get_market_orders_history(character, return_headers=True, force_revalidate=True)
+                    order_history, headers = get_market_orders_history(character, return_headers=True, force_revalidate=True)
                     if order_history is None:
                         logging.error(f"Failed to fetch order history for {character.name}. Skipping.")
                         continue
@@ -1278,8 +1278,34 @@ async def master_order_history_poll(application: Application):
                         continue
 
                     logging.info(f"Detected {len(new_orders)} new historical orders for {character.name}.")
-                    cancelled_orders = [o for o in new_orders if o.get('state') == 'cancelled']
-                    expired_orders = [o for o in new_orders if o.get('state') == 'expired']
+
+                    # Get the current time from the ESI response header for accuracy
+                    try:
+                        poll_time = datetime.strptime(headers['Date'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc)
+                    except (KeyError, ValueError) as e:
+                        logging.warning(f"Could not parse 'Date' header: {e}. Falling back to local time.")
+                        poll_time = datetime.now(timezone.utc)
+
+                    cancelled_orders, expired_orders = [], []
+                    for order in new_orders:
+                        if order.get('state') == 'cancelled':
+                            cancelled_orders.append(order)
+                        elif order.get('state') == 'expired':
+                            # Verify if the order is truly expired or just cancelled near expiry
+                            try:
+                                issued_dt = datetime.fromisoformat(order['issued'].replace('Z', '+00:00'))
+                                duration = timedelta(days=order.get('duration', 90)) # Default to 90 if not present
+                                expiration_dt = issued_dt + duration
+
+                                # If the poll happened before the calculated expiration, it was cancelled.
+                                if poll_time < expiration_dt:
+                                    logging.info(f"Reclassifying order {order['order_id']} from 'expired' to 'cancelled' based on timestamps.")
+                                    cancelled_orders.append(order)
+                                else:
+                                    expired_orders.append(order)
+                            except (ValueError, KeyError) as e:
+                                logging.error(f"Could not parse timestamp for order {order['order_id']}: {e}. Treating as expired.")
+                                expired_orders.append(order) # Fallback
 
                     if cancelled_orders:
                         item_ids = [o['type_id'] for o in cancelled_orders]
