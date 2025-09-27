@@ -859,57 +859,61 @@ def get_market_history(type_id, region_id, force_revalidate=False):
     history_data = make_esi_request(url, params=params, force_revalidate=force_revalidate)
     return history_data[-1] if history_data else None
 
-def get_names_from_ids(id_list):
+def get_names_from_ids(id_list, character: Character = None):
     """
-    Resolves a list of IDs to names, using a local database cache
-    to avoid unnecessary ESI calls.
+    Resolves a list of IDs to names, using a local database cache and authenticated
+    calls for private structures if a character is provided.
     """
     if not id_list:
         return {}
 
-    # Filter for unique, valid, positive integer IDs.
-    unique_ids = list(set(id for id in id_list if isinstance(id, int) and id > 0))
+    unique_ids = list(set(int(i) for i in id_list if isinstance(i, int) and i > 0))
     if not unique_ids:
-        logging.warning("get_names_from_ids: No valid IDs provided.")
         return {}
 
     logging.debug(f"get_names_from_ids called for {len(unique_ids)} unique IDs.")
-
-    # 1. Check local database cache first
     all_resolved_names = get_names_from_db(unique_ids)
-
-    # 2. Identify which names are missing from the cache
     missing_ids = [id for id in unique_ids if id not in all_resolved_names]
 
-    # 3. If there are missing IDs, fetch them from ESI
-    if missing_ids:
-        # Filter out IDs > 10^10, which are typically player-owned structures
-        # and not resolvable by the /universe/names/ endpoint.
-        valid_esi_ids = [id for id in missing_ids if id < 10000000000]
+    if not missing_ids:
+        return all_resolved_names
 
-        if valid_esi_ids:
-            logging.info(f"Resolving {len(valid_esi_ids)} new names from ESI.")
-            url = "https://esi.evetech.net/v3/universe/names/"
-            newly_resolved_names = {}
+    # ESI's /universe/names/ endpoint can resolve most public IDs.
+    # It has a limit of 1000 IDs per request.
+    public_ids_to_fetch = [id for id in missing_ids if id < 10000000000]
+    if public_ids_to_fetch:
+        logging.info(f"Resolving {len(public_ids_to_fetch)} public names from ESI.")
+        url = "https://esi.evetech.net/v3/universe/names/"
+        for i in range(0, len(public_ids_to_fetch), 1000):
+            chunk = public_ids_to_fetch[i:i+1000]
+            name_data = make_esi_request(url, data=chunk)
+            if name_data:
+                for item in name_data:
+                    all_resolved_names[item['id']] = item['name']
 
-            # Break the list into chunks of 1000 (ESI limit)
-            for i in range(0, len(valid_esi_ids), 1000):
-                chunk = valid_esi_ids[i:i+1000]
-                logging.debug(f"Requesting ESI names for chunk of {len(chunk)} IDs.")
-                name_data = make_esi_request(url, data=chunk)
-                if name_data:
-                    for item in name_data:
-                        newly_resolved_names[item['id']] = item['name']
-                else:
-                    logging.error(f"Failed to resolve ESI names for chunk starting with ID {chunk[0]}.")
+    # Structure IDs are private and require an authenticated endpoint.
+    # These must be fetched one by one.
+    structure_ids_to_fetch = [id for id in missing_ids if id >= 10000000000]
+    if structure_ids_to_fetch and character:
+        logging.info(f"Resolving {len(structure_ids_to_fetch)} structure names for {character.name}.")
+        for struct_id in structure_ids_to_fetch:
+            # Check if we already resolved it via the public endpoint by chance
+            if struct_id in all_resolved_names:
+                continue
+            url = f"https://esi.evetech.net/v2/universe/structures/{struct_id}/"
+            # We force revalidation here because structure names can change, though rarely.
+            struct_data = make_esi_request(url, character=character, force_revalidate=True)
+            if struct_data and 'name' in struct_data:
+                logging.debug(f"Resolved structure {struct_id} to name '{struct_data['name']}'.")
+                all_resolved_names[struct_id] = struct_data['name']
+            else:
+                logging.warning(f"Could not resolve structure name for ID {struct_id} with character {character.name}.")
+                all_resolved_names[struct_id] = f"Structure ID {struct_id}" # Fallback name
 
-            # 4. Save the newly resolved names to the database cache
-            if newly_resolved_names:
-                save_names_to_db(newly_resolved_names)
-                all_resolved_names.update(newly_resolved_names)
-
-        else:
-            logging.debug("All missing IDs were filtered out before ESI request (e.g., structure IDs).")
+    # Save all newly found names (both public and structure) to the DB for future use.
+    newly_resolved_names = {id: name for id, name in all_resolved_names.items() if id in missing_ids}
+    if newly_resolved_names:
+        save_names_to_db(newly_resolved_names)
 
     logging.info(f"get_names_from_ids resolved a total of {len(all_resolved_names)}/{len(unique_ids)} names.")
     return all_resolved_names
@@ -1067,7 +1071,7 @@ async def master_wallet_transaction_poll(application: Application):
 
                     all_type_ids = list(sales.keys()) + list(buys.keys())
                     all_loc_ids = [t['location_id'] for txs in sales.values() for t in txs] + [t['location_id'] for txs in buys.values() for t in txs]
-                    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [character.region_id])))
+                    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [character.region_id])), character=character)
                     wallet_balance = get_wallet_balance(character)
 
                     # --- Unconditional Data Processing ---
@@ -1704,7 +1708,8 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
 
     item_ids = [tx['type_id'] for tx in filtered_tx]
     loc_ids = [tx['location_id'] for tx in filtered_tx]
-    id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)))
+    # Pass the first character for authenticated calls to resolve structure names
+    id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)), character=characters[0])
 
     title_char_name = char_names if len(characters) == 1 else "All Characters"
     message_lines = [f"{icon} *Last 5 {action.capitalize()} ({title_char_name})* {icon}\n"]
