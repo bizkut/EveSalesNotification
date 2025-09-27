@@ -1,6 +1,22 @@
 version: '3.8'
 
 services:
+  db:
+    image: postgres:15-alpine
+    container_name: eve-market-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evebot -d eve_market_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   bot:
     build: .
     container_name: eve-market-bot
@@ -8,9 +24,15 @@ services:
     command: ["python", "bot.py"]
     volumes:
       - ./config.py:/app/config.py:ro
-      - processed_data:/app/data
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     depends_on:
-      - webapp
+      db:
+        condition: service_healthy
 
   webapp:
     build: .
@@ -19,8 +41,15 @@ services:
     command: ["gunicorn", "--bind", "0.0.0.0:5000", "webapp:app"]
     volumes:
       - ./config.py:/app/config.py:ro
-      - processed_data:/app/data
-    # Port is no longer exposed to the host; cloudflared handles access.
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -33,5 +62,5 @@ services:
     command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
 
 volumes:
-  processed_data:
+  postgres_data:
     driver: local

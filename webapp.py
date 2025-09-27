@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import database
 import logging
 import requests
 from flask import Flask, request, redirect, render_template_string
@@ -11,39 +11,38 @@ log_level = getattr(logging, log_level_str, logging.WARNING)
 logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Database Functions ---
-# These are simplified versions of the functions in bot.py, adapted for the webapp's needs.
-DATA_DIR = "data"
-DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
-
-def db_connection():
-    """Creates a database connection."""
-    # The bot creates the directory, so we assume it exists.
-    return sqlite3.connect(DB_FILE)
-
 def add_character_to_db(character_id, character_name, refresh_token, telegram_user_id):
-    """Adds or updates a character in the database."""
-    conn = db_connection()
-    cursor = conn.cursor()
+    """Adds or updates a character in the PostgreSQL database."""
+    conn = database.get_db_connection()
     try:
-        # First, ensure the telegram user exists.
-        cursor.execute("INSERT OR IGNORE INTO telegram_users (telegram_id) VALUES (?)", (telegram_user_id,))
+        with conn.cursor() as cursor:
+            # First, ensure the telegram user exists.
+            cursor.execute(
+                "INSERT INTO telegram_users (telegram_id) VALUES (%s) ON CONFLICT DO NOTHING",
+                (telegram_user_id,)
+            )
 
-        # Now, add the character, replacing any existing entry for that character_id.
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO characters (character_id, character_name, refresh_token, telegram_user_id)
-            VALUES (?, ?, ?, ?)
-            """,
-            (character_id, character_name, refresh_token, telegram_user_id)
-        )
-        conn.commit()
+            # Now, "upsert" the character.
+            cursor.execute(
+                """
+                INSERT INTO characters (character_id, character_name, refresh_token, telegram_user_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (character_id) DO UPDATE SET
+                    character_name = EXCLUDED.character_name,
+                    refresh_token = EXCLUDED.refresh_token,
+                    telegram_user_id = EXCLUDED.telegram_user_id
+                """,
+                (character_id, character_name, refresh_token, telegram_user_id)
+            )
+            conn.commit()
         logging.info(f"Successfully added/updated character {character_name} ({character_id}) for user {telegram_user_id}.")
         return True
-    except sqlite3.Error as e:
-        logging.error(f"Database error while adding character: {e}")
+    except Exception as e:
+        logging.error(f"Database error while adding character: {e}", exc_info=True)
+        conn.rollback() # Rollback on error
         return False
     finally:
-        conn.close()
+        database.release_db_connection(conn)
 
 
 # --- ESI/OAuth Functions ---

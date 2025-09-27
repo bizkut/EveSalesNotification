@@ -2,7 +2,7 @@ import requests
 import time
 import logging
 import os
-import sqlite3
+import database
 import json
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta, time as dt_time
@@ -57,18 +57,21 @@ NO_CHARACTERS_KEYBOARD = [[ADD_CHARACTER_TEXT]]
 def load_characters_from_db():
     """Loads all characters and their settings from the database."""
     global CHARACTERS
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT
-            character_id, character_name, refresh_token, telegram_user_id,
-            notifications_enabled, region_id, wallet_balance_threshold,
-            enable_sales_notifications, enable_buy_notifications, enable_daily_summary,
-            notification_batch_threshold
-        FROM characters
-    """)
-    rows = cursor.fetchall()
-    conn.close()
+    conn = database.get_db_connection()
+    rows = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    character_id, character_name, refresh_token, telegram_user_id,
+                    notifications_enabled, region_id, wallet_balance_threshold,
+                    enable_sales_notifications, enable_buy_notifications, enable_daily_summary,
+                    notification_batch_threshold
+                FROM characters
+            """)
+            rows = cursor.fetchall()
+    finally:
+        database.release_db_connection(conn)
 
     if not rows:
         logging.warning("No characters found in the database.")
@@ -107,294 +110,333 @@ def load_characters_from_db():
 
 # --- Database Functions ---
 
-DATA_DIR = "data"
-DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
-
-def db_connection():
-    """Creates a database connection."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    return sqlite3.connect(DB_FILE)
-
 def setup_database():
-    """Creates the necessary database tables if they don't exist."""
-    conn = db_connection()
-    cursor = conn.cursor()
+    """Creates the necessary PostgreSQL database tables if they don't exist."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Foreign key reference needs the telegram_users table to exist first.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS telegram_users (
+                    telegram_id BIGINT PRIMARY KEY
+                )
+            """)
 
-    # --- New Tables for Multi-User Support ---
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS telegram_users (
-            telegram_id INTEGER PRIMARY KEY
-        )
-    """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS characters (
+                    character_id INTEGER PRIMARY KEY,
+                    character_name TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
+                    telegram_user_id BIGINT NOT NULL REFERENCES telegram_users(telegram_id),
+                    notifications_enabled BOOLEAN DEFAULT TRUE,
+                    region_id INTEGER DEFAULT 10000002,
+                    wallet_balance_threshold BIGINT DEFAULT 0,
+                    enable_sales_notifications BOOLEAN DEFAULT TRUE,
+                    enable_buy_notifications BOOLEAN DEFAULT TRUE,
+                    enable_daily_summary BOOLEAN DEFAULT TRUE,
+                    notification_batch_threshold INTEGER DEFAULT 3
+                )
+            """)
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS characters (
-            character_id INTEGER PRIMARY KEY,
-            character_name TEXT NOT NULL,
-            refresh_token TEXT NOT NULL,
-            telegram_user_id INTEGER NOT NULL,
-            -- Per-character settings with sane defaults
-            notifications_enabled BOOLEAN DEFAULT 1,
-            region_id INTEGER DEFAULT 10000002,
-            wallet_balance_threshold INTEGER DEFAULT 0,
-            enable_sales_notifications BOOLEAN DEFAULT 1,
-            enable_buy_notifications BOOLEAN DEFAULT 1,
-            enable_daily_summary BOOLEAN DEFAULT 1,
-            notification_batch_threshold INTEGER DEFAULT 3,
-            FOREIGN KEY (telegram_user_id) REFERENCES telegram_users (telegram_id)
-        )
-    """)
-
-    # --- Existing Tables ---
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS processed_transactions (
-            transaction_id INTEGER NOT NULL,
-            character_id INTEGER NOT NULL,
-            PRIMARY KEY (transaction_id, character_id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS processed_journal_entries (
-            entry_id INTEGER NOT NULL,
-            character_id INTEGER NOT NULL,
-            PRIMARY KEY (entry_id, character_id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS market_orders (
-            order_id INTEGER NOT NULL,
-            character_id INTEGER NOT NULL,
-            volume_remain INTEGER NOT NULL,
-            PRIMARY KEY (order_id, character_id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS bot_state (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS purchase_lots (
-            lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            character_id INTEGER NOT NULL,
-            type_id INTEGER NOT NULL,
-            quantity INTEGER NOT NULL,
-            price REAL NOT NULL,
-            purchase_date TEXT NOT NULL
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS processed_orders (
-            order_id INTEGER NOT NULL,
-            character_id INTEGER NOT NULL,
-            PRIMARY KEY (order_id, character_id)
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS esi_names (
-            item_id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL
-        )
-    """)
-
-    # --- New Table for Persistent ESI Caching ---
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS esi_cache (
-            cache_key TEXT PRIMARY KEY,
-            response TEXT NOT NULL,
-            etag TEXT,
-            expires TEXT NOT NULL,
-            headers TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS processed_transactions (
+                    transaction_id BIGINT NOT NULL,
+                    character_id INTEGER NOT NULL,
+                    PRIMARY KEY (transaction_id, character_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS processed_journal_entries (
+                    entry_id BIGINT NOT NULL,
+                    character_id INTEGER NOT NULL,
+                    PRIMARY KEY (entry_id, character_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS market_orders (
+                    order_id BIGINT NOT NULL,
+                    character_id INTEGER NOT NULL,
+                    volume_remain INTEGER NOT NULL,
+                    PRIMARY KEY (order_id, character_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS purchase_lots (
+                    lot_id SERIAL PRIMARY KEY,
+                    character_id INTEGER NOT NULL,
+                    type_id INTEGER NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    price NUMERIC(17, 2) NOT NULL,
+                    purchase_date TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS processed_orders (
+                    order_id BIGINT NOT NULL,
+                    character_id INTEGER NOT NULL,
+                    PRIMARY KEY (order_id, character_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS esi_names (
+                    item_id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS esi_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    response JSONB NOT NULL,
+                    etag TEXT,
+                    expires TIMESTAMP WITH TIME ZONE NOT NULL,
+                    headers JSONB
+                )
+            """)
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
     logging.info("Database setup/verification complete. All tables are present.")
 
 def get_processed_orders(character_id):
     """Retrieves all processed order IDs for a character from the database."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT order_id FROM processed_orders WHERE character_id = ?", (character_id,))
-    processed_ids = {row[0] for row in cursor.fetchall()}
-    conn.close()
+    conn = database.get_db_connection()
+    processed_ids = set()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT order_id FROM processed_orders WHERE character_id = %s", (character_id,))
+            processed_ids = {row[0] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
     return processed_ids
 
 def add_processed_orders(character_id, order_ids):
     """Adds a list of order IDs for a character to the database."""
     if not order_ids:
         return
-    conn = db_connection()
-    cursor = conn.cursor()
-    data_to_insert = [(o_id, character_id) for o_id in order_ids]
-    cursor.executemany(
-        "INSERT OR IGNORE INTO processed_orders (order_id, character_id) VALUES (?, ?)",
-        data_to_insert
-    )
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [(o_id, character_id) for o_id in order_ids]
+            cursor.executemany(
+                "INSERT INTO processed_orders (order_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                data_to_insert
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 def get_bot_state(key):
     """Retrieves a value from the bot_state key-value store."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM bot_state WHERE key = ?", (key,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
+    conn = database.get_db_connection()
+    result = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT value FROM bot_state WHERE key = %s", (key,))
+            row = cursor.fetchone()
+            if row:
+                result = row[0]
+    finally:
+        database.release_db_connection(conn)
+    return result
 
 def set_bot_state(key, value):
     """Sets a value in the bot_state key-value store."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO bot_state (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO bot_state (key, value) VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                (key, str(value))
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 def get_tracked_market_orders(character_id):
     """Retrieves all tracked market orders for a specific character."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT order_id, volume_remain FROM market_orders WHERE character_id = ?", (character_id,))
-    return {row[0]: row[1] for row in cursor.fetchall()}
+    conn = database.get_db_connection()
+    orders = {}
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT order_id, volume_remain FROM market_orders WHERE character_id = %s", (character_id,))
+            orders = {row[0]: row[1] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
+    return orders
 
 def update_tracked_market_orders(character_id, orders):
     """Inserts or updates a list of market orders for a character in the database."""
     if not orders:
         return
-    conn = db_connection()
-    cursor = conn.cursor()
-    orders_with_char_id = [(o[0], character_id, o[1]) for o in orders]
-    cursor.executemany(
-        "INSERT OR REPLACE INTO market_orders (order_id, character_id, volume_remain) VALUES (?, ?, ?)",
-        orders_with_char_id
-    )
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            orders_with_char_id = [(o[0], character_id, o[1]) for o in orders]
+            upsert_query = """
+                INSERT INTO market_orders (order_id, character_id, volume_remain)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (order_id, character_id) DO UPDATE
+                SET volume_remain = EXCLUDED.volume_remain;
+            """
+            cursor.executemany(upsert_query, orders_with_char_id)
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 def remove_tracked_market_orders(character_id, order_ids):
     """Removes a list of market orders for a character from the database."""
     if not order_ids:
         return
-    conn = db_connection()
-    cursor = conn.cursor()
-    orders_to_delete = [(order_id, character_id) for order_id in order_ids]
-    cursor.executemany(
-        "DELETE FROM market_orders WHERE order_id = ? AND character_id = ?",
-        orders_to_delete
-    )
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            orders_to_delete = [(order_id, character_id) for order_id in order_ids]
+            cursor.executemany(
+                "DELETE FROM market_orders WHERE order_id = %s AND character_id = %s",
+                orders_to_delete
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 def get_processed_transactions(character_id):
     """Retrieves all processed transaction IDs for a character from the database."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT transaction_id FROM processed_transactions WHERE character_id = ?", (character_id,))
-    processed_ids = {row[0] for row in cursor.fetchall()}
-    conn.close()
+    conn = database.get_db_connection()
+    processed_ids = set()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT transaction_id FROM processed_transactions WHERE character_id = %s", (character_id,))
+            processed_ids = {row[0] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
     return processed_ids
 
 def add_processed_transactions(character_id, transaction_ids):
     """Adds a list of transaction IDs for a character to the database."""
     if not transaction_ids:
         return
-    conn = db_connection()
-    cursor = conn.cursor()
-    data_to_insert = [(tx_id, character_id) for tx_id in transaction_ids]
-    cursor.executemany(
-        "INSERT OR IGNORE INTO processed_transactions (transaction_id, character_id) VALUES (?, ?)",
-        data_to_insert
-    )
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [(tx_id, character_id) for tx_id in transaction_ids]
+            cursor.executemany(
+                "INSERT INTO processed_transactions (transaction_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                data_to_insert
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 def get_processed_journal_entries(character_id):
     """Retrieves all processed journal entry IDs for a character from the database."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT entry_id FROM processed_journal_entries WHERE character_id = ?", (character_id,))
-    processed_ids = {row[0] for row in cursor.fetchall()}
-    conn.close()
+    conn = database.get_db_connection()
+    processed_ids = set()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT entry_id FROM processed_journal_entries WHERE character_id = %s", (character_id,))
+            processed_ids = {row[0] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
     return processed_ids
 
 def add_processed_journal_entries(character_id, entry_ids):
     """Adds a list of journal entry IDs for a character to the database."""
     if not entry_ids:
         return
-    conn = db_connection()
-    cursor = conn.cursor()
-    data_to_insert = [(entry_id, character_id) for entry_id in entry_ids]
-    cursor.executemany(
-        "INSERT OR IGNORE INTO processed_journal_entries (entry_id, character_id) VALUES (?, ?)",
-        data_to_insert
-    )
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [(entry_id, character_id) for entry_id in entry_ids]
+            cursor.executemany(
+                "INSERT INTO processed_journal_entries (entry_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                data_to_insert
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 
 def add_purchase_lot(character_id, type_id, quantity, price, purchase_date=None):
     """Adds a new purchase lot to the database, with an optional historical date."""
-    conn = db_connection()
-    cursor = conn.cursor()
+    conn = database.get_db_connection()
     if purchase_date is None:
         purchase_date = datetime.now(timezone.utc).isoformat()
-
-    cursor.execute(
-        """
-        INSERT INTO purchase_lots (character_id, type_id, quantity, price, purchase_date)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (character_id, type_id, quantity, price, purchase_date)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO purchase_lots (character_id, type_id, quantity, price, purchase_date)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (character_id, type_id, quantity, price, purchase_date)
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
     logging.debug(f"Recorded purchase for char {character_id}: {quantity} of type {type_id} at {price:,.2f} ISK each on {purchase_date}.")
 
 
 def get_purchase_lots(character_id, type_id):
     """Retrieves all purchase lots for a specific item, oldest first."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT lot_id, quantity, price FROM purchase_lots WHERE character_id = ? AND type_id = ? ORDER BY purchase_date ASC",
-        (character_id, type_id)
-    )
-    lots = [{"lot_id": row[0], "quantity": row[1], "price": row[2]} for row in cursor.fetchall()]
-    conn.close()
+    conn = database.get_db_connection()
+    lots = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT lot_id, quantity, price FROM purchase_lots WHERE character_id = %s AND type_id = %s ORDER BY purchase_date ASC",
+                (character_id, type_id)
+            )
+            lots = [{"lot_id": row[0], "quantity": row[1], "price": row[2]} for row in cursor.fetchall()]
+    finally:
+        database.release_db_connection(conn)
     return lots
 
 
 def update_purchase_lot_quantity(lot_id, new_quantity):
     """Updates the remaining quantity of a purchase lot."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE purchase_lots SET quantity = ? WHERE lot_id = ?", (new_quantity, lot_id))
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE purchase_lots SET quantity = %s WHERE lot_id = %s", (new_quantity, lot_id))
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 
 def delete_purchase_lot(lot_id):
     """Deletes a purchase lot from the database, typically when it's fully consumed."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM purchase_lots WHERE lot_id = ?", (lot_id,))
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM purchase_lots WHERE lot_id = %s", (lot_id,))
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 
 def get_names_from_db(id_list):
     """Retrieves a mapping of id -> name from the local database for the given IDs."""
     if not id_list:
         return {}
-    conn = db_connection()
-    cursor = conn.cursor()
-    # Create a string of placeholders for the query
-    placeholders = ','.join('?' for _ in id_list)
-    cursor.execute(f"SELECT item_id, name FROM esi_names WHERE item_id IN ({placeholders})", id_list)
-    id_to_name_map = {row[0]: row[1] for row in cursor.fetchall()}
-    conn.close()
+    conn = database.get_db_connection()
+    id_to_name_map = {}
+    try:
+        with conn.cursor() as cursor:
+            # Create a string of placeholders for the query
+            placeholders = ','.join(['%s'] * len(id_list))
+            cursor.execute(f"SELECT item_id, name FROM esi_names WHERE item_id IN ({placeholders})", id_list)
+            id_to_name_map = {row[0]: row[1] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
     logging.debug(f"Resolved {len(id_to_name_map)} names from local DB cache.")
     return id_to_name_map
 
@@ -403,112 +445,117 @@ def save_names_to_db(id_to_name_map):
     """Saves a mapping of id -> name to the local database."""
     if not id_to_name_map:
         return
-    conn = db_connection()
-    cursor = conn.cursor()
-    data_to_insert = list(id_to_name_map.items())
-    cursor.executemany(
-        "INSERT OR IGNORE INTO esi_names (item_id, name) VALUES (?, ?)",
-        data_to_insert
-    )
-    conn.commit()
-    conn.close()
-    logging.debug(f"Saved {len(data_to_insert)} new names to local DB cache.")
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = list(id_to_name_map.items())
+            cursor.executemany(
+                "INSERT INTO esi_names (item_id, name) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                data_to_insert
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+    logging.debug(f"Saved {len(id_to_name_map)} new names to local DB cache.")
 
 
 def get_characters_for_user(telegram_user_id):
     """Retrieves all characters and their settings for a given Telegram user ID."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT
-            character_id, character_name, refresh_token, telegram_user_id,
-            notifications_enabled, region_id, wallet_balance_threshold,
-            enable_sales_notifications, enable_buy_notifications, enable_daily_summary,
-            notification_batch_threshold
-        FROM characters WHERE telegram_user_id = ?
-    """, (telegram_user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-
+    conn = database.get_db_connection()
     user_characters = []
-    for row in rows:
-        (
-            char_id, name, refresh_token, telegram_user_id, notifications_enabled,
-            region_id, wallet_balance_threshold,
-            enable_sales, enable_buys, enable_summary, batch_threshold
-        ) = row
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    character_id, character_name, refresh_token, telegram_user_id,
+                    notifications_enabled, region_id, wallet_balance_threshold,
+                    enable_sales_notifications, enable_buy_notifications, enable_daily_summary,
+                    notification_batch_threshold
+                FROM characters WHERE telegram_user_id = %s
+            """, (telegram_user_id,))
+            rows = cursor.fetchall()
+            for row in rows:
+                (
+                    char_id, name, refresh_token, telegram_user_id, notifications_enabled,
+                    region_id, wallet_balance_threshold,
+                    enable_sales, enable_buys, enable_summary, batch_threshold
+                ) = row
 
-        user_characters.append(Character(
-            id=char_id, name=name, refresh_token=refresh_token,
-            telegram_user_id=telegram_user_id,
-            notifications_enabled=bool(notifications_enabled),
-            region_id=region_id,
-            wallet_balance_threshold=wallet_balance_threshold,
-            enable_sales_notifications=bool(enable_sales),
-            enable_buy_notifications=bool(enable_buys),
-            enable_daily_summary=bool(enable_summary),
-            notification_batch_threshold=batch_threshold
-        ))
+                user_characters.append(Character(
+                    id=char_id, name=name, refresh_token=refresh_token,
+                    telegram_user_id=telegram_user_id,
+                    notifications_enabled=bool(notifications_enabled),
+                    region_id=region_id,
+                    wallet_balance_threshold=wallet_balance_threshold,
+                    enable_sales_notifications=bool(enable_sales),
+                    enable_buy_notifications=bool(enable_buys),
+                    enable_daily_summary=bool(enable_summary),
+                    notification_batch_threshold=batch_threshold
+                ))
+    finally:
+        database.release_db_connection(conn)
     return user_characters
 
 
 def get_character_by_id(character_id: int) -> Character | None:
     """Retrieves a single character and their settings by character ID."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT
-            character_id, character_name, refresh_token, telegram_user_id,
-            notifications_enabled, region_id, wallet_balance_threshold,
-            enable_sales_notifications, enable_buy_notifications, enable_daily_summary,
-            notification_batch_threshold
-        FROM characters WHERE character_id = ?
-    """, (character_id,))
-    row = cursor.fetchone()
-    conn.close()
+    conn = database.get_db_connection()
+    character = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    character_id, character_name, refresh_token, telegram_user_id,
+                    notifications_enabled, region_id, wallet_balance_threshold,
+                    enable_sales_notifications, enable_buy_notifications, enable_daily_summary,
+                    notification_batch_threshold
+                FROM characters WHERE character_id = %s
+            """, (character_id,))
+            row = cursor.fetchone()
 
-    if not row:
-        return None
+            if row:
+                (
+                    char_id, name, refresh_token, telegram_user_id, notifications_enabled,
+                    region_id, wallet_balance_threshold,
+                    enable_sales, enable_buys, enable_summary, batch_threshold
+                ) = row
 
-    (
-        char_id, name, refresh_token, telegram_user_id, notifications_enabled,
-        region_id, wallet_balance_threshold,
-        enable_sales, enable_buys, enable_summary, batch_threshold
-    ) = row
-
-    return Character(
-        id=char_id, name=name, refresh_token=refresh_token,
-        telegram_user_id=telegram_user_id,
-        notifications_enabled=bool(notifications_enabled),
-        region_id=region_id,
-        wallet_balance_threshold=wallet_balance_threshold,
-        enable_sales_notifications=bool(enable_sales),
-        enable_buy_notifications=bool(enable_buys),
-        enable_daily_summary=bool(enable_summary),
-        notification_batch_threshold=batch_threshold
-    )
+                character = Character(
+                    id=char_id, name=name, refresh_token=refresh_token,
+                    telegram_user_id=telegram_user_id,
+                    notifications_enabled=bool(notifications_enabled),
+                    region_id=region_id,
+                    wallet_balance_threshold=wallet_balance_threshold,
+                    enable_sales_notifications=bool(enable_sales),
+                    enable_buy_notifications=bool(enable_buys),
+                    enable_daily_summary=bool(enable_summary),
+                    notification_batch_threshold=batch_threshold
+                )
+    finally:
+        database.release_db_connection(conn)
+    return character
 
 
 def update_character_setting(character_id: int, setting: str, value: any):
     """Updates a specific setting for a character in the database."""
-    # Whitelist settings to prevent SQL injection
     allowed_settings = ["region_id", "wallet_balance_threshold"]
     if setting not in allowed_settings:
         logging.error(f"Attempted to update an invalid setting: {setting}")
         return
 
-    conn = db_connection()
-    cursor = conn.cursor()
-    query = f"UPDATE characters SET {setting} = ? WHERE character_id = ?"
-    cursor.execute(query, (value, character_id))
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = f"UPDATE characters SET {setting} = %s WHERE character_id = %s"
+            cursor.execute(query, (value, character_id))
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
     logging.info(f"Updated {setting} for character {character_id} to {value}.")
 
 
 def update_character_notification_setting(character_id: int, setting: str, value: bool):
     """Updates a specific notification setting for a character in the database."""
-    # Whitelist settings to prevent SQL injection
     allowed_settings = {
         "sales": "enable_sales_notifications",
         "buys": "enable_buy_notifications",
@@ -519,12 +566,14 @@ def update_character_notification_setting(character_id: int, setting: str, value
         return
 
     column_name = allowed_settings[setting]
-    conn = db_connection()
-    cursor = conn.cursor()
-    query = f"UPDATE characters SET {column_name} = ? WHERE character_id = ?"
-    cursor.execute(query, (int(value), character_id))
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = f"UPDATE characters SET {column_name} = %s WHERE character_id = %s"
+            cursor.execute(query, (value, character_id))
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
     logging.info(f"Updated {column_name} for character {character_id} to {value}.")
 
 
@@ -532,43 +581,52 @@ def update_character_notification_setting(character_id: int, setting: str, value
 
 def get_esi_cache_from_db(cache_key):
     """Retrieves a cached ESI response from the database."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT response, etag, expires, headers FROM esi_cache WHERE cache_key = ?", (cache_key,))
-    row = cursor.fetchone()
-    conn.close()
-
-    if not row:
-        return None
-
-    response_json, etag, expires_str, headers_json = row
-    return {
-        'data': json.loads(response_json),
-        'etag': etag,
-        'expires': datetime.fromisoformat(expires_str),
-        'headers': json.loads(headers_json) if headers_json else None
-    }
+    conn = database.get_db_connection()
+    cached_item = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT response, etag, expires, headers FROM esi_cache WHERE cache_key = %s", (cache_key,))
+            row = cursor.fetchone()
+            if row:
+                response_json, etag, expires_dt, headers_json = row
+                cached_item = {
+                    'data': response_json,  # Already parsed as dict by psycopg2
+                    'etag': etag,
+                    'expires': expires_dt, # Already a datetime object
+                    'headers': headers_json # Already parsed as dict by psycopg2
+                }
+    finally:
+        database.release_db_connection(conn)
+    return cached_item
 
 
 def save_esi_cache_to_db(cache_key, data, etag, expires_dt, headers):
     """Saves an ESI response to the database cache."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO esi_cache (cache_key, response, etag, expires, headers)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            cache_key,
-            json.dumps(data),
-            etag,
-            expires_dt.isoformat(),
-            json.dumps(headers) if headers else None
-        )
-    )
-    conn.commit()
-    conn.close()
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            upsert_query = """
+                INSERT INTO esi_cache (cache_key, response, etag, expires, headers)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (cache_key) DO UPDATE SET
+                    response = EXCLUDED.response,
+                    etag = EXCLUDED.etag,
+                    expires = EXCLUDED.expires,
+                    headers = EXCLUDED.headers;
+            """
+            cursor.execute(
+                upsert_query,
+                (
+                    cache_key,
+                    json.dumps(data),
+                    etag,
+                    expires_dt, # No need for isoformat, psycopg2 handles datetime
+                    json.dumps(headers) if headers else None
+                )
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
 
 
 def make_esi_request(url, character=None, params=None, data=None, return_headers=False, force_revalidate=False):
