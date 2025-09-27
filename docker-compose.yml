@@ -29,15 +29,16 @@ services:
     depends_on:
       - webapp
     environment:
-      - CLOUDFLARE_TOKEN=${CLOUDFLARE_TOKEN}
+      - TUNNEL_NAME=${CLOUDFLARE_TUNNEL_NAME}
+      - TUNNEL_TOKEN=${CLOUDFLARE_TOKEN}
     command: >
       sh -c '
-        if [ -z "$$CLOUDFLARE_TOKEN" ] || [ "$$CLOUDFLARE_TOKEN" = "your_cloudflare_token_here" ]; then
-          echo "CLOUDFLARE_TOKEN not set or is default. Tunnel will not start.";
+        if [ -z "$$TUNNEL_NAME" ] || [ "$$TUNNEL_NAME" = "your_tunnel_name" ]; then
+          echo "CLOUDFLARE_TUNNEL_NAME is not set. Tunnel will not start.";
           sleep infinity;
         else
-          echo "Starting Cloudflare tunnel...";
-          cloudflared tunnel --no-autoupdate run --token $$CLOUDFLARE_TOKEN;
+          echo "Starting Cloudflare tunnel for $$TUNNEL_NAME...";
+          cloudflared tunnel --no-autoupdate run --token $$TUNNEL_TOKEN $$TUNNEL_NAME;
         fi
       '
 

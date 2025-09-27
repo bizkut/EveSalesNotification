@@ -45,7 +45,6 @@ Follow these steps to deploy your own instance of the bot.
 5.  Once the application is created, view its details. Under the "Scopes" section, add the following required scopes:
     -   `esi-wallet.read_character_wallet.v1`
     -   `esi-markets.read_character_orders.v1`
-    -   `esi-wallet.read_character_journal.v1`
     -   `esi-universe.read_structures.v1`
 6.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
@@ -73,16 +72,15 @@ The bot and its companion web app will now start.
 
 ### Step 3: (Optional) Configure Cloudflare Tunnel
 
-This bot includes an integrated [Cloudflare Tunnel](https://www.cloudflare.com/products/tunnel/) service to easily and securely expose the web app to the internet without opening ports on your server.
+This bot includes an integrated [Cloudflare Tunnel](https://www.cloudflare.com/products/tunnel/) service to easily and securely expose the web app to the internet.
 
-1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel.
-2.  In your tunnel's configuration, set the **Public Hostname** (e.g., `eve.gametrader.my`) to point to the `webapp` service at `http://webapp:5000`.
-3.  Once the tunnel is created, copy the token for it.
-4.  Create a `.env` file by copying the example: `cp .env.example .env`
-5.  Open the new `.env` file and paste your token into the `CLOUDFLARE_TOKEN` variable.
-6.  Ensure your `CALLBACK_URL` and `WEBAPP_URL` in `config.py` use your public `https` hostname (e.g., `https://eve.gametrader.my`).
+1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel. Note down the **tunnel name** and the **tunnel token**.
+2.  In your tunnel's dashboard, configure the **Public Hostname**. Set the hostname you want (e.g., `eve.gametrader.my`) to point to the internal `webapp` service at `http://webapp:5000`.
+3.  Create a `.env` file by copying the example: `cp .env.example .env`
+4.  Open the new `.env` file and paste your **tunnel name** and **token** into the corresponding variables.
+5.  Finally, ensure your `CALLBACK_URL` and `WEBAPP_URL` in `config.py` use your public `https` hostname (e.g., `https://eve.gametrader.my`).
 
-If you choose not to use the tunnel, you can safely ignore the `.env` file.
+If you choose not to use the tunnel, you can safely ignore the `.env` file and will need to set up your own reverse proxy.
 
 ---
 
