@@ -48,7 +48,7 @@ SALES_TEXT = "📈 View Sales"
 BUYS_TEXT = "🛒 View Buys"
 
 MAIN_MENU_KEYBOARD = [
-    [ADD_CHARACTER_TEXT, NOTIFICATIONS_TEXT, SETTINGS_TEXT],
+    [NOTIFICATIONS_TEXT, SETTINGS_TEXT],
     [BALANCE_TEXT, SUMMARY_TEXT],
     [SALES_TEXT, BUYS_TEXT]
 ]
@@ -454,16 +454,6 @@ def get_characters_for_user(telegram_user_id):
     return user_characters
 
 
-def set_character_notification_status(character_id, new_status: bool):
-    """Updates the notification status for a specific character."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE characters SET notifications_enabled = ? WHERE character_id = ?", (int(new_status), character_id))
-    conn.commit()
-    conn.close()
-    logging.info(f"Set notification status for character {character_id} to {new_status}.")
-
-
 def get_character_by_id(character_id: int) -> Character | None:
     """Retrieves a single character and their settings by character ID."""
     conn = db_connection()
@@ -516,6 +506,28 @@ def update_character_setting(character_id: int, setting: str, value: any):
     conn.commit()
     conn.close()
     logging.info(f"Updated {setting} for character {character_id} to {value}.")
+
+
+def update_character_notification_setting(character_id: int, setting: str, value: bool):
+    """Updates a specific notification setting for a character in the database."""
+    # Whitelist settings to prevent SQL injection
+    allowed_settings = {
+        "sales": "enable_sales_notifications",
+        "buys": "enable_buy_notifications",
+        "summary": "enable_daily_summary"
+    }
+    if setting not in allowed_settings:
+        logging.error(f"Attempted to update an invalid notification setting: {setting}")
+        return
+
+    column_name = allowed_settings[setting]
+    conn = db_connection()
+    cursor = conn.cursor()
+    query = f"UPDATE characters SET {column_name} = ? WHERE character_id = ?"
+    cursor.execute(query, (int(value), character_id))
+    conn.commit()
+    conn.close()
+    logging.info(f"Updated {column_name} for character {character_id} to {value}.")
 
 
 # --- ESI API Functions ---
@@ -1446,7 +1458,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Allows a user to view and toggle notification settings for their characters.
+    Allows a user to select a character to manage their notification settings.
     """
     user_id = update.effective_user.id
     logging.info(f"Received /notifications command from user {user_id}")
@@ -1457,20 +1469,9 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("You have no characters added. Please use the '➕ Add Character' button to add one.")
         return
 
-    keyboard = []
-    for char in user_characters:
-        status_text = "✅ On" if char.notifications_enabled else "❌ Off"
-        # The callback data will be 'notify:character_id:new_status_as_int'
-        # So if it's currently on (True), the button will offer to turn it off (0)
-        new_status_int = 0 if char.notifications_enabled else 1
-        button = InlineKeyboardButton(
-            f"{char.name}: {status_text}",
-            callback_data=f"notify:{char.id}:{new_status_int}"
-        )
-        keyboard.append([button])
-
+    keyboard = [[InlineKeyboardButton(char.name, callback_data=f"notify_menu:{char.id}")] for char in user_characters]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Manage notifications for your characters:", reply_markup=reply_markup)
+    await update.message.reply_text("Please select a character to manage their notification settings:", reply_markup=reply_markup)
 
 
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1698,9 +1699,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # User has characters, so handle all menu buttons
-    if text == ADD_CHARACTER_TEXT:
-        await add_character_command(update, context)
-    elif text == NOTIFICATIONS_TEXT:
+    if text == NOTIFICATIONS_TEXT:
         await notifications_command(update, context)
     elif text == SETTINGS_TEXT:
         await settings_command(update, context)
@@ -1731,42 +1730,77 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     user_id = update.effective_user.id
 
-    # --- Notification Toggle Logic ---
-    if action == "notify":
+    # --- Granular Notification Toggle Logic ---
+    if action == "toggle_notify":
         try:
-            character_id = int(parts[1])
-            new_status = bool(int(parts[2]))
+            notify_type = parts[1]  # 'sales', 'buys', or 'summary'
+            character_id = int(parts[2])
         except (ValueError, IndexError):
-            await query.edit_message_text(text="Invalid notification callback.")
+            await query.edit_message_text(text="Invalid notification toggle callback.")
             return
 
         # Security check: ensure the user owns this character
-        user_characters = get_characters_for_user(user_id)
-        if not any(c.id == character_id for c in user_characters):
+        character = get_character_by_id(character_id)
+        if not character or character.telegram_user_id != user_id:
             await query.edit_message_text(text="Error: You do not own this character.")
             return
 
-        set_character_notification_status(character_id, new_status)
+        # Determine which setting to toggle and its new value
+        current_value = False
+        if notify_type == "sales":
+            current_value = character.enable_sales_notifications
+        elif notify_type == "buys":
+            current_value = character.enable_buy_notifications
+        elif notify_type == "summary":
+            current_value = character.enable_daily_summary
+
+        new_value = not current_value
+        update_character_notification_setting(character_id, notify_type, new_value)
 
         # Update the character in the global list to reflect the change immediately
         for char in CHARACTERS:
             if char.id == character_id:
-                char.notifications_enabled = new_status
+                if notify_type == "sales": char.enable_sales_notifications = new_value
+                elif notify_type == "buys": char.enable_buy_notifications = new_value
+                elif notify_type == "summary": char.enable_daily_summary = new_value
                 break
 
-        # Re-generate the keyboard with the updated status
-        updated_user_characters = get_characters_for_user(user_id)
-        keyboard = []
-        for char in updated_user_characters:
-            status_text = "✅ On" if char.notifications_enabled else "❌ Off"
-            new_status_int = 0 if char.notifications_enabled else 1
-            button = InlineKeyboardButton(
-                f"{char.name}: {status_text}",
-                callback_data=f"notify:{char.id}:{new_status_int}"
-            )
-            keyboard.append([button])
+        # Re-trigger the menu to show the updated state
+        query.data = f"notify_menu:{character_id}"
+        await button_callback_handler(update, context)
+        return
+
+    # --- Back Button to Notifications Character List ---
+    if action == "notify_back":
+        await notifications_command(query, context)
+        return
+
+    # --- Notification Settings Menu ---
+    if action == "notify_menu":
+        character_id = int(parts[1])
+        # Re-fetch character to ensure we have the latest settings
+        character = get_character_by_id(character_id)
+        if not character or character.telegram_user_id != user_id:
+            await query.edit_message_text(text="Error: Could not find this character.")
+            return
+
+        keyboard = [
+            [InlineKeyboardButton(
+                f"Sales: {'✅ On' if character.enable_sales_notifications else '❌ Off'}",
+                callback_data=f"toggle_notify:sales:{character.id}"
+            )],
+            [InlineKeyboardButton(
+                f"Buys: {'✅ On' if character.enable_buy_notifications else '❌ Off'}",
+                callback_data=f"toggle_notify:buys:{character.id}"
+            )],
+            [InlineKeyboardButton(
+                f"Daily Summary: {'✅ On' if character.enable_daily_summary else '❌ Off'}",
+                callback_data=f"toggle_notify:summary:{character.id}"
+            )],
+            [InlineKeyboardButton("⬅️ Back to Character List", callback_data="notify_back")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Manage notifications for your characters:", reply_markup=reply_markup)
+        await query.edit_message_text(f"Notification settings for {character.name}:", reply_markup=reply_markup)
         return
 
     # --- Back Button to Settings Character List ---
