@@ -72,24 +72,19 @@ The bot and its companion web app will now start.
 
 ---
 
-## Usage & Commands
+## Usage
 
-You can interact with the bot by sending it commands in a **private chat**.
+All interaction with the bot is handled through a simple, button-based menu in your private chat with it.
 
-### Adding a Character
-
-1.  Send the `/addcharacter` command to the bot.
-2.  The bot will reply with a unique button that links to the EVE Online login page.
-3.  Click the button, log in with the EVE character you wish to add, and authorize the application.
-4.  Once you see the "Success" page, you can close the browser window. The bot will automatically start monitoring your character and send you a confirmation message.
-
-### Available Commands
-
--   `/addcharacter` - Starts the process of adding a new character.
--   `/balance` - Fetches the wallet balance for your character(s).
--   `/summary` - Manually triggers the daily summary for your character(s).
--   `/sales` - Shows the 5 most recent sales for a selected character.
--   `/buys` - Shows the 5 most recent buys for a selected character.
+1.  **Start the Bot**: Send the `/start` command to the bot. It will welcome you and display the main menu keyboard.
+2.  **Use the Menu**: Simply press the buttons on the keyboard to perform actions.
+    -   **➕ Add Character**: Starts the process of adding a new character. The bot will provide a link to the EVE Online login page to authorize your character.
+    -   **🔔 Manage Notifications**: View and toggle notification settings for each of your characters.
+    -   **💰 View Balances**: Fetches the current wallet balance for your character(s).
+    -   **📊 Request Summary**: Manually triggers the daily summary report for your character(s).
+    -   **📈 View Sales**: Shows the 5 most recent sales for a selected character.
+    -   **🛒 View Buys**: Shows the 5 most recent buys for a selected character.
+3.  **Character Selection**: If you have multiple characters, the bot will present you with an inline menu to choose which character you want to interact with after you select an action.
 
 ---
 

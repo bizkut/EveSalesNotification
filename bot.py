@@ -7,8 +7,8 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta, time as dt_time
 from dataclasses import dataclass
 import asyncio
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
 import config
 
@@ -30,6 +30,19 @@ class Character:
 
 CHARACTERS: list[Character] = []
 
+# --- Constants for the Reply Keyboard ---
+ADD_CHARACTER_TEXT = "➕ Add Character"
+NOTIFICATIONS_TEXT = "🔔 Manage Notifications"
+BALANCE_TEXT = "💰 View Balances"
+SUMMARY_TEXT = "📊 Request Summary"
+SALES_TEXT = "📈 View Sales"
+BUYS_TEXT = "🛒 View Buys"
+
+MAIN_MENU_KEYBOARD = [
+    [ADD_CHARACTER_TEXT, NOTIFICATIONS_TEXT],
+    [BALANCE_TEXT, SUMMARY_TEXT],
+    [SALES_TEXT, BUYS_TEXT]
+]
 
 def load_characters_from_db():
     """Loads all characters from the database and populates the CHARACTERS list."""
@@ -1260,6 +1273,18 @@ def initialize_order_history():
         set_bot_state(state_key, 'true')
 
 
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Displays the main menu keyboard.
+    """
+    user_name = update.effective_user.first_name
+    reply_markup = ReplyKeyboardMarkup(MAIN_MENU_KEYBOARD, resize_keyboard=True)
+    await update.message.reply_text(
+        f"Welcome, {user_name}! Please choose an option from the menu below.",
+        reply_markup=reply_markup
+    )
+
+
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Allows a user to view and toggle notification settings for their characters.
@@ -1428,6 +1453,29 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await _show_character_selection(update, "buys")
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles regular text messages, mapping them to the correct command function
+    based on the main menu keyboard buttons.
+    """
+    text = update.message.text
+    if text == ADD_CHARACTER_TEXT:
+        await add_character_command(update, context)
+    elif text == NOTIFICATIONS_TEXT:
+        await notifications_command(update, context)
+    elif text == BALANCE_TEXT:
+        await balance_command(update, context)
+    elif text == SUMMARY_TEXT:
+        await summary_command(update, context)
+    elif text == SALES_TEXT:
+        await sales_command(update, context)
+    elif text == BUYS_TEXT:
+        await buys_command(update, context)
+    else:
+        # If the text doesn't match any button, you can either ignore it or send a default reply
+        await update.message.reply_text("Please use one of the menu buttons.")
+
+
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles button clicks for character selection."""
     query = update.callback_query
@@ -1549,12 +1597,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 async def post_init(application: Application):
     """Sets the bot's commands in the Telegram menu after initialization."""
     commands = [
-        BotCommand("addcharacter", "Add a new EVE character."),
-        BotCommand("notifications", "Manage character notification settings."),
-        BotCommand("balance", "Check wallet balances for your characters."),
-        BotCommand("summary", "Manually trigger the daily summary report."),
-        BotCommand("sales", "View recent sales for a character."),
-        BotCommand("buys", "View recent buys for a character."),
+        BotCommand("start", "Show the main menu"),
     ]
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands have been set in the Telegram menu.")
@@ -1570,12 +1613,8 @@ def main() -> None:
     application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # --- Add command handlers ---
-    application.add_handler(CommandHandler("addcharacter", add_character_command))
-    application.add_handler(CommandHandler("notifications", notifications_command))
-    application.add_handler(CommandHandler("balance", balance_command))
-    application.add_handler(CommandHandler("summary", summary_command))
-    application.add_handler(CommandHandler("sales", sales_command))
-    application.add_handler(CommandHandler("buys", buys_command))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
 
     # --- Schedule Jobs ---
