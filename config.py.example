@@ -4,12 +4,17 @@
 # Register an application at https://developers.eveonline.com/applications
 ESI_CLIENT_ID = "your_client_id_here"
 ESI_SECRET_KEY = "your_secret_key_here"
+# The full URL for the OAuth callback. This MUST match the one in your EVE App.
+# This should point to your server's public address.
+# Example: "http://your_domain_or_ip:5000/callback"
+CALLBACK_URL = "http://localhost:5000/callback"
 
 # 2. Telegram Bot Credentials
 # Get this from the BotFather on Telegram
 TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"
-# This is the ID of the channel the bot should post to (e.g., -1001234567890)
-TELEGRAM_CHANNEL_ID = "your_telegram_channel_id_here"
+# The public base URL for the webapp component. This is used to generate the login link.
+# Example: "http://your_domain_or_ip:5000"
+WEBAPP_URL = "http://localhost:5000"
 
 # 3. Bot Configuration
 # The desired logging level. Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR'.
@@ -20,24 +25,13 @@ DAILY_SUMMARY_TIME = "22:00"
 REGION_ID = 10000002
 # The wallet balance below which you want to receive a low-balance alert. Set to 0 to disable.
 WALLET_BALANCE_THRESHOLD = 0
-# Set to "true" or "false" to enable or disable notification types.
+# Set to "true" or "false" to enable or disable notification types globally.
+# Note: Users can manage notifications for their characters individually via bot commands.
 ENABLE_SALES_NOTIFICATIONS = "true"
 ENABLE_BUY_NOTIFICATIONS = "true"
 ENABLE_DAILY_SUMMARY = "true"
 # The threshold for batching multiple transaction notifications into a single summary message.
 NOTIFICATION_BATCH_THRESHOLD = 3
 
-# 4. ESI Refresh Tokens for EVE Online Characters
-# Run the get_refresh_token.py script for each character you want to monitor.
-# Add each refresh token below, numbered sequentially (e.g., ESI_REFRESH_TOKEN_1, ESI_REFRESH_TOKEN_2).
-#
-# Example for one character:
-# ESI_REFRESH_TOKEN_1 = "your_first_character_refresh_token"
-#
-# Example for multiple characters:
-# ESI_REFRESH_TOKEN_1 = "your_first_character_refresh_token"
-# ESI_REFRESH_TOKEN_2 = "another_character_refresh_token"
-# ESI_REFRESH_TOKEN_3 = "a_third_character_refresh_token"
-
-# Add your refresh tokens here, starting with ESI_REFRESH_TOKEN_1.
-# Leave this section blank if you haven't generated any tokens yet.
+# Character refresh tokens are now stored in the database and managed via the bot.
+# You no longer need to add them here.
