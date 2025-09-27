@@ -36,32 +36,46 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 
 Follow these steps to deploy your own instance of the bot.
 
-### Step 1: Create an EVE Online Application
+### Step 1: Get a Public URL
+
+The bot's web component needs to be accessible from the internet for the EVE Online authentication to work. The easiest way to achieve this is by using the included Cloudflare Tunnel service.
+
+1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel.
+2.  In your tunnel's dashboard, configure a **Public Hostname** (e.g., `eve-bot.yourdomain.com`).
+3.  Set the service type to **HTTP** and the URL to `webapp:5000`.
+4.  Note down your public hostname and the **tunnel token**. You will need these for the next steps.
+
+Alternatively, you can use your own reverse proxy (like Nginx) to expose the `webapp` service on port 5000.
+
+### Step 2: Create an EVE Online Application
 
 1.  Go to the [EVE Online Developers Portal](https://developers.eveonline.com/applications) and log in.
 2.  Create a new application.
-3.  Fill in the application details.
-4.  For the **Callback URL**, you must enter the public-facing URL of your server where the bot will be hosted, followed by `/callback`. For example: `http://eve.gametrader.my:5000/callback`.
-5.  Once the application is created, view its details. Under the "Scopes" section, add the following required scopes:
+3.  For the **Callback URL**, enter your public-facing URL from Step 1, followed by `/callback`. For example: `https://eve-bot.yourdomain.com/callback`.
+4.  Under the "Scopes" section, add the following required scopes:
     -   `esi-wallet.read_character_wallet.v1`
     -   `esi-markets.read_character_orders.v1`
     -   `esi-universe.read_structures.v1`
     -   `esi-markets.structure_markets.v1`
-6.  Keep the **Client ID** and **Secret Key** handy for the next step.
+5.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
-### Step 2: Configure the Bot
+### Step 3: Configure the Environment
 
-1.  In the project directory, copy the example configuration file:
+All configuration is handled through a `.env` file.
+
+1.  Create your environment file by copying the example:
     ```bash
-    cp config.py.example config.py
+    cp .env.example .env
     ```
-2.  Open `config.py` with a text editor and fill in the following details:
-    -   `ESI_CLIENT_ID` & `ESI_SECRET_KEY`: From your EVE application.
-    -   `CALLBACK_URL`: The **exact same** callback URL you entered in the EVE application portal.
-    -   `TELEGRAM_BOT_TOKEN`: From your Telegram bot setup (via BotFather).
-    -   `WEBAPP_URL`: The public base URL for the webapp. This should be the address of your server. (e.g., `http://eve.gametrader.my:5000`).
+2.  Open `.env` with a text editor and fill in the required values:
+    -   `ESI_CLIENT_ID` & `ESI_SECRET_KEY`: From your EVE application in Step 2.
+    -   `CALLBACK_URL`: The **exact same** callback URL you used in Step 2.
+    -   `TELEGRAM_BOT_TOKEN`: The token for your bot from BotFather on Telegram.
+    -   `WEBAPP_URL`: The public base URL for the webapp component (e.g., `https://eve-bot.yourdomain.com`).
+    -   `POSTGRES_PASSWORD`: Choose a secure password for the database.
+    -   `TUNNEL_TOKEN`: Your Cloudflare tunnel token from Step 1 (if you are using the tunnel).
 
-### Step 3: Run the Bot
+### Step 4: Run the Bot
 
 With the configuration complete, you can now build and run the bot using Docker Compose.
 
