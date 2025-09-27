@@ -22,9 +22,12 @@ services:
     container_name: eve-market-bot
     restart: unless-stopped
     command: ["python", "bot.py"]
-    volumes:
-      - ./config.py:/app/config.py:ro
     environment:
+      - ESI_CLIENT_ID=${ESI_CLIENT_ID}
+      - ESI_SECRET_KEY=${ESI_SECRET_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WEBAPP_URL=${WEBAPP_URL}
+      - LOG_LEVEL=${LOG_LEVEL}
       - POSTGRES_HOST=${POSTGRES_HOST}
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_DB=${POSTGRES_DB}
@@ -39,9 +42,11 @@ services:
     container_name: eve-market-webapp
     restart: unless-stopped
     command: ["gunicorn", "--bind", "0.0.0.0:5000", "webapp:app"]
-    volumes:
-      - ./config.py:/app/config.py:ro
     environment:
+      - ESI_CLIENT_ID=${ESI_CLIENT_ID}
+      - ESI_SECRET_KEY=${ESI_SECRET_KEY}
+      - CALLBACK_URL=${CALLBACK_URL}
+      - LOG_LEVEL=${LOG_LEVEL}
       - POSTGRES_HOST=${POSTGRES_HOST}
       - POSTGRES_PORT=${POSTGRES_PORT}
       - POSTGRES_DB=${POSTGRES_DB}

@@ -3,10 +3,9 @@ import database
 import logging
 import requests
 from flask import Flask, request, redirect, render_template_string
-import config
 
 # Configure logging
-log_level_str = getattr(config, 'LOG_LEVEL', 'WARNING').upper()
+log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
 log_level = getattr(logging, log_level_str, logging.WARNING)
 logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -53,8 +52,8 @@ def get_token_from_code(auth_code):
     data = {
         "grant_type": "authorization_code",
         "code": auth_code,
-        "client_id": config.ESI_CLIENT_ID,
-        "client_secret": config.ESI_SECRET_KEY
+        "client_id": os.getenv("ESI_CLIENT_ID"),
+        "client_secret": os.getenv("ESI_SECRET_KEY")
     }
     try:
         response = requests.post(url, headers=headers, data=data)
@@ -136,12 +135,12 @@ def login():
     # Note: The `CALLBACK_URL` must be configured in your EVE Dev Application
     # to point to where this webapp is hosted, e.g., http://yourdomain.com/callback
     # We read it from the config file to ensure consistency.
-    callback_url = getattr(config, 'CALLBACK_URL', 'http://localhost:5000/callback')
+    callback_url = os.getenv('CALLBACK_URL', 'http://localhost:5000/callback')
 
     params = {
         "response_type": "code",
         "redirect_uri": callback_url,
-        "client_id": config.ESI_CLIENT_ID,
+        "client_id": os.getenv("ESI_CLIENT_ID"),
         "scope": scope_string,
         "state": telegram_user_id # Pass the user's telegram ID through the state param
     }

@@ -11,10 +11,8 @@ import asyncio
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
-import config
-
 # Configure logging
-log_level_str = getattr(config, 'LOG_LEVEL', 'WARNING').upper()
+log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
 log_level = getattr(logging, log_level_str, logging.WARNING)
 logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -759,8 +757,8 @@ def get_access_token(refresh_token):
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "client_id": config.ESI_CLIENT_ID,
-        "client_secret": config.ESI_SECRET_KEY
+        "client_id": os.getenv("ESI_CLIENT_ID"),
+        "client_secret": os.getenv("ESI_SECRET_KEY")
     }
     try:
         response = requests.post(url, headers=headers, data=data)
@@ -1547,7 +1545,7 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
     # The base URL of the webapp, where the /login route is.
     # This should match the address exposed in docker-compose.yml.
     # In a real deployment, this would be the public-facing URL.
-    webapp_base_url = getattr(config, 'WEBAPP_URL', 'http://localhost:5000')
+    webapp_base_url = os.getenv('WEBAPP_URL', 'http://localhost:5000')
     login_url = f"{webapp_base_url}/login?user={user_id}"
 
     keyboard = [[InlineKeyboardButton("Authorize with EVE Online", url=login_url)]]
@@ -1991,7 +1989,7 @@ def main() -> None:
     setup_database()
     load_characters_from_db()
 
-    application = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    application = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).post_init(post_init).build()
 
     # --- Add command handlers ---
     application.add_handler(CommandHandler("start", start_command))
