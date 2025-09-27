@@ -13,20 +13,20 @@ This is a comprehensive Telegram bot designed to provide EVE Online players with
   - **Trade Location**: All notifications include the name of the station or Citadel where the trade occurred.
   - **Wallet Balance**: All notifications display your current wallet balance for at-a-glance financial awareness.
 - **Low Wallet Balance Alert**: Sends a one-time warning if your wallet drops below a configurable threshold, helping you avoid running out of ISK for new orders.
-- **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed financial report, including:
+- **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed financial report. The calculations are stateless, meaning the report is always accurate for the requested period, regardless of how many times it's run. It includes:
   - **24-Hour Stats**: Total sales value, total fees (broker's + tax), and a precise FIFO-based profit.
   - **Monthly Stats**: A summary for the current calendar month, including total sales value, total fees, and gross revenue.
 - **Multi-Character Support**: Monitor and receive notifications for multiple EVE characters from a single instance of the bot.
-- **Accurate Fee & Profit Reporting**:
-  - The daily summary uses your wallet journal to provide **100% accurate** fee totals.
+- **Accurate & Consistent Reporting**:
+  - The summary calculations use the most reliable data sources (wallet transactions for sales, wallet journal for fees) to provide consistent and accurate reports.
   - Profit is calculated using the First-In, First-Out (FIFO) method, giving you a true reflection of performance.
 - **Highly Configurable**:
   - The daily summary time, trade region, and wallet balance threshold can be easily set in the configuration file.
   - Sales notifications, buy notifications, and the daily summary can all be independently enabled or disabled.
 - **Robust & Persistent**:
-  - Uses a SQLite database to track market order states, processed journal entries, and alert states, preventing duplicate notifications.
-  - Intelligently seeds its history on the first run to ignore all past transactions and only report on new activity.
-  - On the first run for a character, the bot automatically backfills its database with your entire transaction history to ensure profit calculations are accurate from day one.
+  - **Multi-Layer Caching**: Uses a combination of an in-memory cache for speed and a persistent SQLite database to store item names, market data, and processed transaction IDs, minimizing API calls and preventing duplicate notifications.
+  - **Intelligent Seeding**: On the first run, the bot intelligently seeds its history to ignore all past transactions and only report on new activity.
+  - **Historical Backfill**: For new characters, the bot automatically backfills its database with the entire transaction history to ensure profit calculations are accurate from day one.
 
 ---
 
