@@ -366,9 +366,10 @@ def save_names_to_db(id_to_name_map):
 
 ESI_CACHE = {}
 
-def make_esi_request(url, character=None, params=None, data=None, return_headers=False):
+def make_esi_request(url, character=None, params=None, data=None, return_headers=False, force_revalidate=False):
     """
     Makes a request to the ESI API, handling caching via ETag and Expires headers.
+    If force_revalidate is True, it will ignore the time-based cache and use an ETag.
     Returns the JSON response and optionally the response headers.
     """
     # Create a cache key that includes request parameters and the POST body (if any)
@@ -391,11 +392,11 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
         headers["Authorization"] = f"Bearer {access_token}"
 
     # Check if we have a cached response and if it's still valid
-    if cached_response and cached_response.get('expires', datetime.min.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc):
+    if not force_revalidate and cached_response and cached_response.get('expires', datetime.min.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc):
         logging.debug(f"Returning cached data for {url}")
         return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
 
-    # If we have an ETag, use it
+    # If we have an ETag, use it. This is the core of revalidation.
     if cached_response and 'etag' in cached_response:
         headers['If-None-Match'] = cached_response['etag']
 
@@ -529,22 +530,22 @@ def get_character_details_from_token(access_token):
         logging.error(f"Error getting character details: {e}")
         return None, None
 
-def get_wallet_transactions(character, return_headers=False):
+def get_wallet_transactions(character, return_headers=False, force_revalidate=False):
     if not character: return None
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/transactions/"
-    return make_esi_request(url, character=character, return_headers=return_headers)
+    return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
 
-def get_market_orders(character, return_headers=False):
+def get_market_orders(character, return_headers=False, force_revalidate=False):
     if not character: return None
     url = f"https://esi.evetech.net/v2/characters/{character.id}/orders/"
-    return make_esi_request(url, character=character, return_headers=return_headers)
+    return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
 
 def get_wallet_balance(character, return_headers=False):
     if not character: return None
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
     return make_esi_request(url, character=character, return_headers=return_headers)
 
-def get_market_orders_history(character, return_headers=False):
+def get_market_orders_history(character, return_headers=False, force_revalidate=False):
     """
     Fetches all pages of historical market orders from ESI.
     """
@@ -558,7 +559,10 @@ def get_market_orders_history(character, return_headers=False):
 
     while True:
         params = {"datasource": "tranquility", "page": page}
-        data, headers = make_esi_request(url, character=character, params=params, return_headers=True)
+        # Only force revalidation on the first page, as subsequent pages are unlikely to change
+        # if the first one hasn't. This is a small optimization.
+        revalidate_this_page = force_revalidate and page == 1
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
 
         if page == 1:
             first_page_headers = headers
@@ -579,10 +583,40 @@ def get_market_orders_history(character, return_headers=False):
         return all_orders, first_page_headers
     return all_orders
 
-def get_market_history(type_id, region_id):
+
+def get_region_market_orders(region_id, type_id, force_revalidate=False):
+    """
+    Fetches all pages of market orders for a specific type in a region from ESI.
+    """
+    all_orders = []
+    page = 1
+    url = f"https://esi.evetech.net/v1/markets/{region_id}/orders/"
+
+    while True:
+        params = {"datasource": "tranquility", "page": page, "type_id": type_id}
+        # Only force revalidation on the first page.
+        revalidate_this_page = force_revalidate and page == 1
+        data, headers = make_esi_request(url, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+
+        if not data:
+            break
+
+        all_orders.extend(data)
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1) # Be nice to ESI
+
+    return all_orders
+
+
+def get_market_history(type_id, region_id, force_revalidate=False):
     url = f"https://esi.evetech.net/v1/markets/{region_id}/history/"
     params = {"type_id": type_id, "datasource": "tranquility"}
-    history_data = make_esi_request(url, params=params)
+    history_data = make_esi_request(url, params=params, force_revalidate=force_revalidate)
     return history_data[-1] if history_data else None
 
 def get_names_from_ids(id_list):
@@ -758,7 +792,7 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
     character = context.job.data
     logging.debug(f"Running wallet transaction check for {character.name}")
 
-    all_transactions, headers = get_wallet_transactions(character, return_headers=True)
+    all_transactions, headers = get_wallet_transactions(character, return_headers=True, force_revalidate=True)
     if all_transactions is None:
         logging.error(f"Failed to fetch wallet transactions for {character.name}. Retrying in 60s.")
         context.job_queue.run_once(check_wallet_transactions_job, 60, data=character)
@@ -832,12 +866,33 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
                     avg_price = total_value / total_quantity
                     cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
                     profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
-                    history = get_market_history(type_id, config.REGION_ID)
-                    price_diff_str = f"({(avg_price / history['average'] - 1):+.2%})" if history and history['average'] > 0 else ""
+
+                    # Fetch live market data for better price comparison
+                    region_orders = get_region_market_orders(config.REGION_ID, type_id, force_revalidate=True)
+                    best_buy_order_price = 0
+                    if region_orders:
+                        buy_orders = [o['price'] for o in region_orders if o.get('is_buy_order')]
+                        if buy_orders:
+                            best_buy_order_price = max(buy_orders)
+
+                    region_name = id_to_name.get(config.REGION_ID, 'Region')
+                    price_comparison_line = ""
+                    if best_buy_order_price > 0:
+                        price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
+                        price_comparison_line = f"**{region_name} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
+                    else:
+                        # Fallback to historical average if no live buy orders are found
+                        history = get_market_history(type_id, config.REGION_ID, force_revalidate=True)
+                        if history and history['average'] > 0:
+                            price_diff_str = f"({(avg_price / history['average'] - 1):+.2%})"
+                            price_comparison_line = f"**{region_name} Avg:** `{history['average']:,.2f} ISK` {price_diff_str}"
+                        else:
+                            price_comparison_line = f"**{region_name} Avg:** `N/A`"
+
                     message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
                                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                                f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
-                               f"**{id_to_name.get(config.REGION_ID, 'Region')} Avg:** `{history['average'] if history else 'N/A':,.2f} ISK` {price_diff_str}\n"
+                               f"{price_comparison_line}\n"
                                f"{profit_line}\n"
                                f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
                                f"**Wallet:** `{wallet_balance:,.2f} ISK`")
@@ -875,9 +930,13 @@ async def check_wallet_transactions_job(context: ContextTypes.DEFAULT_TYPE):
 
         add_processed_transactions(character.id, [tx['transaction_id'] for tx in new_transactions])
 
-    delay = get_next_run_delay(headers)
+    # A fixed 60-second delay is used for polling. ESI's ETag mechanism is leveraged
+    # via `force_revalidate=True` in the API calls. This ensures that if data hasn't
+    # changed, the bot receives a lightweight '304 Not Modified' response, respecting
+    # the API server while still allowing for near real-time notifications.
+    delay = 60
     context.job_queue.run_once(check_wallet_transactions_job, delay, data=character)
-    logging.info(f"Wallet transaction check for {character.name} complete. Next check in {delay:.2f} seconds.")
+    logging.info(f"Wallet transaction check for {character.name} complete. Next check in {delay} seconds.")
 
 
 async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
@@ -887,7 +946,7 @@ async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
     character = context.job.data
     logging.debug(f"Running order history check for {character.name}")
 
-    order_history, headers = get_market_orders_history(character, return_headers=True)
+    order_history, headers = get_market_orders_history(character, return_headers=True, force_revalidate=True)
     if order_history is None:
         logging.error(f"Failed to fetch order history for {character.name}. Retrying in 3600s.")
         context.job_queue.run_once(check_order_history_job, 3600, data=character)
@@ -922,9 +981,13 @@ async def check_order_history_job(context: ContextTypes.DEFAULT_TYPE):
 
         add_processed_orders(character.id, [o['order_id'] for o in new_orders])
 
-    delay = get_next_run_delay(headers)
+    # A fixed 60-second delay is used for polling. ESI's ETag mechanism is leveraged
+    # via `force_revalidate=True` in the API calls. This ensures that if data hasn't
+    # changed, the bot receives a lightweight '304 Not Modified' response, respecting
+    # the API server while still allowing for near real-time notifications.
+    delay = 60
     context.job_queue.run_once(check_order_history_job, delay, data=character)
-    logging.info(f"Order history check for {character.name} complete. Next check in {delay:.2f} seconds.")
+    logging.info(f"Order history check for {character.name} complete. Next check in {delay} seconds.")
 
 
 def calculate_fifo_profit_for_summary(sales_transactions, character_id):
