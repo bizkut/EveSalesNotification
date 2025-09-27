@@ -6,7 +6,9 @@ from flask import Flask, request, redirect, render_template_string
 import config
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log_level_str = getattr(config, 'LOG_LEVEL', 'WARNING').upper()
+log_level = getattr(logging, log_level_str, logging.WARNING)
+logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Database Functions ---
 # These are simplified versions of the functions in bot.py, adapted for the webapp's needs.
