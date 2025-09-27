@@ -112,6 +112,7 @@ All interaction with the bot is handled through a simple, button-based menu in y
     -   **📊 Request Summary**: Manually triggers the daily summary report for your character(s).
     -   **📈 View Sales**: Shows the 5 most recent sales for a selected character.
     -   **🛒 View Buys**: Shows the 5 most recent buys for a selected character.
+    -   **🗑️ Remove Character**: Starts the process of removing a character and all of their associated data.
 3.  **Character Selection**: If you have multiple characters, the bot will present you with an inline menu to choose which character you want to interact with after you select an action.
 
 ---
