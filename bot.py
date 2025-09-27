@@ -450,6 +450,43 @@ def set_character_notification_status(character_id, new_status: bool):
     logging.info(f"Set notification status for character {character_id} to {new_status}.")
 
 
+def get_character_by_id(character_id: int) -> Character | None:
+    """Retrieves a single character and their settings by character ID."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT
+            character_id, character_name, refresh_token, telegram_user_id,
+            notifications_enabled, region_id, daily_summary_time, wallet_balance_threshold,
+            enable_sales_notifications, enable_buy_notifications, enable_daily_summary,
+            notification_batch_threshold
+        FROM characters WHERE character_id = ?
+    """, (character_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    (
+        char_id, name, refresh_token, telegram_user_id, notifications_enabled,
+        region_id, daily_summary_time, wallet_balance_threshold,
+        enable_sales, enable_buys, enable_summary, batch_threshold
+    ) = row
+
+    return Character(
+        id=char_id, name=name, refresh_token=refresh_token,
+        telegram_user_id=telegram_user_id,
+        notifications_enabled=bool(notifications_enabled),
+        region_id=region_id, daily_summary_time=daily_summary_time,
+        wallet_balance_threshold=wallet_balance_threshold,
+        enable_sales_notifications=bool(enable_sales),
+        enable_buy_notifications=bool(enable_buys),
+        enable_daily_summary=bool(enable_summary),
+        notification_batch_threshold=batch_threshold
+    )
+
+
 def update_character_setting(character_id: int, setting: str, value: any):
     """Updates a specific setting for a character in the database."""
     # Whitelist settings to prevent SQL injection
@@ -1329,18 +1366,18 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
 
     if new_char_ids:
         logging.info(f"Detected {len(new_char_ids)} new characters in the database.")
-        # Reload all characters to get the new ones with their settings
-        load_characters_from_db()
-
-        newly_added_characters = [c for c in CHARACTERS if c.id in new_char_ids]
-
-        for character in newly_added_characters:
-            start_monitoring_for_character(character, context.application)
-            await send_telegram_message(
-                context,
-                f"✅ Successfully added character **{character.name}**! I will now start monitoring their market activity.",
-                chat_id=character.telegram_user_id
-            )
+        for char_id in new_char_ids:
+            character = get_character_by_id(char_id)
+            if character:
+                CHARACTERS.append(character)
+                start_monitoring_for_character(character, context.application)
+                await send_telegram_message(
+                    context,
+                    f"✅ Successfully added character **{character.name}**! I will now start monitoring their market activity.",
+                    chat_id=character.telegram_user_id
+                )
+            else:
+                logging.error(f"Could not find details for newly detected character ID {char_id} in the database.")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1618,7 +1655,40 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     # --- Notification Toggle Logic ---
     if action == "notify":
-        # ... (existing notification logic remains here) ...
+        try:
+            character_id = int(parts[1])
+            new_status = bool(int(parts[2]))
+        except (ValueError, IndexError):
+            await query.edit_message_text(text="Invalid notification callback.")
+            return
+
+        # Security check: ensure the user owns this character
+        user_characters = get_characters_for_user(user_id)
+        if not any(c.id == character_id for c in user_characters):
+            await query.edit_message_text(text="Error: You do not own this character.")
+            return
+
+        set_character_notification_status(character_id, new_status)
+
+        # Update the character in the global list to reflect the change immediately
+        for char in CHARACTERS:
+            if char.id == character_id:
+                char.notifications_enabled = new_status
+                break
+
+        # Re-generate the keyboard with the updated status
+        updated_user_characters = get_characters_for_user(user_id)
+        keyboard = []
+        for char in updated_user_characters:
+            status_text = "✅ On" if char.notifications_enabled else "❌ Off"
+            new_status_int = 0 if char.notifications_enabled else 1
+            button = InlineKeyboardButton(
+                f"{char.name}: {status_text}",
+                callback_data=f"notify:{char.id}:{new_status_int}"
+            )
+            keyboard.append([button])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Manage notifications for your characters:", reply_markup=reply_markup)
         return
 
     # --- Back Button to Settings Character List ---
