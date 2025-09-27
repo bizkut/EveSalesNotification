@@ -1385,11 +1385,14 @@ async def master_daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def initialize_journal_history_for_character(character: Character):
     """On first add, seeds the journal history to prevent old entries from appearing in the 24h summary."""
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM processed_journal_entries WHERE character_id = ? LIMIT 1", (character.id,))
-    is_seeded = cursor.fetchone()
-    conn.close()
+    conn = database.get_db_connection()
+    is_seeded = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM processed_journal_entries WHERE character_id = %s LIMIT 1", (character.id,))
+            is_seeded = cursor.fetchone()
+    finally:
+        database.release_db_connection(conn)
 
     if is_seeded:
         logging.info(f"Character {character.name} already has seeded journal history. Skipping.")
@@ -1463,11 +1466,14 @@ def seed_data_for_character(character: Character):
 async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
     """Periodically checks the database for new characters and starts monitoring them."""
     logging.debug("Running job to check for new characters.")
-    conn = db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT character_id FROM characters")
-    db_char_ids = {row[0] for row in cursor.fetchall()}
-    conn.close()
+    conn = database.get_db_connection()
+    db_char_ids = set()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT character_id FROM characters")
+            db_char_ids = {row[0] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
 
     monitored_char_ids = {c.id for c in CHARACTERS}
     new_char_ids = db_char_ids - monitored_char_ids
@@ -1937,7 +1943,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             await query.edit_message_text(text=f"Error fetching balance for {character.name}.")
     elif action == "summary":
-        await run_daily_summary_for_character(character, context, chat_id=chat_id)
+        await run_daily_summary_for_character(character, context)
     elif action in ["sales", "buys"]:
         all_transactions = get_wallet_transactions(character)
         if not all_transactions:
