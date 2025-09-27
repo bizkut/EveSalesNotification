@@ -361,6 +361,37 @@ def save_names_to_db(id_to_name_map):
     logging.debug(f"Saved {len(data_to_insert)} new names to local DB cache.")
 
 
+def get_characters_for_user(telegram_user_id):
+    """Retrieves all characters associated with a given Telegram user ID."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT character_id, character_name, refresh_token, telegram_user_id, notifications_enabled FROM characters WHERE telegram_user_id = ?", (telegram_user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    user_characters = []
+    for row in rows:
+        char_id, char_name, refresh_token, telegram_user_id, notifications_enabled_int = row
+        user_characters.append(Character(
+            id=char_id,
+            name=char_name,
+            refresh_token=refresh_token,
+            telegram_user_id=telegram_user_id,
+            notifications_enabled=bool(notifications_enabled_int)
+        ))
+    return user_characters
+
+
+def set_character_notification_status(character_id, new_status: bool):
+    """Updates the notification status for a specific character."""
+    conn = db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE characters SET notifications_enabled = ? WHERE character_id = ?", (int(new_status), character_id))
+    conn.commit()
+    conn.close()
+    logging.info(f"Set notification status for character {character_id} to {new_status}.")
+
+
 # --- ESI API Functions ---
 
 ESI_CACHE = {}
@@ -1229,6 +1260,35 @@ def initialize_order_history():
         set_bot_state(state_key, 'true')
 
 
+async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Allows a user to view and toggle notification settings for their characters.
+    """
+    user_id = update.effective_user.id
+    logging.info(f"Received /notifications command from user {user_id}")
+
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
+        return
+
+    keyboard = []
+    for char in user_characters:
+        status_text = "✅ On" if char.notifications_enabled else "❌ Off"
+        # The callback data will be 'notify:character_id:new_status_as_int'
+        # So if it's currently on (True), the button will offer to turn it off (0)
+        new_status_int = 0 if char.notifications_enabled else 1
+        button = InlineKeyboardButton(
+            f"{char.name}: {status_text}",
+            callback_data=f"notify:{char.id}:{new_status_int}"
+        )
+        keyboard.append([button])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Manage notifications for your characters:", reply_markup=reply_markup)
+
+
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Provides a link for the user to add a new EVE Online character.
@@ -1374,13 +1434,53 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     try:
-        action, character_id_str = query.data.split(':')
+        parts = query.data.split(':')
+        action = parts[0]
     except (ValueError, IndexError):
         await query.edit_message_text(text="Invalid callback data.")
         return
 
+    user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
+    if action == "notify":
+        try:
+            character_id = int(parts[1])
+            new_status = bool(int(parts[2]))
+        except (ValueError, IndexError):
+            await query.edit_message_text(text="Invalid notification callback.")
+            return
+
+        # Security check: ensure the user owns this character
+        user_characters = get_characters_for_user(user_id)
+        if not any(c.id == character_id for c in user_characters):
+            await query.edit_message_text(text="Error: You do not own this character.")
+            return
+
+        set_character_notification_status(character_id, new_status)
+
+        # Update the character in the global list to reflect the change immediately
+        for char in CHARACTERS:
+            if char.id == character_id:
+                char.notifications_enabled = new_status
+                break
+
+        # Re-generate the keyboard with the updated status
+        updated_user_characters = get_characters_for_user(user_id)
+        keyboard = []
+        for char in updated_user_characters:
+            status_text = "✅ On" if char.notifications_enabled else "❌ Off"
+            new_status_int = 0 if char.notifications_enabled else 1
+            button = InlineKeyboardButton(
+                f"{char.name}: {status_text}",
+                callback_data=f"notify:{char.id}:{new_status_int}"
+            )
+            keyboard.append([button])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Manage notifications for your characters:", reply_markup=reply_markup)
+        return
+
+    character_id_str = parts[1]
     if character_id_str == "all":
         if action == "balance":
             await query.edit_message_text(text="Fetching balances for all characters...")
@@ -1450,6 +1550,7 @@ async def post_init(application: Application):
     """Sets the bot's commands in the Telegram menu after initialization."""
     commands = [
         BotCommand("addcharacter", "Add a new EVE character."),
+        BotCommand("notifications", "Manage character notification settings."),
         BotCommand("balance", "Check wallet balances for your characters."),
         BotCommand("summary", "Manually trigger the daily summary report."),
         BotCommand("sales", "View recent sales for a character."),
@@ -1470,6 +1571,7 @@ def main() -> None:
 
     # --- Add command handlers ---
     application.add_handler(CommandHandler("addcharacter", add_character_command))
+    application.add_handler(CommandHandler("notifications", notifications_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("summary", summary_command))
     application.add_handler(CommandHandler("sales", sales_command))
