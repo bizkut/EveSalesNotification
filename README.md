@@ -72,14 +72,17 @@ docker-compose up --build -d
 
 The bot and its companion web app will now start.
 
-> **Note on Reverse Proxies (Cloudflare, Nginx, etc.)**
->
-> If you are using a reverse proxy or a tunnel service like Cloudflare to handle HTTPS and expose the bot on the standard port 443, your configuration will be slightly different.
->
-> -   **In your EVE App and `config.py`**: Your `CALLBACK_URL` and `WEBAPP_URL` should use `https` and should **not** include the port number.
->     -   `CALLBACK_URL = "https://eve.gametrader.my/callback"`
->     -   `WEBAPP_URL = "https://eve.gametrader.my"`
-> -   **Your Proxy Configuration**: You will need to configure your proxy to forward traffic for your domain (e.g., `eve.gametrader.my`) to the internal address of the webapp container, which is `http://localhost:5000`.
+### Step 3: (Optional) Configure Cloudflare Tunnel
+
+This bot includes an integrated [Cloudflare Tunnel](https://www.cloudflare.com/products/tunnel/) service to easily and securely expose the web app to the internet without opening ports on your server.
+
+1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel.
+2.  In your tunnel's configuration, set the **Public Hostname** (e.g., `eve.gametrader.my`) to point to the `webapp` service at `http://webapp:5000`.
+3.  Once the tunnel is created, copy the token for it.
+4.  Open your `config.py` file and paste the token into the `CLOUDFLARE_TOKEN` variable.
+5.  Ensure your `CALLBACK_URL` and `WEBAPP_URL` in `config.py` use your public `https` hostname (e.g., `https://eve.gametrader.my`).
+
+If you choose not to use the tunnel, you will need to configure your own reverse proxy (like Nginx) and can safely ignore the `CLOUDFLARE_TOKEN` setting.
 
 ---
 

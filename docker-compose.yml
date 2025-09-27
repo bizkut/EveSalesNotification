@@ -20,8 +20,27 @@ services:
     volumes:
       - ./config.py:/app/config.py:ro
       - processed_data:/app/data
-    ports:
-      - "5000:5000"
+    # Port is no longer exposed to the host; cloudflared handles access.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: eve-market-cloudflared
+    restart: unless-stopped
+    depends_on:
+      - webapp
+    command: >
+      sh -c '
+        TOKEN=$$(grep -oP "CLOUDFLARE_TOKEN = \\"\K[^\"]+" /etc/config.py || echo "");
+        if [ -z "$$TOKEN" ] || [ "$$TOKEN" = "your_cloudflare_token_here" ]; then
+          echo "CLOUDFLARE_TOKEN not found or is default. Tunnel not starting.";
+          sleep infinity;
+        else
+          echo "Starting Cloudflare tunnel...";
+          cloudflared tunnel --no-autoupdate run --token $$TOKEN;
+        fi
+      '
+    volumes:
+      - ./config.py:/etc/config.py:ro
 
 volumes:
   processed_data:
