@@ -48,7 +48,7 @@ SALES_TEXT = "📈 View Sales"
 BUYS_TEXT = "🛒 View Buys"
 
 MAIN_MENU_KEYBOARD = [
-    [NOTIFICATIONS_TEXT, SETTINGS_TEXT],
+    [ADD_CHARACTER_TEXT, NOTIFICATIONS_TEXT, SETTINGS_TEXT],
     [BALANCE_TEXT, SUMMARY_TEXT],
     [SALES_TEXT, BUYS_TEXT]
 ]
@@ -1694,12 +1694,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await add_character_command(update, context)
         else:
             # If they don't have characters, they shouldn't see other buttons,
-            # but we handle it just in case.
+            # but we handle it just in case by re-showing the correct menu.
             await start_command(update, context)
         return
 
     # User has characters, so handle all menu buttons
-    if text == NOTIFICATIONS_TEXT:
+    if text == ADD_CHARACTER_TEXT:
+        await add_character_command(update, context)
+    elif text == NOTIFICATIONS_TEXT:
         await notifications_command(update, context)
     elif text == SETTINGS_TEXT:
         await settings_command(update, context)
@@ -1917,7 +1919,6 @@ async def post_init(application: Application):
     """Sets the bot's commands in the Telegram menu after initialization."""
     commands = [
         BotCommand("start", "Show the main menu"),
-        BotCommand("addcharacter", "Add a new character"),
     ]
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands have been set in the Telegram menu.")
@@ -1934,7 +1935,6 @@ def main() -> None:
 
     # --- Add command handlers ---
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("addcharacter", add_character_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
 
