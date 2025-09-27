@@ -14,8 +14,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 import config
 
 # Configure logging
-log_level_str = getattr(config, 'LOG_LEVEL', 'INFO').upper()
-log_level = getattr(logging, log_level_str, logging.INFO)
+log_level_str = getattr(config, 'LOG_LEVEL', 'WARNING').upper()
+log_level = getattr(logging, log_level_str, logging.WARNING)
 logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Character Dataclass and Global List ---
