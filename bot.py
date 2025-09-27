@@ -1285,7 +1285,12 @@ async def master_order_history_poll(application: Application):
                         item_ids = [o['type_id'] for o in cancelled_orders]
                         id_to_name = get_names_from_ids(item_ids)
                         for order in cancelled_orders:
-                            message = (f"ℹ️ *Order Cancelled ({character.name})* ℹ️\n"
+                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                            if (order_type == "Buy" and not character.enable_buy_notifications) or \
+                               (order_type == "Sell" and not character.enable_sales_notifications):
+                                continue
+
+                            message = (f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\n"
                                        f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled.")
                             await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                             await asyncio.sleep(1)
@@ -1294,7 +1299,12 @@ async def master_order_history_poll(application: Application):
                         item_ids = [o['type_id'] for o in expired_orders]
                         id_to_name = get_names_from_ids(item_ids)
                         for order in expired_orders:
-                            message = (f"ℹ️ *Order Expired ({character.name})* ℹ️\n"
+                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                            if (order_type == "Buy" and not character.enable_buy_notifications) or \
+                               (order_type == "Sell" and not character.enable_sales_notifications):
+                                continue
+
+                            message = (f"ℹ️ *{order_type} Order Expired ({character.name})* ℹ️\n"
                                        f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired.")
                             await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                             await asyncio.sleep(1)
