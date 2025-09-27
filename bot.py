@@ -169,10 +169,22 @@ def setup_database():
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS esi_names (
-                    item_id INTEGER PRIMARY KEY,
+                    item_id BIGINT PRIMARY KEY,
                     name TEXT NOT NULL
                 )
             """)
+
+            # Migration: Alter esi_names.item_id from INTEGER to BIGINT for structure IDs
+            cursor.execute("""
+                SELECT data_type FROM information_schema.columns
+                WHERE table_name = 'esi_names' AND column_name = 'item_id'
+            """)
+            result = cursor.fetchone()
+            if result and result[0] == 'integer':
+                logging.info("Applying migration: Altering esi_names.item_id to BIGINT...")
+                cursor.execute("ALTER TABLE esi_names ALTER COLUMN item_id TYPE BIGINT;")
+                logging.info("Migration complete.")
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS esi_cache (
                     cache_key TEXT PRIMARY KEY,
@@ -901,8 +913,8 @@ def get_names_from_ids(id_list, character: Character = None):
             if struct_id in all_resolved_names:
                 continue
             url = f"https://esi.evetech.net/v2/universe/structures/{struct_id}/"
-            # We force revalidation here because structure names can change, though rarely.
-            struct_data = make_esi_request(url, character=character, force_revalidate=True)
+            # Allow structure names to be cached, as they rarely change.
+            struct_data = make_esi_request(url, character=character)
             if struct_data and 'name' in struct_data:
                 logging.debug(f"Resolved structure {struct_id} to name '{struct_data['name']}'.")
                 all_resolved_names[struct_id] = struct_data['name']
