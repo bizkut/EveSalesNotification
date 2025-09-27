@@ -4,7 +4,7 @@
 >
 > Don't want to host the bot yourself? You can use the public instance for free by sending a message to **[@Evegametraderbot](https://t.me/Evegametraderbot)** on Telegram!
 
-This is a comprehensive, multi-user Telegram bot designed to provide EVE Online players with detailed, real-time notifications and daily summaries of their market activities. The bot is fully containerized with Docker for easy deployment and uses a persistent SQLite database to ensure data integrity across restarts.
+This is a comprehensive, multi-user Telegram bot designed to provide EVE Online players with detailed, real-time notifications and daily summaries of their market activities. The bot is fully containerized with Docker for easy deployment and uses a persistent PostgreSQL database to ensure data integrity across restarts.
 
 ## Features
 
@@ -19,7 +19,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, etc.) are configurable on a per-character basis via the bot's "Settings" menu.
-- **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent SQLite database to minimize API calls and prevent duplicate notifications.
+- **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
 - **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's history to report only on new activity and ensure profit calculations are accurate from day one.
 
 ---
