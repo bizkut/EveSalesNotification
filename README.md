@@ -70,6 +70,15 @@ docker-compose up --build -d
 
 The bot and its companion web app will now start.
 
+> **Note on Reverse Proxies (Cloudflare, Nginx, etc.)**
+>
+> If you are using a reverse proxy or a tunnel service like Cloudflare to handle HTTPS and expose the bot on the standard port 443, your configuration will be slightly different.
+>
+> -   **In your EVE App and `config.py`**: Your `CALLBACK_URL` and `WEBAPP_URL` should use `https` and should **not** include the port number.
+>     -   `CALLBACK_URL = "https://eve.gametrader.my/callback"`
+>     -   `WEBAPP_URL = "https://eve.gametrader.my"`
+> -   **Your Proxy Configuration**: You will need to configure your proxy to forward traffic for your domain (e.g., `eve.gametrader.my`) to the internal address of the webapp container, which is `http://localhost:5000`.
+
 ---
 
 ## Usage
