@@ -577,6 +577,42 @@ def update_character_notification_setting(character_id: int, setting: str, value
     logging.info(f"Updated {column_name} for character {character_id} to {value}.")
 
 
+def delete_character(character_id: int):
+    """Deletes a character and all of their associated data from the database."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            logging.warning(f"Starting deletion process for character_id: {character_id}")
+
+            # List of tables with a direct character_id foreign key
+            tables_to_delete_from = [
+                "processed_transactions",
+                "processed_journal_entries",
+                "market_orders",
+                "purchase_lots",
+                "processed_orders",
+            ]
+            for table in tables_to_delete_from:
+                cursor.execute(f"DELETE FROM {table} WHERE character_id = %s", (character_id,))
+                logging.info(f"Deleted records from {table} for character {character_id}.")
+
+            # Clean up bot_state entries
+            cursor.execute("DELETE FROM bot_state WHERE key LIKE %s", (f"%_{character_id}",))
+            logging.info(f"Deleted bot_state entries for character {character_id}.")
+
+            # Finally, delete the character from the main table
+            cursor.execute("DELETE FROM characters WHERE character_id = %s", (character_id,))
+            logging.info(f"Deleted character {character_id} from characters table.")
+
+            conn.commit()
+            logging.warning(f"Successfully deleted all data for character_id: {character_id}")
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Error deleting character {character_id}: {e}", exc_info=True)
+    finally:
+        database.release_db_connection(conn)
+
+
 # --- ESI API Functions ---
 
 def get_esi_cache_from_db(cache_key):
@@ -1520,7 +1556,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ["/balance", "/summary"],
             ["/sales", "/buys"],
             ["/notifications", "/settings"],
-            ["/add_character"]
+            ["/add_character", "/remove"]
         ]
         message = f"{welcome_message}\n\nYou have {len(user_characters)} character(s) registered. Please choose an option from the menu."
 
@@ -1875,6 +1911,30 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
     )
 
 
+async def remove_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Allows a user to select a character to remove.
+    """
+    user_id = update.effective_user.id
+    logging.info(f"Received /remove command from user {user_id}")
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text(
+            "You have no characters to remove."
+        )
+        return
+
+    keyboard = [[char.name] for char in user_characters]
+    keyboard.append(["/start"]) # Option to go back
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    context.user_data['next_action'] = ('select_char_for_removal', {char.name: char.id for char in user_characters})
+    await update.message.reply_text(
+        "Please select a character to remove. This action is permanent and will delete all of their data.",
+        reply_markup=reply_markup
+    )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles all non-command text messages, routing them based on conversation state."""
     user_id = update.effective_user.id
@@ -1963,6 +2023,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
         return
 
+    # --- Character Removal Flow ---
+    if action_type == 'select_char_for_removal':
+        char_map = data
+        char_id_to_remove = char_map.get(text)
+        if char_id_to_remove:
+            context.user_data['next_action'] = ('confirm_removal', char_id_to_remove)
+            await update.message.reply_text(
+                f"⚠️ *This is permanent and cannot be undone.* ⚠️\n\n"
+                f"Are you sure you want to remove the character **{text}** and all their associated data?\n\n"
+                f"Type `YES` to confirm.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
+        return
+
+    if action_type == 'confirm_removal':
+        character_id = data
+        if text == "YES":
+            character = get_character_by_id(character_id)
+            char_name = character.name if character else f"ID {character_id}"
+            await update.message.reply_text(f"Removing character {char_name} and deleting all associated data...")
+
+            delete_character(character_id)
+            load_characters_from_db() # Refresh the global list
+
+            await update.message.reply_text(f"✅ Character {char_name} has been successfully removed.")
+            await start_command(update, context) # Show main menu
+        else:
+            await update.message.reply_text("Removal cancelled. Returning to the main menu.")
+            await start_command(update, context)
+
+        context.user_data.clear()
+        return
+
     # --- General Settings Management ---
     if action_type == 'manage_settings':
         character_id = data
@@ -2023,6 +2118,7 @@ async def post_init(application: Application):
         BotCommand("buys", "View recent buys"),
         BotCommand("notifications", "Manage notification settings"),
         BotCommand("settings", "Manage character settings"),
+        BotCommand("remove", "Remove a character"),
     ]
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands have been set in the Telegram menu.")
@@ -2051,6 +2147,7 @@ def main() -> None:
     application.add_handler(CommandHandler("sales", sales_command))
     application.add_handler(CommandHandler("buys", buys_command))
     application.add_handler(CommandHandler("settings", settings_command))
+    application.add_handler(CommandHandler("remove", remove_character_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # --- Schedule Jobs ---
