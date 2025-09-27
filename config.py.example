@@ -19,19 +19,15 @@ WEBAPP_URL = "http://localhost:5000"
 # 3. Bot Configuration
 # The desired logging level. Options: 'DEBUG', 'INFO', 'WARNING', 'ERROR'.
 LOG_LEVEL = 'INFO'
-# The time in "HH:MM" UTC format to send the daily summary.
-DAILY_SUMMARY_TIME = "22:00"
-# The region ID for your primary trade hub (e.g., 10000002 for The Forge/Jita).
-REGION_ID = 10000002
-# The wallet balance below which you want to receive a low-balance alert. Set to 0 to disable.
-WALLET_BALANCE_THRESHOLD = 0
-# Set to "true" or "false" to enable or disable notification types globally.
-# Note: Users can manage notifications for their characters individually via bot commands.
-ENABLE_SALES_NOTIFICATIONS = "true"
-ENABLE_BUY_NOTIFICATIONS = "true"
-ENABLE_DAILY_SUMMARY = "true"
-# The threshold for batching multiple transaction notifications into a single summary message.
-NOTIFICATION_BATCH_THRESHOLD = 3
+
+# The settings below are now managed on a per-character basis via the bot's
+# 'Settings' menu. The values in the database will default to these, but
+# users can override them.
+#
+# Default Region ID: 10000002 (The Forge)
+# Default Summary Time: '22:00' UTC
+# Default Wallet Threshold: 0
+# etc.
 
 # Character refresh tokens are now stored in the database and managed via the bot.
 # You no longer need to add them here.

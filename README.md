@@ -18,9 +18,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
   - **Trade Location & Wallet Balance**: All notifications include the trade location and your current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
-- **Highly Configurable**:
-  - Bot-wide settings like trade region and summary time are set in the configuration file.
-  - Users can enable or disable notifications for their characters individually via bot commands.
+- **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, etc.) are configurable on a per-character basis via the bot's "Settings" menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent SQLite database to minimize API calls and prevent duplicate notifications.
 - **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's history to report only on new activity and ensure profit calculations are accurate from day one.
 
@@ -91,8 +89,9 @@ All interaction with the bot is handled through a simple, button-based menu in y
 
 1.  **Start the Bot**: Send the `/start` command to the bot. It will welcome you and display the main menu keyboard.
 2.  **Use the Menu**: Simply press the buttons on the keyboard to perform actions.
-    -   **➕ Add Character**: Starts the process of adding a new character. The bot will provide a link to the EVE Online login page to authorize your character.
-    -   **🔔 Manage Notifications**: View and toggle notification settings for each of your characters.
+    -   **➕ Add Character**: Starts the process of adding a new character.
+    -   **🔔 Manage Notifications**: View and toggle master notification settings for each of your characters.
+    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, daily summary time, and wallet balance alerts.
     -   **💰 View Balances**: Fetches the current wallet balance for your character(s).
     -   **📊 Request Summary**: Manually triggers the daily summary report for your character(s).
     -   **📈 View Sales**: Shows the 5 most recent sales for a selected character.
