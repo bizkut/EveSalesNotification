@@ -1446,14 +1446,17 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fetches and displays the wallet balance for the configured character(s)."""
-    logging.info(f"Received /balance command from user {update.effective_user.name}")
-    if not CHARACTERS:
-        await update.message.reply_text("No characters are loaded. Cannot fetch balances.")
+    """Fetches and displays the wallet balance for the user's character(s)."""
+    user_id = update.effective_user.id
+    logging.info(f"Received balance command from user {user_id}")
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
         return
 
-    if len(CHARACTERS) == 1:
-        character = CHARACTERS[0]
+    if len(user_characters) == 1:
+        character = user_characters[0]
         await update.message.reply_text(f"Fetching balance for {character.name}...")
         balance = get_wallet_balance(character)
         if balance is not None:
@@ -1462,46 +1465,52 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await update.message.reply_text(f"Error fetching balance for {character.name}.")
     else:
-        await _show_character_selection(update, "balance", include_all=True)
+        await _show_character_selection(update, "balance", user_characters, include_all=True)
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manually triggers the daily summary report for the configured character(s)."""
-    logging.info(f"Received /summary command from user {update.effective_user.name}")
-    if not CHARACTERS:
-        await update.message.reply_text("No characters are loaded. Cannot run summary.")
+    """Manually triggers the daily summary report for the user's character(s)."""
+    user_id = update.effective_user.id
+    logging.info(f"Received summary command from user {user_id}")
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
         return
 
-    chat_id = update.effective_chat.id
-    if len(CHARACTERS) == 1:
-        character = CHARACTERS[0]
+    if len(user_characters) == 1:
+        character = user_characters[0]
         await update.message.reply_text(f"Generating summary for {character.name}...")
-        await run_daily_summary_for_character(character, context, chat_id=chat_id)
+        await run_daily_summary_for_character(character, context)
     else:
-        await _show_character_selection(update, "summary", include_all=True)
+        await _show_character_selection(update, "summary", user_characters, include_all=True)
 
-async def _show_character_selection(update: Update, action: str, include_all: bool = False) -> None:
+
+async def _show_character_selection(update: Update, action: str, characters: list, include_all: bool = False) -> None:
     """Displays an inline keyboard for character selection for a given action."""
     keyboard = [
         [InlineKeyboardButton(character.name, callback_data=f"{action}:{character.id}")]
-        for character in CHARACTERS
+        for character in characters
     ]
-    if include_all and len(CHARACTERS) > 1:
+    if include_all and len(characters) > 1:
         keyboard.append([InlineKeyboardButton("All Characters", callback_data=f"{action}:all")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(f"Please select a character for the /{action} command:", reply_markup=reply_markup)
+    await update.message.reply_text(f"Please select a character:", reply_markup=reply_markup)
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the 5 most recent sales for the configured character(s)."""
-    logging.info(f"Received /sales command from user {update.effective_user.name}")
-    if not CHARACTERS:
-        await update.message.reply_text("No characters are loaded. Cannot fetch sales.")
+    """Displays the 5 most recent sales for the user's character(s)."""
+    user_id = update.effective_user.id
+    logging.info(f"Received sales command from user {user_id}")
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
         return
 
-    if len(CHARACTERS) == 1:
-        character = CHARACTERS[0]
+    if len(user_characters) == 1:
+        character = user_characters[0]
         await update.message.reply_text(f"Fetching recent sales for {character.name}...")
         all_transactions = get_wallet_transactions(character)
         if not all_transactions:
@@ -1524,18 +1533,21 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
-        await _show_character_selection(update, "sales")
+        await _show_character_selection(update, "sales", user_characters)
 
 
 async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the 5 most recent buys for the configured character(s)."""
-    logging.info(f"Received /buys command from user {update.effective_user.name}")
-    if not CHARACTERS:
-        await update.message.reply_text("No characters are loaded. Cannot fetch buys.")
+    """Displays the 5 most recent buys for the user's character(s)."""
+    user_id = update.effective_user.id
+    logging.info(f"Received buys command from user {user_id}")
+    user_characters = get_characters_for_user(user_id)
+
+    if not user_characters:
+        await update.message.reply_text("You have no characters added. Use /addcharacter to add one.")
         return
 
-    if len(CHARACTERS) == 1:
-        character = CHARACTERS[0]
+    if len(user_characters) == 1:
+        character = user_characters[0]
         await update.message.reply_text(f"Fetching recent buys for {character.name}...")
         all_transactions = get_wallet_transactions(character)
         if not all_transactions:
@@ -1558,7 +1570,7 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.")
         await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown')
     else:
-        await _show_character_selection(update, "buys")
+        await _show_character_selection(update, "buys", user_characters)
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allows a user to select a character to manage their settings."""
@@ -1734,10 +1746,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     character_id_str = parts[1]
     if character_id_str == "all":
         if action == "balance":
-            await query.edit_message_text(text="Fetching balances for all characters...")
+            await query.edit_message_text(text="Fetching balances for all your characters...")
+            user_characters = get_characters_for_user(user_id)
             message_lines = ["💰 *Wallet Balances* 💰\n"]
             total_balance = 0
-            for char in CHARACTERS:
+            for char in user_characters:
                 balance = get_wallet_balance(char)
                 if balance is not None:
                     message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
@@ -1747,8 +1760,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
             await query.edit_message_text(text="\n".join(message_lines), parse_mode='Markdown')
         elif action == "summary":
-            await query.edit_message_text(text="Generating summary for all characters...")
-            await run_daily_summary(context, chat_id=chat_id)
+            await query.edit_message_text(text="Generating summary for all your characters...")
+            user_characters = get_characters_for_user(user_id)
+            for char in user_characters:
+                await run_daily_summary_for_character(char, context)
+                await asyncio.sleep(1)
         return
 
     try:
