@@ -1697,67 +1697,78 @@ def add_historical_journal_entries_to_db(character_id: int, entries: list):
         database.release_db_connection(conn)
 
 
-def backfill_all_character_history(character: Character):
+def backfill_all_character_history(character: Character) -> bool:
     """
     Performs a one-time backfill of all transaction and journal history from
     ESI into the local database for a given character.
+    Returns True on success, False on any ESI failure.
     """
     state_key = f"history_backfilled_{character.id}"
     if get_bot_state(state_key) == 'true':
         logging.info(f"Full history already backfilled for {character.name}. Skipping.")
-        return
+        return True # Already done, so it's a success in this context
 
     logging.warning(f"Starting full history backfill for {character.name}. This may take some time...")
 
     # --- Backfill Transactions ---
     logging.info(f"Fetching all wallet transactions for {character.name}...")
     all_transactions = get_wallet_transactions(character, fetch_all=True)
-    if all_transactions:
-        add_historical_transactions_to_db(character.id, all_transactions)
-        # Also populate purchase lots for FIFO, same as the old seeding logic
-        buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-        if buy_transactions:
-            for tx in buy_transactions:
-                add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
-            logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for FIFO tracking for {character.name}.")
-    else:
-        logging.info(f"No historical transactions found to backfill for {character.name}.")
+    if all_transactions is None: # Explicitly check for None, as [] is a valid success
+        logging.error(f"Failed to fetch wallet transactions during history backfill for {character.name}.")
+        return False
+
+    add_historical_transactions_to_db(character.id, all_transactions)
+    # Also populate purchase lots for FIFO, same as the old seeding logic
+    buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
+    if buy_transactions:
+        for tx in buy_transactions:
+            add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+        logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for FIFO tracking for {character.name}.")
 
 
     # --- Backfill Journal Entries ---
     logging.info(f"Fetching all wallet journal entries for {character.name}...")
     all_journal_entries = get_wallet_journal(character, fetch_all=True)
-    if all_journal_entries:
-        add_historical_journal_entries_to_db(character.id, all_journal_entries)
-    else:
-        logging.info(f"No historical journal entries found to backfill for {character.name}.")
+    if all_journal_entries is None:
+        logging.error(f"Failed to fetch wallet journal during history backfill for {character.name}.")
+        return False
+    add_historical_journal_entries_to_db(character.id, all_journal_entries)
 
     # --- Backfill Order History (for cancelled/expired notifications) ---
     logging.info(f"Seeding order history for {character.name}...")
     all_historical_orders = get_market_orders_history(character)
-    if all_historical_orders:
-        order_ids = [o['order_id'] for o in all_historical_orders]
-        # We still need to mark these as "processed" for the notification system
-        add_processed_orders(character.id, order_ids)
-        logging.info(f"Seeded {len(order_ids)} historical orders for {character.name}.")
-    else:
-        logging.info(f"No historical orders found to seed for {character.name}.")
+    if all_historical_orders is None:
+        logging.error(f"Failed to fetch order history during backfill for {character.name}.")
+        return False
+
+    order_ids = [o['order_id'] for o in all_historical_orders]
+    # We still need to mark these as "processed" for the notification system
+    add_processed_orders(character.id, order_ids)
+    logging.info(f"Seeded {len(order_ids)} historical orders for {character.name}.")
 
 
     # --- Mark as complete ---
     set_bot_state(state_key, 'true')
     logging.warning(f"Full history backfill for {character.name} is complete.")
+    return True
 
 
-def seed_data_for_character(character: Character):
-    """Initializes all historical data for a character if it hasn't been done before."""
+def seed_data_for_character(character: Character) -> bool:
+    """
+    Initializes all historical data for a character if it hasn't been done before.
+    Returns True on success, False on failure.
+    """
     logging.info(f"Checking/seeding historical data for character: {character.name} ({character.id})")
-    backfill_all_character_history(character)
-    logging.info(f"Finished checking/seeding data for {character.name}.")
+    success = backfill_all_character_history(character)
+    logging.info(f"Finished checking/seeding data for {character.name}. Success: {success}")
+    return success
 
 
 async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
-    """Periodically checks the database for new characters and starts monitoring them."""
+    """
+    Periodically checks the database for new characters, seeds their historical
+    data, and adds them to the live monitoring list upon success.
+    """
     logging.debug("Running job to check for new characters.")
     conn = database.get_db_connection()
     db_char_ids = set()
@@ -1775,19 +1786,33 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
         logging.info(f"Detected {len(new_char_ids)} new characters in the database.")
         for char_id in new_char_ids:
             character = get_character_by_id(char_id)
-            if character:
-                # Seed the historical data for the new character
-                seed_data_for_character(character)
+            if not character:
+                logging.error(f"Could not find details for newly detected character ID {char_id} in the database.")
+                continue
+
+            # Attempt to seed the historical data for the new character.
+            # This is a blocking, synchronous function.
+            seed_successful = seed_data_for_character(character)
+
+            if seed_successful:
                 # Add the character to the global list to be picked up by the master polls
                 CHARACTERS.append(character)
-                logging.info(f"Added new character {character.name} to the polling list.")
+                logging.info(f"Added new character {character.name} to the polling list after successful data seed.")
                 await send_telegram_message(
                     context,
-                    f"✅ Successfully added character **{character.name}**! I will now start monitoring their market activity.",
+                    f"✅ Successfully added and synced **{character.name}**! I will now start monitoring their market activity.",
                     chat_id=character.telegram_user_id
                 )
             else:
-                logging.error(f"Could not find details for newly detected character ID {char_id} in the database.")
+                # If seeding fails, do NOT add them to the monitoring list.
+                # Inform the user and the bot will automatically try again on the next cycle.
+                logging.error(f"Failed to seed historical data for {character.name}. They will not be monitored yet.")
+                await send_telegram_message(
+                    context,
+                    f"⚠️ Failed to import historical data for **{character.name}** due to a temporary ESI API issue. "
+                    f"I will automatically retry in a few minutes. Monitoring will begin once the import succeeds.",
+                    chat_id=character.telegram_user_id
+                )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1874,16 +1899,20 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Provides a link for the user to add a new EVE Online character via a slash command.
-    Sends a new message with an inline keyboard button.
+    Provides a link for the user to add a new EVE Online character.
+    Can be triggered by a command or a callback query.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /add_character command from user {user_id}")
+    logging.info(f"Received add_character request from user {user_id}")
     webapp_base_url = os.getenv('WEBAPP_URL', 'http://localhost:5000')
     login_url = f"{webapp_base_url}/login?user={user_id}"
 
     keyboard = [[InlineKeyboardButton("Authorize with EVE Online", url=login_url)]]
+    # Add a back button for a better UX when coming from a callback
+    if update.callback_query:
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
     reply_markup = InlineKeyboardMarkup(keyboard)
+
 
     message = (
         "To add a new character, please click the button below and authorize with EVE Online.\n\n"
@@ -1891,7 +1920,11 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
         "authorizing, you can close the browser window.\n\n"
         "It may take a minute or two for the character to be fully registered with the bot."
     )
-    await update.message.reply_text(message, reply_markup=reply_markup)
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(message, reply_markup=reply_markup)
 
 
 async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
