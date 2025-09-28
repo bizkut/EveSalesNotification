@@ -1240,9 +1240,15 @@ async def master_wallet_transaction_poll(application: Application):
                     logging.warning(f"Skipping wallet poll for character {character.name} ({character.id}) because they have been removed.")
                     continue
 
-                # Grace period for new characters to allow initial sync to complete
-                if (datetime.now(timezone.utc) - character.created_at) < timedelta(minutes=5):
-                    logging.info(f"Skipping wallet poll for new character {character.name} (within 5-minute grace period).")
+                # Check if the character is within the 1-hour grace period after history backfill
+                history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+                if not history_backfilled_at_str:
+                    logging.info(f"Skipping wallet poll for {character.name} because historical data has not been backfilled yet.")
+                    continue
+
+                history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+                if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+                    logging.info(f"Skipping wallet poll for {character.name} (within 1-hour grace period after historical sync).")
                     continue
 
                 logging.debug(f"Polling wallet for {character.name}")
@@ -1330,25 +1336,18 @@ async def master_wallet_transaction_poll(application: Application):
 
                         # Buy Notifications
                         if buys and character.enable_buy_notifications:
-                            # Filter out transactions that occurred before the character was added
-                            recent_buys = {}
-                            for type_id, tx_group in buys.items():
-                                recent_tx_group = [tx for tx in tx_group if datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > character.created_at]
-                                if recent_tx_group:
-                                    recent_buys[type_id] = recent_tx_group
-
-                            if len(recent_buys) > character.notification_batch_threshold:
+                            if len(buys) > character.notification_batch_threshold:
                                 header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
                                 item_lines = []
-                                grand_total_cost = sum(tx['quantity'] * tx['unit_price'] for tx_group in recent_buys.values() for tx in tx_group)
-                                for type_id, tx_group in recent_buys.items():
+                                grand_total_cost = sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group)
+                                for type_id, tx_group in buys.items():
                                     total_quantity = sum(t['quantity'] for t in tx_group)
                                     item_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
                                 footer = f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`"
                                 if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
                                 await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
-                            elif recent_buys:
-                                for type_id, tx_group in recent_buys.items():
+                            elif buys:
+                                for type_id, tx_group in buys.items():
                                     total_quantity = sum(t['quantity'] for t in tx_group)
                                     total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
                                     message = (f"🛒 *Market Buy ({character.name})* 🛒\n\n"
@@ -1362,23 +1361,11 @@ async def master_wallet_transaction_poll(application: Application):
 
                         # Sale Notifications
                         if sales_details and character.enable_sales_notifications:
-                            # Filter out sales that occurred before the character was added
-                            recent_sales_details = []
-                            for sale in sales_details:
-                                recent_tx_group = [tx for tx in sale['tx_group'] if datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > character.created_at]
-                                if recent_tx_group:
-                                    # We need to create a new sale_info dict because the cogs was for the whole group
-                                    # This is a simplification; for perfect accuracy, COGS would need recalculation.
-                                    # However, for notification purposes, this is acceptable as it prevents spam.
-                                    new_sale_info = sale.copy()
-                                    new_sale_info['tx_group'] = recent_tx_group
-                                    recent_sales_details.append(new_sale_info)
-
-                            if len(recent_sales_details) > character.notification_batch_threshold:
+                            if len(sales_details) > character.notification_batch_threshold:
                                 header = f"✅ *Multiple Market Sales ({character.name})* ✅"
                                 item_lines = []
                                 grand_total_value, grand_total_cogs = 0, 0
-                                for sale_info in recent_sales_details:
+                                for sale_info in sales_details:
                                     total_quantity = sum(t['quantity'] for t in sale_info['tx_group'])
                                     total_value = sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group'])
                                     grand_total_value += total_value
@@ -1388,8 +1375,8 @@ async def master_wallet_transaction_poll(application: Application):
                                 footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}"
                                 if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
                                 await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
-                            elif recent_sales_details:
-                                for sale_info in recent_sales_details:
+                            elif sales_details:
+                                for sale_info in sales_details:
                                     type_id, tx_group, cogs = sale_info['type_id'], sale_info['tx_group'], sale_info['cogs']
                                     total_quantity = sum(t['quantity'] for t in tx_group)
                                     total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
@@ -1438,9 +1425,15 @@ async def master_order_history_poll(application: Application):
                     logging.warning(f"Skipping order history poll for character {character.name} ({character.id}) because they have been removed.")
                     continue
 
-                # Grace period for new characters to allow initial sync to complete
-                if (datetime.now(timezone.utc) - character.created_at) < timedelta(minutes=5):
-                    logging.info(f"Skipping order history poll for new character {character.name} (within 5-minute grace period).")
+                # Check if the character is within the 1-hour grace period after history backfill
+                history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+                if not history_backfilled_at_str:
+                    logging.info(f"Skipping order history poll for {character.name} because historical data has not been backfilled yet.")
+                    continue
+
+                history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+                if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+                    logging.info(f"Skipping order history poll for {character.name} (within 1-hour grace period after historical sync).")
                     continue
 
                 logging.debug(f"Polling order history for {character.name}")
@@ -1490,15 +1483,6 @@ async def master_order_history_poll(application: Application):
                         item_ids = [o['type_id'] for o in cancelled_orders]
                         id_to_name = get_names_from_ids(item_ids)
                         for order in cancelled_orders:
-                            # Skip notifications for orders issued before the character was added
-                            try:
-                                issued_dt = datetime.fromisoformat(order['issued'].replace('Z', '+00:00'))
-                                if issued_dt < character.created_at:
-                                    logging.info(f"Skipping notification for historical cancelled order {order['order_id']}.")
-                                    continue
-                            except (ValueError, KeyError):
-                                pass  # If date is missing, process it to be safe
-
                             order_type = "Buy" if order.get('is_buy_order') else "Sell"
                             if (order_type == "Buy" and not character.enable_buy_notifications) or \
                                (order_type == "Sell" and not character.enable_sales_notifications):
@@ -1513,15 +1497,6 @@ async def master_order_history_poll(application: Application):
                         item_ids = [o['type_id'] for o in expired_orders]
                         id_to_name = get_names_from_ids(item_ids)
                         for order in expired_orders:
-                            # Skip notifications for orders issued before the character was added
-                            try:
-                                issued_dt = datetime.fromisoformat(order['issued'].replace('Z', '+00:00'))
-                                if issued_dt < character.created_at:
-                                    logging.info(f"Skipping notification for historical expired order {order['order_id']}.")
-                                    continue
-                            except (ValueError, KeyError):
-                                pass  # If date is missing, process it to be safe
-
                             order_type = "Buy" if order.get('is_buy_order') else "Sell"
                             if (order_type == "Buy" and not character.enable_buy_notifications) or \
                                (order_type == "Sell" and not character.enable_sales_notifications):
@@ -1827,7 +1802,7 @@ def backfill_all_character_history(character: Character) -> bool:
     Returns True on success, False on any ESI failure.
     """
     state_key = f"history_backfilled_{character.id}"
-    if get_bot_state(state_key) == 'true':
+    if get_bot_state(state_key):
         logging.info(f"Full history already backfilled for {character.name}. Skipping.")
         return True # Already done, so it's a success in this context
 
@@ -1871,7 +1846,8 @@ def backfill_all_character_history(character: Character) -> bool:
 
 
     # --- Mark as complete ---
-    set_bot_state(state_key, 'true')
+    # Store the timestamp of when the backfill finished. This is the new reference for the notification grace period.
+    set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
     logging.warning(f"Full history backfill for {character.name} is complete.")
     return True
 
