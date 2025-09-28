@@ -2745,12 +2745,12 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard = []
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"open_orders_list_{character_id}_{str(is_buy).lower()}_{page - 1}"))
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page - 1}"))
 
     nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
 
     if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"open_orders_list_{character_id}_{str(is_buy).lower()}_{page + 1}"))
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page + 1}"))
 
     if nav_row:
         keyboard.append(nav_row)
@@ -2782,7 +2782,7 @@ async def _select_character_for_open_orders(update: Update, context: ContextType
     if len(user_characters) == 1:
         await _display_open_orders(update, context, character_id=user_characters[0].id, is_buy=is_buy, page=0)
     else:
-        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"open_orders_list_{char.id}_{str(is_buy).lower()}_0")] for char in user_characters]
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"openorders_list_{char.id}_{str(is_buy).lower()}_0")] for char in user_characters]
         keyboard.append([InlineKeyboardButton("« Back", callback_data="open_orders")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         message_text = f"Please select a character to view their open {order_type_str} orders:"
@@ -2815,7 +2815,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await _select_character_for_open_orders(update, context, is_buy=False)
     elif data == "open_orders_buys":
         await _select_character_for_open_orders(update, context, is_buy=True)
-    elif data.startswith("open_orders_list_"):
+    elif data.startswith("openorders_list_"):
         _, _, char_id_str, is_buy_str, page_str = data.split('_')
         character_id = int(char_id_str)
         is_buy = is_buy_str == 'true'
