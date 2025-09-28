@@ -2682,34 +2682,12 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     order_capacity_str = ""
     if skills_data and 'skills' in skills_data:
         skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
-        # Skill IDs: Trade (3443), Broker Relations (3446), Advanced Broker Relations (21790)
+        # Skill IDs: Trade (3443), Broker Relations (3446)
         trade_level = skill_map.get(3443, 0)
         broker_relations_level = skill_map.get(3446, 0)
-        adv_broker_relations_level = skill_map.get(21790, 0)
 
-        # Formula for max orders: 5 + (Trade * 10) + (Broker Relations * 5) + (Adv Broker Relations * 20)
-        # This seems to be a common formula, but let's stick to the simpler one if it's more standard.
-        # Let's use the widely accepted formula: 305 is the max possible.
-        # A simpler formula: 5 + (Trade * 4) + (Broker Relations * 8) ... let's just calculate based on a known formula.
-        # Standard formula: Max Orders = 5 * (1 + Broker Relations) + (10 * Trade) + (20 * Advanced Broker Relations) - this seems wrong.
-        # Correct formula seems to be: 5 + (Trade * 10) + (Retail * 8) + (Wholesale * 16) + (Tycoon * 32)
-        # Let's use a simpler, more direct calculation if possible.
-        # The most commonly cited max is 305.
-        # Let's assume a simpler, more verifiable calculation based on the most impactful skills.
-        # Max orders = 5 (base) + 10*Trade + 8*Retail + 16*Wholesale + 32*Tycoon + 4*Marketing + 4*Procurement
-        # Let's just use Broker Relations as the main driver for simplicity, as per many guides.
-        # Max Orders = 5 * (1 + Broker Relations Level)
-        # Let's use a known, simple formula: orders = 5 + trade_level * 10 + broker_rel_level * 5
-        # The formula is actually much simpler: 5 + 10*Trade + 5*BrokerRelations + 20*AdvBrokerRelations
-        # Let's re-verify.
-        # The number of orders is determined by the Trade skill (10 per level) and Broker Relations (4 per level).
-        # And Advanced Broker Relations.
-        # Let's find a definitive source. EVE University Wiki is good.
-        # "The number of orders a character can have open at one time is determined by their skills. The formula is: 5 + (Trade skill level × 10) + (Broker Relations skill level × 4)"
-        # This seems too low. Let's find another source.
-        # The formula is: 5 + (10 * Trade) + (4 * Broker Relations) + (1 * Marketing) + (2 * Procurement)
-        # This is getting complicated. Let's stick to the most impactful ones.
-        # Let's use: Max orders = 5 + (10 * Trade) + (4 * Broker Relations)
+        # Formula for max orders based on EVE University Wiki:
+        # 5 (base) + (10 * Trade level) + (4 * Broker Relations level)
         max_orders = 5 + (trade_level * 10) + (broker_relations_level * 4)
         order_capacity_str = f"({len(filtered_orders)} / {max_orders} orders)"
 
@@ -2893,21 +2871,6 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "noop":
         return # Do nothing, it's just a label
 
-    # --- Schedule Jobs ---
-    job_queue = application.job_queue
-    # Schedule the job to check for new characters to add to the polling loops
-    job_queue.run_repeating(check_for_new_characters_job, interval=60, first=10)
-
-    # Seed initial data for any characters already in the database on startup
-    for character in CHARACTERS:
-        seed_data_for_character(character)
-
-    # Schedule the master daily summary job to run at 11:00 UTC
-    job_queue.run_daily(master_daily_summary_job, time=dt_time(11, 0, tzinfo=timezone.utc))
-    logging.info("Master daily summary job scheduled to run at 11:00 UTC.")
-
-    logging.info("Bot is running. Polling for updates...")
-    application.run_polling()
 
 if __name__ == "__main__":
     main()
