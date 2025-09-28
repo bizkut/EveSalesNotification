@@ -113,8 +113,8 @@ All interaction with the bot is handled through a clean, inline button-based men
 2.  **Use the Menu**: Simply press the buttons in the chat to perform actions.
     -   **💰 View Balances**: Fetches the current wallet balance for your character(s).
     -   **📊 Open Orders**: Shows a paginated list of your open buy or sell orders and your current order capacity.
-    -   **📈 View Sales**: Shows the 5 most recent sales for a selected character.
-    -   **🛒 View Buys**: Shows the 5 most recent buys for a selected character.
+    -   **📈 View Sales**: Displays a detailed, paginated history of all sales, including profit and fee calculations.
+    -   **🛒 View Buys**: Displays a detailed, paginated history of all buy transactions.
     -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
     -   **⚙️ Settings**: Configure per-character settings like your preferred trading region and wallet balance alerts.
     -   **🔔 Notifications**: View and toggle master notification settings for each of your characters.
