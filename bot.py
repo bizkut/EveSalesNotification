@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use('Agg')  # Use a non-interactive backend
 import matplotlib.pyplot as plt
 import calendar
+from PIL import Image
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -2696,6 +2697,61 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
         )
 
 
+def _create_character_info_image(character_id, corporation_id, alliance_id=None):
+    """
+    Creates a composite image of the character portrait, corp logo, and alliance logo.
+    """
+    try:
+        # URLs for the images
+        portrait_url = f"https://images.evetech.net/characters/{character_id}/portrait?size=256"
+        corp_logo_url = f"https://images.evetech.net/corporations/{corporation_id}/logo?size=128"
+        alliance_logo_url = f"https://images.evetech.net/alliances/{alliance_id}/logo?size=128" if alliance_id else None
+
+        # Download images
+        portrait_res = requests.get(portrait_url, timeout=10)
+        portrait_res.raise_for_status()
+        portrait_img = Image.open(io.BytesIO(portrait_res.content)).convert("RGBA")
+
+        corp_logo_res = requests.get(corp_logo_url, timeout=10)
+        corp_logo_res.raise_for_status()
+        corp_logo_img = Image.open(io.BytesIO(corp_logo_res.content)).convert("RGBA")
+
+        alliance_logo_img = None
+        if alliance_logo_url:
+            alliance_logo_res = requests.get(alliance_logo_url, timeout=10)
+            alliance_logo_res.raise_for_status()
+            alliance_logo_img = Image.open(io.BytesIO(alliance_logo_res.content)).convert("RGBA")
+
+        # Create composite image
+        width = 256
+        height = 256 + (10 + 128) if (corp_logo_img or alliance_logo_img) else 256
+        composite = Image.new('RGBA', (width, height), (28, 28, 28, 255))
+
+        # Paste portrait
+        composite.paste(portrait_img, (0, 0), portrait_img)
+
+        # Paste logos
+        if alliance_logo_img: # Both corp and alliance exist
+            composite.paste(corp_logo_img, (0, 256 + 10), corp_logo_img)
+            composite.paste(alliance_logo_img, (128, 256 + 10), alliance_logo_img)
+        elif corp_logo_img: # Only corp exists
+            corp_pos = ((width - 128) // 2, 256 + 10)
+            composite.paste(corp_logo_img, corp_pos, corp_logo_img)
+
+        # Save to buffer
+        buf = io.BytesIO()
+        composite.save(buf, format='PNG')
+        buf.seek(0)
+        return buf
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to download images for character info card: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Failed to create character info image: {e}", exc_info=True)
+        return None
+
+
 async def _show_character_info(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
     """Fetches and displays public information for a character."""
     query = update.callback_query
@@ -2739,23 +2795,37 @@ async def _show_character_info(update: Update, context: ContextTypes.DEFAULT_TYP
         caption_lines.append(f"Alliance: {alliance_name}")
 
     caption = "\n".join(caption_lines)
-    portrait_url = f"https://images.evetech.net/characters/{character.id}/portrait?size=512"
+
+    # --- Image Composition ---
+    image_buffer = await asyncio.to_thread(
+        _create_character_info_image,
+        character.id,
+        public_info['corporation_id'],
+        public_info.get('alliance_id')
+    )
 
     # --- Sending Photo ---
-    # Delete the "loading" message and send the photo message
     await query.message.delete()
-
     back_callback = f"settings_char_{character.id}"
     keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await context.bot.send_photo(
-        chat_id=update.effective_chat.id,
-        photo=portrait_url,
-        caption=caption,
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
+    if image_buffer:
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=image_buffer,
+            caption=caption,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    else:
+        # Fallback to text if image creation fails
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=caption,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 
 async def remove_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
