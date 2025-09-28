@@ -1608,12 +1608,17 @@ async def run_daily_summary_for_character(character: Character, context: Context
         f"  - Total Fees (Broker + Tax): `{total_fees_month:,.2f} ISK`\n"
         f"  - *Gross Revenue (Sales - Fees):* `{gross_revenue_month:,.2f} ISK`"
     )
-    keyboard = [
-        [
-            InlineKeyboardButton("Show Monthly Chart", callback_data=f"chart_monthly_{character.id}"),
-            InlineKeyboardButton("Show Yearly Chart", callback_data=f"chart_yearly_{character.id}")
-        ]
-    ]
+
+    # Dynamically generate year buttons
+    available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions)))
+    year_buttons = [InlineKeyboardButton(f"Chart {year}", callback_data=f"chart_yearly_{character.id}_{year}") for year in available_years]
+
+    # Always include the current month chart button
+    keyboard = [[InlineKeyboardButton("Show Monthly Chart", callback_data=f"chart_monthly_{character.id}_{now.year}")]]
+    # Add year buttons, chunked into rows of 4 for readability
+    for i in range(0, len(year_buttons), 4):
+        keyboard.append(year_buttons[i:i+4])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
     logging.info(f"Daily summary sent for {character.name}.")
@@ -2093,14 +2098,12 @@ def generate_monthly_chart(character_id: int):
     buf.seek(0)
     return buf
 
-def generate_yearly_chart(character_id: int):
-    """Generates a line chart of sales, fees, and profit for the current year."""
+def generate_yearly_chart(character_id: int, year: int):
+    """Generates a line chart of sales, fees, and profit for a specific year."""
     character = get_character_by_id(character_id)
     if not character:
         return None
 
-    now = datetime.now(timezone.utc)
-    year = now.year
     months = list(range(1, 13))
     month_names = [calendar.month_abbr[m] for m in months]
 
@@ -2171,6 +2174,8 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         action = parts[0]
         chart_type = parts[1]
         character_id = int(parts[2])
+        year = int(parts[3]) if len(parts) > 3 else datetime.now(timezone.utc).year
+
 
         if action != 'chart':
             return # Not for us
@@ -2193,7 +2198,7 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         if chart_type == 'monthly':
             chart_buffer = generate_monthly_chart(character_id)
         elif chart_type == 'yearly':
-            chart_buffer = generate_yearly_chart(character_id)
+            chart_buffer = generate_yearly_chart(character_id, year)
         else:
             await query.edit_message_text(text="Unknown chart type.")
             return
