@@ -20,6 +20,8 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
   - **Wallet Balance**: All notifications include your current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
+- **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot also displays your character's current order capacity (e.g., "152 / 305 orders").
+- **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The `/summary` command now includes inline buttons to create a daily sales/profit/fees chart for the current month, as well as monthly charts for all historical years with transaction data. After viewing a chart, you can easily return to the summary view using the "Back to Summary" button.
 - **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, and all notification types) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
@@ -60,6 +62,7 @@ Alternatively, you can use your own reverse proxy (like Nginx) to expose the `we
     -   `esi-markets.read_character_orders.v1`
     -   `esi-universe.read_structures.v1`
     -   `esi-markets.structure_markets.v1`
+    -   `esi-skills.read_skills.v1`
 5.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
 ### Step 3: Configure the Environment
@@ -104,19 +107,20 @@ If you choose not to use the tunnel, you can safely ignore the `.env` file and w
 
 ## Usage
 
-All interaction with the bot is handled through a simple, button-based menu in your private chat with it.
+All interaction with the bot is handled through a clean, inline button-based menu in your private chat with it.
 
-1.  **Start the Bot**: Send the `/start` command to the bot. It will welcome you and display the main menu keyboard.
-2.  **Use the Menu**: Simply press the buttons on the keyboard to perform actions.
-    -   **➕ Add Character**: Starts the process of adding a new character.
-    -   **🔔 Manage Notifications**: View and toggle master notification settings for each of your characters.
-    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, daily summary time, and wallet balance alerts.
+1.  **Start the Bot**: Send the `/start` command to the bot. It will welcome you and display the main menu.
+2.  **Use the Menu**: Simply press the buttons in the chat to perform actions.
     -   **💰 View Balances**: Fetches the current wallet balance for your character(s).
-    -   **📊 Request Summary**: Manually triggers the daily summary report for your character(s). This report now includes inline buttons to generate on-demand performance charts.
+    -   **📊 Open Orders**: Shows a paginated list of your open buy or sell orders and your current order capacity.
     -   **📈 View Sales**: Shows the 5 most recent sales for a selected character.
     -   **🛒 View Buys**: Shows the 5 most recent buys for a selected character.
+    -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
+    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region and wallet balance alerts.
+    -   **🔔 Notifications**: View and toggle master notification settings for each of your characters.
+    -   **➕ Add Character**: Starts the process of adding a new character.
     -   **🗑️ Remove Character**: Starts the process of removing a character and all of their associated data.
-3.  **Character Selection**: If you have multiple characters, the bot will present you with an inline menu to choose which character you want to interact with after you select an action.
+3.  **Character Selection**: If you have multiple characters, the bot will present you with a new inline menu to choose which character you want to interact with after you select an action.
 
 ---
 

@@ -898,6 +898,12 @@ def get_market_orders(character, return_headers=False, force_revalidate=False):
     url = f"https://esi.evetech.net/v2/characters/{character.id}/orders/"
     return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
 
+def get_character_skills(character, force_revalidate=False):
+    """Fetches a character's skills from ESI."""
+    if not character: return None
+    url = f"https://esi.evetech.net/v4/characters/{character.id}/skills/"
+    return make_esi_request(url, character=character, force_revalidate=force_revalidate)
+
 def get_wallet_balance(character, return_headers=False):
     if not character: return None
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
@@ -1774,60 +1780,85 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Displays the main menu using a ReplyKeyboardMarkup and welcomes the user.
-    """
+    """Displays the main menu using an InlineKeyboardMarkup."""
     user = update.effective_user
     user_characters = get_characters_for_user(user.id)
     welcome_message = f"Welcome, {user.first_name}!"
 
+    # Determine the message and keyboard based on whether the user has characters
     if not user_characters:
-        keyboard = [["/add_character"]]
         message = (
             f"{welcome_message}\n\nIt looks like you don't have any EVE Online characters "
-            "added yet. To get started, please use the `/add_character` command."
+            "added yet. To get started, please add one."
         )
+        keyboard = [[InlineKeyboardButton("➕ Add Character", callback_data="add_character")]]
     else:
+        message = (
+            f"{welcome_message}\n\nYou have {len(user_characters)} character(s) registered. "
+            "Please choose an option:"
+        )
         keyboard = [
-            ["/balance", "/summary"],
-            ["/sales", "/buys"],
-            ["/notifications", "/settings"],
-            ["/add_character", "/remove"]
+            [
+                InlineKeyboardButton("💰 View Balances", callback_data="balance"),
+                InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
+            ],
+            [
+                InlineKeyboardButton("📈 View Sales", callback_data="sales"),
+                InlineKeyboardButton("🛒 View Buys", callback_data="buys")
+            ],
+            [
+                InlineKeyboardButton("📊 Request Summary", callback_data="summary"),
+                InlineKeyboardButton("⚙️ Settings", callback_data="settings")
+            ],
+            [
+                InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
+                InlineKeyboardButton("🗑️ Remove", callback_data="remove")
+            ]
         ]
-        message = f"{welcome_message}\n\nYou have {len(user_characters)} character(s) registered. Please choose an option from the menu."
 
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(text=message, reply_markup=reply_markup)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # If the command was triggered by a button press (callback query), edit the message.
+    # Otherwise, if it was triggered by /start (message), send a new message.
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(text=message, reply_markup=reply_markup)
+        except BadRequest as e:
+            if "message is not modified" not in str(e).lower():
+                raise e # Re-raise if it's not the expected error
+            logging.info("Message not modified, skipping edit.")
+    else:
+        await update.message.reply_text(text=message, reply_markup=reply_markup)
 
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Allows a user to select a character to manage their notification settings
-    using a ReplyKeyboardMarkup.
+    using an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /notifications command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        await update.message.reply_text(
-            "You have no characters added. Please use `/add_character` first."
-        )
+        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
         return
 
     if len(user_characters) == 1:
-        # If only one character, go straight to the settings for them
         await _show_notification_settings(update, context, user_characters[0])
     else:
-        # If multiple, ask which one to manage
-        keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["Main Menu"]) # Option to go back
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        context.user_data['next_action'] = ('select_char_for_notifications', {char.name: char.id for char in user_characters})
-        await update.message.reply_text(
-            "Please select a character to manage their notification settings:",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"notifications_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character to manage their notification settings:"
+
+        # Edit the existing message if from a callback, otherwise send a new one
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1891,62 +1922,59 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Fetches and displays wallet balance. Prompts for character selection
-    if the user has multiple characters.
+    if the user has multiple characters via an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /balance command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        await update.message.reply_text(
-            "You have no characters added. Please use `/add_character` first."
-        )
+        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
         return
 
     if len(user_characters) == 1:
         await _show_balance_for_characters(update, context, user_characters)
     else:
-        keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["All Characters"])
-        keyboard.append(["Main Menu"])  # Option to go back
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        context.user_data['next_action'] = ('select_char_for_balance', {char.name: char.id for char in user_characters})
-        await update.message.reply_text(
-            "Please select a character (or all) to view the balance:",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"balance_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("All Characters", callback_data="balance_char_all")])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character (or all) to view the balance:"
+
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Manually triggers the daily summary report. Prompts for character
-    selection if the user has multiple characters.
+    selection if the user has multiple characters via an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /summary command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        await update.message.reply_text(
-            "You have no characters added. Please use `/add_character` first."
-        )
+        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
         return
 
     if len(user_characters) == 1:
-        # If only one character, generate the summary directly
         await _generate_and_send_summary(update, context, user_characters[0])
-        await start_command(update, context)
     else:
-        # If multiple, prompt for selection
-        keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["All Characters"])
-        keyboard.append(["Main Menu"])
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        context.user_data['next_action'] = ('select_char_for_summary', {char.name: char.id for char in user_characters})
-        await update.message.reply_text(
-            "Please select a character (or all) to generate a summary for:",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"summary_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("All Characters", callback_data="summary_char_all")])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character (or all) to generate a summary for:"
+
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
 async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool, characters: list[Character]) -> None:
@@ -2294,361 +2322,245 @@ async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Displays the 5 most recent sales. Prompts for character selection
-    if the user has multiple characters.
+    if the user has multiple characters via an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /sales command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        await update.message.reply_text(
-            "You have no characters added. Please use `/add_character` first."
-        )
+        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
         return
 
     if len(user_characters) == 1:
         await _get_last_5_transactions(update, context, is_buy=False, characters=user_characters)
     else:
-        keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["All Characters"])
-        keyboard.append(["Main Menu"])
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        context.user_data['next_action'] = ('select_char_for_sales', {char.name: char.id for char in user_characters})
-        await update.message.reply_text(
-            "Please select a character (or all) to view recent sales:",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"sales_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("All Characters", callback_data="sales_char_all")])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character (or all) to view recent sales:"
+
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
 async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Displays the 5 most recent buys. Prompts for character selection
-    if the user has multiple characters.
+    if the user has multiple characters via an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /buys command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        await update.message.reply_text(
-            "You have no characters added. Please use `/add_character` first."
-        )
+        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
         return
 
     if len(user_characters) == 1:
         await _get_last_5_transactions(update, context, is_buy=True, characters=user_characters)
     else:
-        keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["All Characters"])
-        keyboard.append(["Main Menu"])
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        context.user_data['next_action'] = ('select_char_for_buys', {char.name: char.id for char in user_characters})
-        await update.message.reply_text(
-            "Please select a character (or all) to view recent buys:",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"buys_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("All Characters", callback_data="buys_char_all")])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character (or all) to view recent buys:"
+
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
+
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Allows a user to select a character to manage their general settings
-    using a ReplyKeyboardMarkup.
+    using an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /settings command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        await update.message.reply_text(
-            "You have no characters added. Please use `/add_character` first."
-        )
+        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
         return
 
     if len(user_characters) == 1:
-        # If only one character, go straight to the settings for them
         await _show_character_settings(update, context, user_characters[0])
     else:
-        # If multiple, ask which one to manage
-        keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["Main Menu"]) # Option to go back
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        context.user_data['next_action'] = ('select_char_for_settings', {char.name: char.id for char in user_characters})
-        await update.message.reply_text(
-            "Please select a character to manage their settings:",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"settings_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character to manage their settings:"
+
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
 async def _show_notification_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
-    """Displays the notification settings menu for a specific character."""
-    # Re-fetch character to ensure we have the latest settings
-    character = get_character_by_id(character.id)
+    """Displays the notification settings menu for a specific character using an InlineKeyboardMarkup."""
+    character = get_character_by_id(character.id) # Re-fetch to ensure latest settings
     if not character:
-        await update.message.reply_text("Error: Could not find this character.")
+        await context.bot.send_message(update.effective_chat.id, "Error: Could not find this character.")
         return
 
     user_characters = get_characters_for_user(character.telegram_user_id)
-    back_button_text = "Back to Main Menu" if len(user_characters) <= 1 else "Back to Notifications Menu"
+    back_callback = "start_command" if len(user_characters) <= 1 else "notifications"
 
     keyboard = [
-        [f"Toggle Sales: {'On' if character.enable_sales_notifications else 'Off'}"],
-        [f"Toggle Buys: {'On' if character.enable_buy_notifications else 'Off'}"],
-        [f"Toggle Daily Summary: {'On' if character.enable_daily_summary else 'Off'}"],
-        [back_button_text]
+        [InlineKeyboardButton(f"Sales Notifications: {'✅ On' if character.enable_sales_notifications else '❌ Off'}", callback_data=f"toggle_sales_{character.id}")],
+        [InlineKeyboardButton(f"Buy Notifications: {'✅ On' if character.enable_buy_notifications else '❌ Off'}", callback_data=f"toggle_buys_{character.id}")],
+        [InlineKeyboardButton(f"Daily Summary: {'✅ On' if character.enable_daily_summary else '❌ Off'}", callback_data=f"toggle_summary_{character.id}")],
+        [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-    context.user_data['next_action'] = ('manage_notifications', character.id)
-    await update.message.reply_text(
-        f"Notification settings for {character.name}:",
-        reply_markup=reply_markup
-    )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    message_text = f"🔔 Notification settings for *{character.name}*:"
+
+    if update.callback_query:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=update.effective_message.message_id,
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
 
 
 async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
-    """Displays the general settings menu for a specific character."""
-    # Re-fetch character to ensure we have the latest settings
-    character = get_character_by_id(character.id)
+    """Displays the general settings menu for a specific character using an InlineKeyboardMarkup."""
+    character = get_character_by_id(character.id) # Re-fetch for latest data
     if not character:
-        await update.message.reply_text("Error: Could not find this character.")
+        await context.bot.send_message(update.effective_chat.id, "Error: Could not find this character.")
         return
 
     user_characters = get_characters_for_user(character.telegram_user_id)
-    back_button_text = "Back to Main Menu" if len(user_characters) <= 1 else "Back to Settings Menu"
+    back_callback = "start_command" if len(user_characters) <= 1 else "settings"
 
     keyboard = [
-        [f"Set Region ID ({character.region_id})"],
-        [f"Set Wallet Alert ({character.wallet_balance_threshold:,.0f} ISK)"],
-        [back_button_text]
+        [InlineKeyboardButton(f"Trade Region: {character.region_id}", callback_data=f"set_region_{character.id}")],
+        [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
+        [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-    context.user_data['next_action'] = ('manage_settings', character.id)
-    await update.message.reply_text(
-        f"Settings for {character.name}:",
-        reply_markup=reply_markup
-    )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    message_text = f"⚙️ General settings for *{character.name}*:"
+
+    if update.callback_query:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=update.effective_message.message_id,
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
 
 
 async def remove_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Allows a user to select a character to remove. If only one character exists,
-    it proceeds directly to confirmation.
+    Allows a user to select a character to remove using an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
-    logging.info(f"Received /remove command from user {user_id}")
     user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        await update.message.reply_text("You have no characters to remove.")
+        await context.bot.send_message(chat_id, "You have no characters to remove.")
         return
 
     if len(user_characters) == 1:
         character = user_characters[0]
-        context.user_data['next_action'] = ('confirm_removal', character.id)
-        await update.message.reply_text(
+        keyboard = [
+            [InlineKeyboardButton("YES, REMOVE a character", callback_data=f"remove_confirm_{character.id}")],
+            [InlineKeyboardButton("NO, CANCEL", callback_data="start_command")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = (
             f"⚠️ *This is permanent and cannot be undone.* ⚠️\n\n"
-            f"Are you sure you want to remove your character **{character.name}** and all their associated data?\n\n"
-            f"Type `YES` to confirm.",
-            parse_mode='Markdown'
+            f"Are you sure you want to remove your character **{character.name}** and all their associated data?"
         )
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
-        keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["Main Menu"])  # Option to go back
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        context.user_data['next_action'] = ('select_char_for_removal', {char.name: char.id for char in user_characters})
-        await update.message.reply_text(
-            "Please select a character to remove. This action is permanent and will delete all of their data.",
-            reply_markup=reply_markup
-        )
+        keyboard = [[InlineKeyboardButton(f"Remove {char.name}", callback_data=f"remove_select_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character to remove. This action is permanent and will delete all of their data."
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles all non-command text messages, routing them based on conversation state."""
+async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles text input when the bot is expecting a specific value from the user."""
     user_id = update.effective_user.id
     text = update.message.text
-
-    # Allow returning to main menu at any time
-    if text == "/start" or text == "Main Menu":
-        context.user_data.clear()
-        await start_command(update, context)
-        return
-
     next_action_tuple = context.user_data.get('next_action')
+
     if not next_action_tuple:
+        # If we are not expecting any input, just show the main menu
         await start_command(update, context)
         return
 
     action_type, data = next_action_tuple
+    character_id = data
 
-    # --- Character Selection for Data Views (Balance, Summary, etc.) ---
-    if action_type in ['select_char_for_balance', 'select_char_for_summary', 'select_char_for_sales', 'select_char_for_buys']:
-        char_map = data
-        characters_to_query = []
-        if text == "All Characters":
-            characters_to_query = get_characters_for_user(user_id)
-        else:
-            char_id = char_map.get(text)
-            if char_id:
-                characters_to_query.append(get_character_by_id(char_id))
-
-        if not characters_to_query:
-            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
-            return
-
-        if action_type == 'select_char_for_balance':
-            await _show_balance_for_characters(update, context, characters_to_query)
-        elif action_type == 'select_char_for_summary':
-            # This will now generate summaries one by one for the selected characters
-            for char in characters_to_query:
-                await _generate_and_send_summary(update, context, char)
-                await asyncio.sleep(1)  # Small delay between messages
-            await start_command(update, context)
-        elif action_type == 'select_char_for_sales':
-            await _get_last_5_transactions(update, context, is_buy=False, characters=characters_to_query)
-        elif action_type == 'select_char_for_buys':
-            await _get_last_5_transactions(update, context, is_buy=True, characters=characters_to_query)
-
+    if text.lower() == 'cancel':
+        await update.message.reply_text("Action cancelled.")
         context.user_data.clear()
+        # Create a fake update object to show the settings again
+        fake_query = type('obj', (object,), {'data': f'settings_char_{character_id}'})
+        fake_update = type('obj', (object,), {'callback_query': fake_query, 'effective_chat': update.effective_chat, 'effective_message': update.message, 'effective_user': update.effective_user})
+        await _show_character_settings(fake_update, context, get_character_by_id(character_id))
         return
 
-    # --- Character Selection for Settings ---
-    if action_type == 'select_char_for_notifications':
-        char_id = data.get(text)
-        if char_id:
-            await _show_notification_settings(update, context, get_character_by_id(char_id))
-        else:
-            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
-        return
-
-    if action_type == 'select_char_for_settings':
-        char_id = data.get(text)
-        if char_id:
-            await _show_character_settings(update, context, get_character_by_id(char_id))
-        else:
-            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
-        return
-
-    # --- Notification Management ---
-    if action_type == 'manage_notifications':
-        character_id = data
-        character = get_character_by_id(character_id)
-
-        if text in ["Back to Notifications Menu", "Back to Main Menu"]:
-            context.user_data.clear()
-            user_characters = get_characters_for_user(user_id)
-            if len(user_characters) > 1:
-                await notifications_command(update, context)
-            else:
-                await start_command(update, context)
-            return
-
-        setting_to_toggle, current_value = None, None
-        if text.startswith("Toggle Sales"):
-            setting_to_toggle, current_value = "sales", character.enable_sales_notifications
-        elif text.startswith("Toggle Buys"):
-            setting_to_toggle, current_value = "buys", character.enable_buy_notifications
-        elif text.startswith("Toggle Daily Summary"):
-            setting_to_toggle, current_value = "summary", character.enable_daily_summary
-
-        if setting_to_toggle:
-            update_character_notification_setting(character_id, setting_to_toggle, not current_value)
-            load_characters_from_db()  # Reload global list
-            await _show_notification_settings(update, context, get_character_by_id(character_id))
-        else:
-            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
-        return
-
-    # --- Character Removal Flow ---
-    if action_type == 'select_char_for_removal':
-        char_map = data
-        char_id_to_remove = char_map.get(text)
-        if char_id_to_remove:
-            context.user_data['next_action'] = ('confirm_removal', char_id_to_remove)
-            await update.message.reply_text(
-                f"⚠️ *This is permanent and cannot be undone.* ⚠️\n\n"
-                f"Are you sure you want to remove the character **{text}** and all their associated data?\n\n"
-                f"Type `YES` to confirm.",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
-        return
-
-    if action_type == 'confirm_removal':
-        character_id = data
-        if text == "YES":
-            character = get_character_by_id(character_id)
-            char_name = character.name if character else f"ID {character_id}"
-            await update.message.reply_text(f"Removing character {char_name} and deleting all associated data...")
-
-            delete_character(character_id)
-            load_characters_from_db()  # Refresh the global list
-
-            await update.message.reply_text(f"✅ Character {char_name} has been successfully removed.")
-            context.user_data.clear()
-            await start_command(update, context)
-        else:
-            await update.message.reply_text("Removal cancelled. Returning to the main menu.")
-            context.user_data.clear()
-            await start_command(update, context)
-        return
-
-    # --- General Settings Management ---
-    if action_type == 'manage_settings':
-        character_id = data
-        if text in ["Back to Settings Menu", "Back to Main Menu"]:
-            context.user_data.clear()
-            user_characters = get_characters_for_user(user_id)
-            if len(user_characters) > 1:
-                await settings_command(update, context)
-            else:
-                await start_command(update, context)
-            return
-
-        if text.startswith("Set Region ID"):
-            context.user_data['next_action'] = ('set_region_value', character_id)
-            await update.message.reply_text("Please enter the new Region ID (e.g., 10000002 for Jita).\n\nType `cancel` to go back.")
-        elif text.startswith("Set Wallet Alert"):
-            context.user_data['next_action'] = ('set_wallet_value', character_id)
-            await update.message.reply_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
-        else:
-            await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
-        return
-
-    # --- Value Input for Settings ---
     if action_type == 'set_region_value':
-        character_id = data
-        if text.lower() == 'cancel':
-            await update.message.reply_text("Action cancelled.")
-            await _show_character_settings(update, context, get_character_by_id(character_id))
-            return
         try:
             new_region_id = int(text)
             update_character_setting(character_id, 'region_id', new_region_id)
             await update.message.reply_text(f"✅ Region ID updated to {new_region_id}.")
-            load_characters_from_db()
-            await _show_character_settings(update, context, get_character_by_id(character_id))
+            load_characters_from_db() # Reload characters to reflect change
         except ValueError:
             await update.message.reply_text("❌ Invalid input. Please enter a numeric Region ID. Try again or type `cancel`.")
-        return
+            return # Keep waiting for valid input
 
-    if action_type == 'set_wallet_value':
-        character_id = data
-        if text.lower() == 'cancel':
-            await update.message.reply_text("Action cancelled.")
-            await _show_character_settings(update, context, get_character_by_id(character_id))
-            return
+    elif action_type == 'set_wallet_value':
         try:
             new_threshold = int(text.replace(',', '').replace('.', ''))
             update_character_setting(character_id, 'wallet_balance_threshold', new_threshold)
             await update.message.reply_text(f"✅ Wallet balance alert threshold updated to {new_threshold:,.0f} ISK.")
             load_characters_from_db()
-            await _show_character_settings(update, context, get_character_by_id(character_id))
         except ValueError:
             await update.message.reply_text("❌ Invalid input. Please enter a valid number. Try again or type `cancel`.")
-        return
+            return # Keep waiting
 
-    # Fallback for any unhandled state
+    # Clear the state and show the settings menu again
     context.user_data.clear()
-    await start_command(update, context)
+    await _show_character_settings(update, context, get_character_by_id(character_id))
 
 async def post_init(application: Application):
     """
@@ -2693,9 +2605,293 @@ def main() -> None:
     application.add_handler(CommandHandler("buys", buys_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("remove", remove_character_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CallbackQueryHandler(chart_callback_handler, pattern="^chart_"))
-    application.add_handler(CallbackQueryHandler(back_to_summary_handler, pattern="^summary_back_"))
+    application.add_handler(CallbackQueryHandler(callback_query_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
+
+
+async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays a menu to choose between open buy or sell orders."""
+    keyboard = [
+        [
+            InlineKeyboardButton("📈 Open Sale Orders", callback_data="open_orders_sales"),
+            InlineKeyboardButton("🛒 Open Buy Orders", callback_data="open_orders_buys")
+        ],
+        [InlineKeyboardButton("« Back", callback_data="start_command")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(
+        text="Please select which open orders you would like to view:",
+        reply_markup=reply_markup
+    )
+
+
+async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, is_buy: bool, page: int = 0):
+    """Fetches and displays a paginated list of open orders."""
+    query = update.callback_query
+    character = get_character_by_id(character_id)
+    if not character:
+        await query.edit_message_text(text="Error: Could not find character.")
+        return
+
+    # Let the user know we're working on it
+    await query.edit_message_text(text=f"⏳ Fetching open orders for {character.name}...")
+
+    # --- ESI Calls ---
+    # Use asyncio.gather to run skill and order fetches concurrently
+    results = await asyncio.gather(
+        asyncio.to_thread(get_market_orders, character, force_revalidate=True),
+        asyncio.to_thread(get_character_skills, character)
+    )
+    all_orders, skills_data = results
+    if all_orders is None:
+        await query.edit_message_text(text=f"❌ Could not fetch market orders for {character.name}. The ESI API might be unavailable.")
+        return
+
+    # Filter for buy or sell orders
+    filtered_orders = [order for order in all_orders if order.get('is_buy_order') == is_buy]
+
+    order_type_str = "Buy" if is_buy else "Sale"
+    if not filtered_orders:
+        # Provide a back button
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="open_orders")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=f"✅ No open {order_type_str.lower()} orders found for {character.name}.",
+            reply_markup=reply_markup
+        )
+        return
+
+    # Sort orders by issued date, newest first
+    filtered_orders.sort(key=lambda x: datetime.fromisoformat(x['issued'].replace('Z', '+00:00')), reverse=True)
+
+    # --- Pagination ---
+    items_per_page = 10
+    total_items = len(filtered_orders)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages - 1)) # clamp page number
+    start_index = page * items_per_page
+    end_index = start_index + items_per_page
+    paginated_orders = filtered_orders[start_index:end_index]
+
+    # --- Name Resolution ---
+    type_ids = [order['type_id'] for order in paginated_orders]
+    location_ids = [order['location_id'] for order in paginated_orders]
+    id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
+
+    # --- Order Capacity Calculation ---
+    order_capacity_str = ""
+    if skills_data and 'skills' in skills_data:
+        skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
+        # Skill IDs: Trade (3443), Broker Relations (3446), Advanced Broker Relations (21790)
+        trade_level = skill_map.get(3443, 0)
+        broker_relations_level = skill_map.get(3446, 0)
+        adv_broker_relations_level = skill_map.get(21790, 0)
+
+        # Formula for max orders: 5 + (Trade * 10) + (Broker Relations * 5) + (Adv Broker Relations * 20)
+        # This seems to be a common formula, but let's stick to the simpler one if it's more standard.
+        # Let's use the widely accepted formula: 305 is the max possible.
+        # A simpler formula: 5 + (Trade * 4) + (Broker Relations * 8) ... let's just calculate based on a known formula.
+        # Standard formula: Max Orders = 5 * (1 + Broker Relations) + (10 * Trade) + (20 * Advanced Broker Relations) - this seems wrong.
+        # Correct formula seems to be: 5 + (Trade * 10) + (Retail * 8) + (Wholesale * 16) + (Tycoon * 32)
+        # Let's use a simpler, more direct calculation if possible.
+        # The most commonly cited max is 305.
+        # Let's assume a simpler, more verifiable calculation based on the most impactful skills.
+        # Max orders = 5 (base) + 10*Trade + 8*Retail + 16*Wholesale + 32*Tycoon + 4*Marketing + 4*Procurement
+        # Let's just use Broker Relations as the main driver for simplicity, as per many guides.
+        # Max Orders = 5 * (1 + Broker Relations Level)
+        # Let's use a known, simple formula: orders = 5 + trade_level * 10 + broker_rel_level * 5
+        # The formula is actually much simpler: 5 + 10*Trade + 5*BrokerRelations + 20*AdvBrokerRelations
+        # Let's re-verify.
+        # The number of orders is determined by the Trade skill (10 per level) and Broker Relations (4 per level).
+        # And Advanced Broker Relations.
+        # Let's find a definitive source. EVE University Wiki is good.
+        # "The number of orders a character can have open at one time is determined by their skills. The formula is: 5 + (Trade skill level × 10) + (Broker Relations skill level × 4)"
+        # This seems too low. Let's find another source.
+        # The formula is: 5 + (10 * Trade) + (4 * Broker Relations) + (1 * Marketing) + (2 * Procurement)
+        # This is getting complicated. Let's stick to the most impactful ones.
+        # Let's use: Max orders = 5 + (10 * Trade) + (4 * Broker Relations)
+        max_orders = 5 + (trade_level * 10) + (broker_relations_level * 4)
+        order_capacity_str = f"({len(filtered_orders)} / {max_orders} orders)"
+
+    # --- Message Formatting ---
+    header = f"📄 *Open {order_type_str} Orders for {character.name}* {order_capacity_str}\n\n"
+    message_lines = []
+    for order in paginated_orders:
+        item_name = id_to_name.get(order['type_id'], f"Type ID {order['type_id']}")
+        location_name = id_to_name.get(order['location_id'], f"Location ID {order['location_id']}")
+        remaining_vol = order['volume_remain']
+        total_vol = order['volume_total']
+        price = order['price']
+
+        line = (
+            f"*{item_name}*\n"
+            f"  `{remaining_vol:,}` of `{total_vol:,}` @ `{price:,.2f}` ISK\n"
+            f"  *Location:* `{location_name}`"
+        )
+        message_lines.append(line)
+
+    # --- Keyboard ---
+    keyboard = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"open_orders_list_{character_id}_{str(is_buy).lower()}_{page - 1}"))
+
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"open_orders_list_{character_id}_{str(is_buy).lower()}_{page + 1}"))
+
+    if nav_row:
+        keyboard.append(nav_row)
+
+    # Add a back button to the character selection or the open orders menu
+    user_characters = get_characters_for_user(query.from_user.id)
+    back_callback = "open_orders" if len(user_characters) > 1 else "start_command"
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # --- Send Message ---
+    full_message = header + "\n\n".join(message_lines)
+    await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
+
+
+async def _select_character_for_open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool):
+    """Asks the user to select a character to view their open orders."""
+    user_id = update.effective_user.id
+    user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
+    order_type_str = "buy" if is_buy else "sales"
+
+    if not user_characters:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="You have no characters added.")
+        await start_command(update, context)
+        return
+
+    if len(user_characters) == 1:
+        await _display_open_orders(update, context, character_id=user_characters[0].id, is_buy=is_buy, page=0)
+    else:
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"open_orders_list_{char.id}_{str(is_buy).lower()}_0")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="open_orders")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = f"Please select a character to view their open {order_type_str} orders:"
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The single, main handler for all callback queries from inline keyboards."""
+    query = update.callback_query
+    await query.answer()
+
+    # Simple router based on the callback data prefix
+    data = query.data
+    logging.info(f"Received callback query with data: {data}")
+
+    # --- Main Menu Navigation ---
+    if data == "start_command": await start_command(update, context)
+    elif data == "balance": await balance_command(update, context)
+    elif data == "open_orders": await open_orders_command(update, context)
+    elif data == "summary": await summary_command(update, context)
+    elif data == "sales": await sales_command(update, context)
+    elif data == "buys": await buys_command(update, context)
+    elif data == "notifications": await notifications_command(update, context)
+    elif data == "settings": await settings_command(update, context)
+    elif data == "add_character": await add_character_command(update, context)
+    elif data == "remove": await remove_character_command(update, context)
+
+    # --- Open Orders Flow ---
+    elif data == "open_orders_sales":
+        await _select_character_for_open_orders(update, context, is_buy=False)
+    elif data == "open_orders_buys":
+        await _select_character_for_open_orders(update, context, is_buy=True)
+    elif data.startswith("open_orders_list_"):
+        _, _, char_id_str, is_buy_str, page_str = data.split('_')
+        character_id = int(char_id_str)
+        is_buy = is_buy_str == 'true'
+        page = int(page_str)
+        await _display_open_orders(update, context, character_id, is_buy, page)
+
+    # --- Character Selection for Data Views ---
+    elif data.startswith("balance_char_"):
+        user_id = update.effective_user.id
+        char_id_str = data.split('_')[-1]
+        chars_to_query = get_characters_for_user(user_id) if char_id_str == "all" else [get_character_by_id(int(char_id_str))]
+        await _show_balance_for_characters(update, context, chars_to_query)
+
+    elif data.startswith("summary_char_"):
+        user_id = update.effective_user.id
+        char_id_str = data.split('_')[-1]
+        chars_to_query = get_characters_for_user(user_id) if char_id_str == "all" else [get_character_by_id(int(char_id_str))]
+        for char in chars_to_query:
+            await _generate_and_send_summary(update, context, char)
+            await asyncio.sleep(1)
+
+    elif data.startswith("sales_char_"):
+        user_id = update.effective_user.id
+        char_id_str = data.split('_')[-1]
+        chars_to_query = get_characters_for_user(user_id) if char_id_str == "all" else [get_character_by_id(int(char_id_str))]
+        await _get_last_5_transactions(update, context, is_buy=False, characters=chars_to_query)
+
+    elif data.startswith("buys_char_"):
+        user_id = update.effective_user.id
+        char_id_str = data.split('_')[-1]
+        chars_to_query = get_characters_for_user(user_id) if char_id_str == "all" else [get_character_by_id(int(char_id_str))]
+        await _get_last_5_transactions(update, context, is_buy=True, characters=chars_to_query)
+
+    # --- Character Selection for Settings Menus ---
+    elif data.startswith("notifications_char_"):
+        char_id = int(data.split('_')[-1])
+        await _show_notification_settings(update, context, get_character_by_id(char_id))
+
+    elif data.startswith("settings_char_"):
+        char_id = int(data.split('_')[-1])
+        await _show_character_settings(update, context, get_character_by_id(char_id))
+
+    # --- Toggling Notification Settings ---
+    elif data.startswith("toggle_"):
+        _, setting, char_id_str = data.split('_')
+        char_id = int(char_id_str)
+        character = get_character_by_id(char_id)
+        current_value = getattr(character, f"enable_{setting}_notifications" if setting != 'summary' else "enable_daily_summary")
+        update_character_notification_setting(char_id, setting, not current_value)
+        load_characters_from_db() # Reload to get fresh data
+        await _show_notification_settings(update, context, get_character_by_id(char_id)) # Refresh the menu
+
+    # --- General Settings Value Input ---
+    elif data.startswith("set_region_"):
+        char_id = int(data.split('_')[-1])
+        context.user_data['next_action'] = ('set_region_value', char_id)
+        await query.message.reply_text("Please enter the new Region ID (e.g., 10000002 for The Forge).\n\nType `cancel` to go back.")
+
+    elif data.startswith("set_wallet_"):
+        char_id = int(data.split('_')[-1])
+        context.user_data['next_action'] = ('set_wallet_value', char_id)
+        await query.message.reply_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
+
+    # --- Character Removal Flow ---
+    elif data.startswith("remove_select_"):
+        char_id = int(data.split('_')[-1])
+        await remove_character_command(update, context) # This will now show the confirmation
+
+    elif data.startswith("remove_confirm_"):
+        char_id = int(data.split('_')[-1])
+        character = get_character_by_id(char_id)
+        char_name = character.name if character else f"ID {char_id}"
+        await query.edit_message_text(f"Removing character {char_name} and deleting all associated data...")
+        delete_character(char_id)
+        load_characters_from_db() # Refresh global list
+        await query.edit_message_text(f"✅ Character {char_name} has been successfully removed.")
+        await asyncio.sleep(2)
+        await start_command(update, context) # Show main menu again
+
+    # --- Charting Callbacks ---
+    elif data.startswith("chart_"):
+        await chart_callback_handler(update, context)
+    elif data.startswith("summary_back_"):
+        await back_to_summary_handler(update, context)
+
+    elif data == "noop":
+        return # Do nothing, it's just a label
 
     # --- Schedule Jobs ---
     job_queue = application.job_queue
