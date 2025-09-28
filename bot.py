@@ -1739,7 +1739,7 @@ async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         # If multiple, ask which one to manage
         keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["/start"]) # Option to go back
+        keyboard.append(["Main Menu"]) # Option to go back
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         context.user_data['next_action'] = ('select_char_for_notifications', {char.name: char.id for char in user_characters})
         await update.message.reply_text(
@@ -1826,7 +1826,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         keyboard = [[char.name] for char in user_characters]
         keyboard.append(["All Characters"])
-        keyboard.append(["/start"])  # Option to go back
+        keyboard.append(["Main Menu"])  # Option to go back
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         context.user_data['next_action'] = ('select_char_for_balance', {char.name: char.id for char in user_characters})
         await update.message.reply_text(
@@ -1868,7 +1868,7 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         keyboard = [[char.name] for char in user_characters]
         keyboard.append(["All Characters"])
-        keyboard.append(["/start"])
+        keyboard.append(["Main Menu"])
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         context.user_data['next_action'] = ('select_char_for_summary', {char.name: char.id for char in user_characters})
         await update.message.reply_text(
@@ -1953,7 +1953,7 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         keyboard = [[char.name] for char in user_characters]
         keyboard.append(["All Characters"])
-        keyboard.append(["/start"])
+        keyboard.append(["Main Menu"])
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         context.user_data['next_action'] = ('select_char_for_sales', {char.name: char.id for char in user_characters})
         await update.message.reply_text(
@@ -1982,7 +1982,7 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         keyboard = [[char.name] for char in user_characters]
         keyboard.append(["All Characters"])
-        keyboard.append(["/start"])
+        keyboard.append(["Main Menu"])
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         context.user_data['next_action'] = ('select_char_for_buys', {char.name: char.id for char in user_characters})
         await update.message.reply_text(
@@ -2011,7 +2011,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     else:
         # If multiple, ask which one to manage
         keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["/start"]) # Option to go back
+        keyboard.append(["Main Menu"]) # Option to go back
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         context.user_data['next_action'] = ('select_char_for_settings', {char.name: char.id for char in user_characters})
         await update.message.reply_text(
@@ -2095,7 +2095,7 @@ async def remove_character_command(update: Update, context: ContextTypes.DEFAULT
         )
     else:
         keyboard = [[char.name] for char in user_characters]
-        keyboard.append(["/start"])  # Option to go back
+        keyboard.append(["Main Menu"])  # Option to go back
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         context.user_data['next_action'] = ('select_char_for_removal', {char.name: char.id for char in user_characters})
         await update.message.reply_text(
@@ -2110,7 +2110,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = update.message.text
 
     # Allow returning to main menu at any time
-    if text == "/start":
+    if text == "/start" or text == "Main Menu":
         context.user_data.clear()
         await start_command(update, context)
         return
