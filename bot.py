@@ -1029,6 +1029,22 @@ def get_market_history(type_id, region_id, force_revalidate=False):
     history_data = make_esi_request(url, params=params, force_revalidate=force_revalidate)
     return history_data[-1] if history_data else None
 
+def get_character_public_info(character_id: int):
+    """Fetches public character information from ESI."""
+    url = f"https://esi.evetech.net/v5/characters/{character_id}/"
+    return make_esi_request(url)
+
+def get_corporation_info(corporation_id: int):
+    """Fetches public corporation information from ESI."""
+    url = f"https://esi.evetech.net/v5/corporations/{corporation_id}/"
+    return make_esi_request(url)
+
+def get_alliance_info(alliance_id: int):
+    """Fetches public alliance information from ESI."""
+    url = f"https://esi.evetech.net/v4/alliances/{alliance_id}/"
+    return make_esi_request(url)
+
+
 def get_names_from_ids(id_list, character: Character = None):
     """
     Resolves a list of IDs to names, using a local database cache and authenticated
@@ -2654,6 +2670,7 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
     back_callback = "start_command" if len(user_characters) <= 1 else "settings"
 
     keyboard = [
+        [InlineKeyboardButton("ℹ️ Character Info", callback_data=f"character_info_{character.id}")],
         [InlineKeyboardButton(f"Trade Region: {character.region_id}", callback_data=f"set_region_{character.id}")],
         [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
         [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
@@ -2677,6 +2694,68 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
             reply_markup=reply_markup,
             parse_mode='Markdown'
         )
+
+
+async def _show_character_info(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
+    """Fetches and displays public information for a character."""
+    query = update.callback_query
+    await query.edit_message_text(f"⏳ Fetching public info for {character.name}...")
+
+    # --- ESI Calls ---
+    public_info = await asyncio.to_thread(get_character_public_info, character.id)
+
+    if not public_info:
+        await query.edit_message_text(f"❌ Could not fetch public info for {character.name}.")
+        return
+
+    # Concurrently fetch corporation and alliance info
+    tasks = [asyncio.to_thread(get_corporation_info, public_info['corporation_id'])]
+    if 'alliance_id' in public_info:
+        tasks.append(asyncio.to_thread(get_alliance_info, public_info['alliance_id']))
+
+    results = await asyncio.gather(*tasks)
+    corp_info = results[0]
+    alliance_info = results[1] if 'alliance_id' in public_info else None
+
+    # --- Formatting ---
+    char_name = public_info.get('name', character.name)
+    try:
+        birthday = datetime.fromisoformat(public_info['birthday'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+    except (ValueError, KeyError):
+        birthday = "Unknown"
+    security_status = f"{public_info.get('security_status', 0):.2f}"
+    corp_name = corp_info.get('name', 'Unknown Corporation') if corp_info else 'Unknown Corporation'
+
+    caption_lines = [
+        f"*{char_name}*",
+        f"`Character ID: {character.id}`",
+        f"Birthday: {birthday}",
+        f"Security Status: {security_status}",
+        f"Corporation: {corp_name}",
+    ]
+
+    if alliance_info:
+        alliance_name = alliance_info.get('name', 'Unknown Alliance')
+        caption_lines.append(f"Alliance: {alliance_name}")
+
+    caption = "\n".join(caption_lines)
+    portrait_url = f"https://images.evetech.net/characters/{character.id}/portrait?size=512"
+
+    # --- Sending Photo ---
+    # Delete the "loading" message and send the photo message
+    await query.message.delete()
+
+    back_callback = f"settings_char_{character.id}"
+    keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=portrait_url,
+        caption=caption,
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
 
 
 async def remove_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3187,6 +3266,11 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await _display_historical_transactions(update, context, character_id, is_buy, page)
 
     # --- Character Selection for Settings Menus ---
+    elif data.startswith("character_info_"):
+        char_id = int(data.split('_')[-1])
+        character = get_character_by_id(char_id)
+        await _show_character_info(update, context, character)
+
     elif data.startswith("notifications_char_"):
         char_id = int(data.split('_')[-1])
         await _show_notification_settings(update, context, get_character_by_id(char_id))
