@@ -2173,11 +2173,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if text == "Back to Notifications Menu":
             context.user_data.clear()
-            user_characters = get_characters_for_user(user_id)
-            if len(user_characters) > 1:
-                await notifications_command(update, context)
-            else:
-                await start_command(update, context)
+            await notifications_command(update, context)
             return
 
         setting_to_toggle, current_value = None, None
@@ -2240,11 +2236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         character_id = data
         if text == "Back to Settings Menu":
             context.user_data.clear()
-            user_characters = get_characters_for_user(user_id)
-            if len(user_characters) > 1:
-                await settings_command(update, context)
-            else:
-                await start_command(update, context)
+            await settings_command(update, context)
             return
 
         if text.startswith("Set Region ID"):
