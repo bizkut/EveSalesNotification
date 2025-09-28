@@ -117,8 +117,7 @@ All interaction with the bot is handled through a clean, inline button-based men
     -   **📈 View Sales**: Displays a detailed, paginated history of all sales, including profit and fee calculations.
     -   **🛒 View Buys**: Displays a detailed, paginated history of all buy transactions.
     -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
-    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region and wallet balance alerts.
-    -   **🔔 Notifications**: View and toggle master notification settings for each of your characters.
+    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, wallet balance alerts, and notification preferences (sales, buys, daily summary).
     -   **➕ Add Character**: Starts the process of adding a new character.
     -   **🗑️ Remove Character**: Starts the process of removing a character and all of their associated data.
 3.  **Character Selection**: If you have multiple characters, the bot will present you with a new inline menu to choose which character you want to interact with after you select an action.
