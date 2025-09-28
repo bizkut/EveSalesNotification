@@ -2034,8 +2034,7 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         [f"Toggle Immediate Sales: {'On' if character.enable_immediate_sales_notifications else 'Off'}"],
         [f"Toggle Immediate Buys: {'On' if character.enable_immediate_buy_notifications else 'Off'}"],
         [f"Toggle Daily Summary: {'On' if character.enable_daily_summary else 'Off'}"],
-        ["Back to Notifications Menu"],
-        ["/start"]
+        ["Back to Notifications Menu"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     context.user_data['next_action'] = ('manage_notifications', character.id)
@@ -2056,8 +2055,7 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
     keyboard = [
         [f"Set Region ID ({character.region_id})"],
         [f"Set Wallet Alert ({character.wallet_balance_threshold:,.0f} ISK)"],
-        ["Back to Settings Menu"],
-        ["/start"]
+        ["Back to Settings Menu"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     context.user_data['next_action'] = ('manage_settings', character.id)
