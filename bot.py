@@ -253,6 +253,17 @@ def setup_database():
             )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_journal_char_date ON historical_journal_entries (character_id, date DESC);")
+
+            # Migration: Add journal_ref_id to historical_journal_entries table if it doesn't exist
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'historical_journal_entries' AND column_name = 'journal_ref_id'
+            """)
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'journal_ref_id' column to historical_journal_entries table...")
+                cursor.execute("ALTER TABLE historical_journal_entries ADD COLUMN journal_ref_id BIGINT;")
+                logging.info("Migration for 'journal_ref_id' complete.")
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_journal_ref_id ON historical_journal_entries (journal_ref_id);")
 
 
