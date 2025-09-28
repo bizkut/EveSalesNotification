@@ -1299,6 +1299,8 @@ async def master_wallet_transaction_poll(application: Application):
                     if not recent_transactions:
                         continue
 
+                    logging.debug(f"Full transaction data for {character.name}: {json.dumps(recent_transactions, indent=2)}")
+
                     # Find which of these are genuinely new by checking against our historical DB
                     tx_ids_from_esi = [tx['transaction_id'] for tx in recent_transactions]
                     existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
@@ -1316,6 +1318,7 @@ async def master_wallet_transaction_poll(application: Application):
                     # --- Now handle journal entries ---
                     recent_journal_entries = get_wallet_journal(character)
                     if recent_journal_entries:
+                        logging.debug(f"Full journal data for {character.name}: {json.dumps(recent_journal_entries, indent=2)}")
                         journal_ids_from_esi = [e['id'] for e in recent_journal_entries]
                         existing_journal_ids = get_ids_from_db('historical_journal_entries', 'entry_id', character.id, journal_ids_from_esi)
                         new_journal_entry_ids = set(journal_ids_from_esi) - existing_journal_ids
