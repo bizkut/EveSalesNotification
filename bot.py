@@ -2166,8 +2166,59 @@ def generate_yearly_chart(character_id: int, year: int):
     return buf
 
 
+async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job to generate and send a chart in the background."""
+    job = context.job
+    chat_id = job.chat_id
+    character_id = job.data['character_id']
+    chart_type = job.data['chart_type']
+    year = job.data['year']
+    generating_message_id = job.data['generating_message_id']
+
+    character = get_character_by_id(character_id)
+    if not character:
+        await context.bot.edit_message_text(
+            text="Error: Could not find character for this chart.",
+            chat_id=chat_id,
+            message_id=generating_message_id
+        )
+        return
+
+    chart_buffer = None
+    try:
+        if chart_type == 'monthly':
+            chart_buffer = generate_monthly_chart(character_id)
+        elif chart_type == 'yearly':
+            chart_buffer = generate_yearly_chart(character_id, year)
+    except Exception as e:
+        logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
+        await context.bot.edit_message_text(
+            text=f"An error occurred while generating the chart for {character.name}.",
+            chat_id=chat_id,
+            message_id=generating_message_id
+        )
+        return
+
+    # Delete the "Generating..." message first
+    await context.bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
+
+    if chart_buffer:
+        # Send the photo as a new message
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=chart_buffer,
+            caption=f"{chart_type.capitalize()} chart for {character.name}"
+        )
+    else:
+        # Send a new message indicating no data was found
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Could not generate {chart_type} chart for {character.name}. No data available for the period."
+        )
+
+
 async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles callbacks from the chart buttons."""
+    """Handles callbacks from the chart buttons by scheduling a background job."""
     query = update.callback_query
     await query.answer()
 
@@ -2178,45 +2229,28 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         character_id = int(parts[2])
         year = int(parts[3]) if len(parts) > 3 else datetime.now(timezone.utc).year
 
-
         if action != 'chart':
-            return # Not for us
+            return
 
     except (IndexError, ValueError):
         await query.edit_message_text(text="Invalid chart request.")
         return
-
 
     character = get_character_by_id(character_id)
     if not character:
         await query.edit_message_text(text="Error: Could not find character for this chart.")
         return
 
-    # Let the user know we are working on it
-    await query.edit_message_text(text=f"Generating {chart_type} chart for {character.name}...")
+    # Edit the original message to show that we're working on it.
+    await query.edit_message_text(text=f"⏳ Generating {chart_type} chart for {character.name}. This may take a moment...")
 
-    chart_buffer = None
-    try:
-        if chart_type == 'monthly':
-            chart_buffer = generate_monthly_chart(character_id)
-        elif chart_type == 'yearly':
-            chart_buffer = generate_yearly_chart(character_id, year)
-        else:
-            await query.edit_message_text(text="Unknown chart type.")
-            return
-    except Exception as e:
-        logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
-        await query.edit_message_text(text=f"An error occurred while generating the chart for {character.name}.")
-        return
-
-
-    if chart_buffer:
-        # Delete the "Generating..." message and send the photo
-        await query.message.delete()
-        await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart_buffer, caption=f"{chart_type.capitalize()} chart for {character.name}")
-    else:
-        # Edit the message to show no data was found
-        await query.edit_message_text(text=f"Could not generate {chart_type} chart for {character.name}. No data available for the period.")
+    job_data = {
+        'character_id': character_id,
+        'chart_type': chart_type,
+        'year': year,
+        'generating_message_id': query.message.message_id
+    }
+    context.job_queue.run_once(generate_chart_job, when=1, data=job_data, chat_id=query.message.chat_id)
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
