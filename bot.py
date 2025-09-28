@@ -1887,12 +1887,16 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
     await update.message.reply_text(f"Fetching recent {action} for {char_names}...")
 
     all_transactions = []
+    all_order_history = []
     for char in characters:
         transactions = get_wallet_transactions(char)
         if transactions:
             for tx in transactions:
                 tx['character_name'] = char.name # Add character name for context
             all_transactions.extend(transactions)
+        order_history = get_market_orders_history(char)
+        if order_history:
+            all_order_history.extend(order_history)
 
     if not all_transactions:
         await update.message.reply_text(f"No transaction history found for {char_names}.")
@@ -1908,9 +1912,22 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(f"No recent {action} found for {char_names}.")
         return
 
+    # Correct the location ID for each transaction by matching it to a historical order
+    for tx in filtered_tx:
+        if all_order_history:
+            candidate_orders = [
+                o for o in all_order_history
+                if o.get('type_id') == tx.get('type_id') and
+                   o.get('is_buy_order') == tx.get('is_buy') and
+                   o.get('issued') and
+                   datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
+            ]
+            if candidate_orders:
+                best_match_order = max(candidate_orders, key=lambda o: datetime.fromisoformat(o['issued'].replace('Z', '+00:00')))
+                tx['location_id'] = best_match_order.get('location_id', tx['location_id'])
+
     item_ids = [tx['type_id'] for tx in filtered_tx]
     loc_ids = [tx['location_id'] for tx in filtered_tx]
-    # Pass the first character for authenticated calls to resolve structure names
     id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)), character=characters[0])
 
     title_char_name = char_names if len(characters) == 1 else "All Characters"
