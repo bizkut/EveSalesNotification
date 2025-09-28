@@ -1159,8 +1159,9 @@ async def master_wallet_transaction_poll(application: Application):
                             # and were issued before the transaction occurred.
                             candidate_orders = [
                                 o for o in order_history
-                                if o['type_id'] == tx['type_id'] and
-                                   o['is_buy_order'] == tx['is_buy'] and
+                                if o.get('type_id') == tx.get('type_id') and
+                                   o.get('is_buy_order') == tx.get('is_buy') and
+                                   o.get('issued') and
                                    datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
                             ]
 
@@ -2168,7 +2169,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if text == "Back to Notifications Menu":
             context.user_data.clear()
-            await notifications_command(update, context)
+            user_characters = get_characters_for_user(user_id)
+            if len(user_characters) > 1:
+                await notifications_command(update, context)
+            else:
+                await start_command(update, context)
             return
 
         setting_to_toggle, current_value = None, None
@@ -2231,15 +2236,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         character_id = data
         if text == "Back to Settings Menu":
             context.user_data.clear()
-            await settings_command(update, context)
+            user_characters = get_characters_for_user(user_id)
+            if len(user_characters) > 1:
+                await settings_command(update, context)
+            else:
+                await start_command(update, context)
             return
 
         if text.startswith("Set Region ID"):
             context.user_data['next_action'] = ('set_region_value', character_id)
-            await update.message.reply_text("Please enter the new Region ID (e.g., 10000002 for Jita).")
+            await update.message.reply_text("Please enter the new Region ID (e.g., 10000002 for Jita).\n\nType `cancel` to go back.")
         elif text.startswith("Set Wallet Alert"):
             context.user_data['next_action'] = ('set_wallet_value', character_id)
-            await update.message.reply_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).")
+            await update.message.reply_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
         else:
             await update.message.reply_text("Invalid selection. Please use the keyboard or type `/start`.")
         return
@@ -2247,6 +2256,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # --- Value Input for Settings ---
     if action_type == 'set_region_value':
         character_id = data
+        if text.lower() == 'cancel':
+            await update.message.reply_text("Action cancelled.")
+            await _show_character_settings(update, context, get_character_by_id(character_id))
+            return
         try:
             new_region_id = int(text)
             update_character_setting(character_id, 'region_id', new_region_id)
@@ -2254,11 +2267,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             load_characters_from_db()
             await _show_character_settings(update, context, get_character_by_id(character_id))
         except ValueError:
-            await update.message.reply_text("❌ Invalid input. Please enter a numeric Region ID. Try again or type /start.")
+            await update.message.reply_text("❌ Invalid input. Please enter a numeric Region ID. Try again or type `cancel`.")
         return
 
     if action_type == 'set_wallet_value':
         character_id = data
+        if text.lower() == 'cancel':
+            await update.message.reply_text("Action cancelled.")
+            await _show_character_settings(update, context, get_character_by_id(character_id))
+            return
         try:
             new_threshold = int(text.replace(',', '').replace('.', ''))
             update_character_setting(character_id, 'wallet_balance_threshold', new_threshold)
@@ -2266,7 +2283,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             load_characters_from_db()
             await _show_character_settings(update, context, get_character_by_id(character_id))
         except ValueError:
-            await update.message.reply_text("❌ Invalid input. Please enter a valid number. Try again or type /start.")
+            await update.message.reply_text("❌ Invalid input. Please enter a valid number. Try again or type `cancel`.")
         return
 
     # Fallback for any unhandled state
