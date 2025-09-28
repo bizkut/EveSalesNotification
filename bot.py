@@ -3276,9 +3276,8 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     if nav_row:
         keyboard.append(nav_row)
 
-    # Add a back button to the character selection or the open orders menu
-    user_characters = get_characters_for_user(query.from_user.id)
-    back_callback = "open_orders" if len(user_characters) > 1 else "start_command"
+    # Add a back button to go back to the open orders sub-menu
+    back_callback = "open_orders"
     keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
