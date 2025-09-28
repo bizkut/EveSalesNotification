@@ -1709,7 +1709,7 @@ def backfill_all_character_history(character: Character):
 
     # --- Backfill Journal Entries ---
     logging.info(f"Fetching all wallet journal entries for {character.name}...")
-    all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+    all_journal_entries = get_wallet_journal(character, fetch_all=True)
     if all_journal_entries:
         add_historical_journal_entries_to_db(character.id, all_journal_entries)
     else:
