@@ -1935,6 +1935,7 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if len(user_characters) == 1:
         # If only one character, generate the summary directly
         await _generate_and_send_summary(update, context, user_characters[0])
+        await start_command(update, context)
     else:
         # If multiple, prompt for selection
         keyboard = [[char.name] for char in user_characters]
@@ -2499,6 +2500,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             for char in characters_to_query:
                 await _generate_and_send_summary(update, context, char)
                 await asyncio.sleep(1)  # Small delay between messages
+            await start_command(update, context)
         elif action_type == 'select_char_for_sales':
             await _get_last_5_transactions(update, context, is_buy=False, characters=characters_to_query)
         elif action_type == 'select_char_for_buys':
