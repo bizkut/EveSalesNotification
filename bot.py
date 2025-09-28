@@ -1812,10 +1812,33 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                 # Add the character to the global list to be picked up by the master polls
                 CHARACTERS.append(character)
                 logging.info(f"Added new character {character.name} to the polling list after successful data seed.")
+
+                # Create the main menu keyboard to send with the success message
+                keyboard = [
+                    [
+                        InlineKeyboardButton("💰 View Balances", callback_data="balance"),
+                        InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
+                    ],
+                    [
+                        InlineKeyboardButton("📈 View Sales", callback_data="sales"),
+                        InlineKeyboardButton("🛒 View Buys", callback_data="buys")
+                    ],
+                    [
+                        InlineKeyboardButton("📊 Request Summary", callback_data="summary"),
+                        InlineKeyboardButton("⚙️ Settings", callback_data="settings")
+                    ],
+                    [
+                        InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
+                        InlineKeyboardButton("🗑️ Remove", callback_data="remove")
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
                 await send_telegram_message(
                     context,
                     f"✅ Successfully added and synced **{character.name}**! I will now start monitoring their market activity.",
-                    chat_id=character.telegram_user_id
+                    chat_id=character.telegram_user_id,
+                    reply_markup=reply_markup
                 )
             else:
                 # If seeding fails, do NOT add them to the monitoring list.
