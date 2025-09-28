@@ -202,6 +202,26 @@ def setup_database():
                     headers JSONB
                 )
             """)
+
+            # Migration: Add immediate notification columns if they don't exist
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name='characters' AND column_name='enable_immediate_sales_notifications'
+            """)
+            if cursor.fetchone() is None:
+                logging.info("Applying migration: Adding 'enable_immediate_sales_notifications' to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN enable_immediate_sales_notifications BOOLEAN DEFAULT FALSE")
+                logging.info("Migration complete.")
+
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name='characters' AND column_name='enable_immediate_buy_notifications'
+            """)
+            if cursor.fetchone() is None:
+                logging.info("Applying migration: Adding 'enable_immediate_buy_notifications' to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN enable_immediate_buy_notifications BOOLEAN DEFAULT FALSE")
+                logging.info("Migration complete.")
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
