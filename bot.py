@@ -2100,7 +2100,7 @@ def generate_daily_chart_for_month(character_id: int):
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -2169,7 +2169,7 @@ def generate_yearly_chart(character_id: int, year: int):
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight')
+    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
     return buf
