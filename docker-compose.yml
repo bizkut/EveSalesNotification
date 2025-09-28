@@ -23,6 +23,7 @@ services:
     restart: unless-stopped
     command: ["python", "bot.py"]
     environment:
+      - PYTHONUNBUFFERED=1
       - ESI_CLIENT_ID=${ESI_CLIENT_ID}
       - ESI_SECRET_KEY=${ESI_SECRET_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
@@ -43,6 +44,7 @@ services:
     restart: unless-stopped
     command: ["gunicorn", "--bind", "0.0.0.0:5000", "webapp:app"]
     environment:
+      - PYTHONUNBUFFERED=1
       - ESI_CLIENT_ID=${ESI_CLIENT_ID}
       - ESI_SECRET_KEY=${ESI_SECRET_KEY}
       - CALLBACK_URL=${CALLBACK_URL}
