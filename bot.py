@@ -2648,6 +2648,10 @@ async def post_init(application: Application):
     asyncio.create_task(master_order_history_poll(application))
     logging.info("Master polling loops for transactions and orders have been started.")
 
+    # Schedule the job to check for new characters
+    application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
+    logging.info("Scheduled job to check for new characters every 10 seconds.")
+
 
 def main() -> None:
     """Run the bot."""
