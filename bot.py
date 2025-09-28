@@ -1905,19 +1905,6 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
-async def _run_summary_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
-    """Helper to run and send summary for a list of characters."""
-    char_names = ", ".join([c.name for c in characters])
-    await update.message.reply_text(f"Generating summary for {char_names}...")
-
-    for char in characters:
-        # This function sends its own message
-        await run_daily_summary_for_character(char, context)
-        await asyncio.sleep(1) # Be nice to Telegram
-
-    await update.message.reply_text(f"✅ Summaries sent for {char_names}!")
-
-
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Manually triggers the daily summary report. Prompts for character
@@ -1934,7 +1921,12 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if len(user_characters) == 1:
-        await _run_summary_for_characters(update, context, user_characters)
+        char_names = ", ".join([c.name for c in user_characters])
+        await update.message.reply_text(f"Generating summary for {char_names}...")
+        for char in user_characters:
+            await run_daily_summary_for_character(char, context)
+            await asyncio.sleep(1)
+        await update.message.reply_text(f"✅ Summaries sent for {char_names}!")
     else:
         keyboard = [[char.name] for char in user_characters]
         keyboard.append(["All Characters"])
@@ -2266,20 +2258,24 @@ async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_
     try:
         character_id = int(query.data.split('_')[2])
     except (IndexError, ValueError):
-        await query.edit_message_text(text="Invalid request.")
+        # This message will be ephemeral as the original message is deleted.
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Invalid request.")
         return
 
     character = get_character_by_id(character_id)
     if not character:
-        # This message will be ephemeral as the original message is deleted.
-        await query.edit_message_text(text="Error: Could not find character.")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Error: Could not find character.")
         return
 
     # Delete the chart message
     await query.message.delete()
 
+    # Let the user know we're working on it by sending a new message
+    await context.bot.send_message(chat_id=query.message.chat_id, text=f"Generating summary for {character.name}...")
+
     # Regenerate the summary for just this one character
-    await _run_summary_for_characters(update, context, [character])
+    await run_daily_summary_for_character(character, context)
+    await context.bot.send_message(chat_id=query.message.chat_id, text=f"✅ Summary sent for {character.name}!")
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2489,7 +2485,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if action_type == 'select_char_for_balance':
             await _show_balance_for_characters(update, context, characters_to_query)
         elif action_type == 'select_char_for_summary':
-            await _run_summary_for_characters(update, context, characters_to_query)
+            char_names = ", ".join([c.name for c in characters_to_query])
+            await update.message.reply_text(f"Generating summary for {char_names}...")
+            for char in characters_to_query:
+                await run_daily_summary_for_character(char, context)
+                await asyncio.sleep(1)
+            await update.message.reply_text(f"✅ Summaries sent for {char_names}!")
         elif action_type == 'select_char_for_sales':
             await _get_last_5_transactions(update, context, is_buy=False, characters=characters_to_query)
         elif action_type == 'select_char_for_buys':
