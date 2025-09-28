@@ -2681,13 +2681,30 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
     message_text = f"⚙️ General settings for *{character.name}*:"
 
     if update.callback_query:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=update.effective_message.message_id,
-            text=message_text,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        # If the original message was a photo, we can't edit it to be text.
+        # So, we delete it and send a new message.
+        if update.callback_query.message.photo:
+            await update.callback_query.message.delete()
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=message_text,
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=update.effective_message.message_id,
+                    text=message_text,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            except BadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    logging.info("Message not modified, skipping edit in _show_character_settings.")
+                else:
+                    raise e
     else:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
