@@ -527,7 +527,8 @@ def get_characters_for_user(telegram_user_id):
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at
+                    enable_daily_summary, notification_batch_threshold, created_at,
+                    broker_fee, sales_tax, citadel_broker_fee
                 FROM characters WHERE telegram_user_id = %s
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -536,7 +537,8 @@ def get_characters_for_user(telegram_user_id):
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold, created_at
+                    enable_summary, batch_threshold, created_at,
+                    broker_fee, sales_tax, citadel_broker_fee
                 ) = row
 
                 user_characters.append(Character(
@@ -549,7 +551,10 @@ def get_characters_for_user(telegram_user_id):
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
                     notification_batch_threshold=batch_threshold,
-                    created_at=created_at
+                    created_at=created_at,
+                    broker_fee=float(broker_fee),
+                    sales_tax=float(sales_tax),
+                    citadel_broker_fee=float(citadel_broker_fee)
                 ))
     finally:
         database.release_db_connection(conn)
@@ -567,7 +572,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at
+                    enable_daily_summary, notification_batch_threshold, created_at,
+                    broker_fee, sales_tax, citadel_broker_fee
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -577,7 +583,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold, created_at
+                    enable_summary, batch_threshold, created_at,
+                    broker_fee, sales_tax, citadel_broker_fee
                 ) = row
 
                 character = Character(
@@ -590,7 +597,10 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
                     notification_batch_threshold=batch_threshold,
-                    created_at=created_at
+                    created_at=created_at,
+                    broker_fee=float(broker_fee),
+                    sales_tax=float(sales_tax),
+                    citadel_broker_fee=float(citadel_broker_fee)
                 )
     finally:
         database.release_db_connection(conn)
