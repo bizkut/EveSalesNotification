@@ -889,11 +889,13 @@ def get_wallet_transactions(character, processed_tx_ids=None, fetch_all=False, r
         if page == 1:
             first_page_headers = headers
 
-        if not data:
+        if data is None:
             if page == 1 and not fetch_all: # Only error if we expected data
-                logging.error(f"Failed to fetch first page of wallet transactions for {character.name}")
-                return ([], None) if return_headers else []
-            break # End of data
+                logging.error(f"Failed to fetch wallet transactions for {character.name}, ESI request failed.")
+            return ([], None) if return_headers else []
+
+        if not data: # An empty list is a valid response, it just means no more pages.
+            break
 
         if fetch_all:
             all_transactions.extend(data)
