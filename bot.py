@@ -1299,8 +1299,6 @@ async def master_wallet_transaction_poll(application: Application):
                     if not recent_transactions:
                         continue
 
-                    logging.debug(f"Full transaction data for {character.name}: {json.dumps(recent_transactions, indent=2)}")
-
                     # Find which of these are genuinely new by checking against our historical DB
                     tx_ids_from_esi = [tx['transaction_id'] for tx in recent_transactions]
                     existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
@@ -1318,7 +1316,6 @@ async def master_wallet_transaction_poll(application: Application):
                     # --- Now handle journal entries ---
                     recent_journal_entries = get_wallet_journal(character)
                     if recent_journal_entries:
-                        logging.debug(f"Full journal data for {character.name}: {json.dumps(recent_journal_entries, indent=2)}")
                         journal_ids_from_esi = [e['id'] for e in recent_journal_entries]
                         existing_journal_ids = get_ids_from_db('historical_journal_entries', 'entry_id', character.id, journal_ids_from_esi)
                         new_journal_entry_ids = set(journal_ids_from_esi) - existing_journal_ids
@@ -1339,23 +1336,16 @@ async def master_wallet_transaction_poll(application: Application):
                         if tx['is_buy']:
                             buys[tx['type_id']].append(tx)
                         else:
-                            # This is the cross-referencing logic.
-                            journal_ref_id = tx['journal_ref_id']
-                            ref_type = journal_ref_types.get(journal_ref_id)
-
-                            logging.info(f"Analyzing transaction_id {tx['transaction_id']} for {character.name}...")
-                            logging.info(f"  - Transaction's journal_ref_id: {journal_ref_id}")
-
-                            if ref_type:
-                                logging.info(f"  - Found matching journal entry with ref_type: '{ref_type}'")
-                                if ref_type == 'market_transaction':
-                                    logging.info("  - DECISION: Confirmed as a market sale. Adding to sales queue.")
-                                    sales[tx['type_id']].append(tx)
-                                else:
-                                    logging.info(f"  - DECISION: Ignoring transaction. Reason: ref_type is not 'market_transaction'.")
+                            # Verify that this non-buy transaction is actually a market sale
+                            ref_type = journal_ref_types.get(tx['journal_ref_id'])
+                            if ref_type == 'market_transaction':
+                                sales[tx['type_id']].append(tx)
                             else:
-                                logging.warning(f"  - Could not find a matching journal entry for journal_ref_id: {journal_ref_id}")
-                                logging.warning(f"  - DECISION: Ignoring transaction. Reason: Missing journal entry link.")
+                                logging.info(
+                                    f"Ignoring non-sale transaction for {character.name} "
+                                    f"(ID: {tx['transaction_id']}, Type: {ref_type}, "
+                                    f"Value: {tx['quantity'] * tx['unit_price']:,.2f} ISK)"
+                                )
 
                     all_type_ids = list(sales.keys()) + list(buys.keys())
                     all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
