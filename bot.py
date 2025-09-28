@@ -11,7 +11,12 @@ import asyncio
 import telegram
 from telegram.error import BadRequest
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+import io
+import matplotlib
+matplotlib.use('Agg')  # Use a non-interactive backend
+import matplotlib.pyplot as plt
+import calendar
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -856,10 +861,65 @@ def get_character_details_from_token(access_token):
         logging.error(f"Error getting character details: {e}")
         return None, None
 
-def get_wallet_transactions(character, return_headers=False, force_revalidate=False):
-    if not character: return None
+def get_wallet_transactions(character, processed_tx_ids=None, fetch_all=False, return_headers=False):
+    """
+    Fetches wallet transactions from ESI.
+    If fetch_all is True, retrieves all pages.
+    Otherwise, stops fetching when it encounters an already processed transaction.
+    Returns the list of transactions and optionally the headers from the first page request.
+    """
+    if not character:
+        return ([], None) if return_headers else []
+    if processed_tx_ids is None:
+        processed_tx_ids = set()
+
+    all_transactions, page = [], 1
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/transactions/"
-    return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
+
+    stop_fetching = False
+    first_page_headers = None
+
+    while not stop_fetching:
+        params = {"datasource": "tranquility", "page": page}
+        # When fetching for new data, we should always revalidate.
+        # When fetching all, we can allow the cache to work for subsequent pages.
+        revalidate_this_page = (not fetch_all) or (page == 1)
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+
+        if page == 1:
+            first_page_headers = headers
+
+        if not data:
+            if page == 1 and not fetch_all: # Only error if we expected data
+                logging.error(f"Failed to fetch first page of wallet transactions for {character.name}")
+                return ([], None) if return_headers else []
+            break # End of data
+
+        if fetch_all:
+            all_transactions.extend(data)
+        else:
+            page_transactions = []
+            for tx in data:
+                if tx['transaction_id'] in processed_tx_ids:
+                    stop_fetching = True
+                    break
+                page_transactions.append(tx)
+            all_transactions.extend(page_transactions)
+
+            if stop_fetching:
+                logging.info(f"Found previously processed transaction. Stopping fetch for char {character.name}.")
+                break
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1)
+
+    if return_headers:
+        return all_transactions, first_page_headers
+    return all_transactions
 
 def get_market_orders(character, return_headers=False, force_revalidate=False):
     if not character: return None
@@ -1006,14 +1066,14 @@ def get_names_from_ids(id_list, character: Character = None):
 
 # --- Telegram Bot Functions ---
 
-async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str, chat_id: int):
+async def send_telegram_message(context: ContextTypes.DEFAULT_TYPE, message: str, chat_id: int, reply_markup=None):
     """Sends a message to a specific chat_id."""
     if not chat_id:
         logging.error("No chat_id provided. Cannot send message.")
         return
 
     try:
-        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown', reply_markup=reply_markup)
         logging.info(f"Sent message to chat_id: {chat_id}.")
     except Exception as e:
         if "bot was blocked by the user" in str(e).lower():
@@ -1135,13 +1195,8 @@ async def master_wallet_transaction_poll(application: Application):
             for character in characters_to_poll:
                 logging.debug(f"Polling wallet for {character.name}")
                 try:
-                    all_transactions, _ = get_wallet_transactions(character, return_headers=True, force_revalidate=True)
-                    if all_transactions is None:
-                        logging.error(f"Failed to fetch wallet transactions for {character.name}. Skipping.")
-                        continue
-
                     processed_tx_ids = get_processed_transactions(character.id)
-                    new_transactions = [tx for tx in all_transactions if tx['transaction_id'] not in processed_tx_ids]
+                    new_transactions, _ = get_wallet_transactions(character, processed_tx_ids=processed_tx_ids, return_headers=True)
 
                     if not new_transactions:
                         continue
@@ -1506,11 +1561,12 @@ async def run_daily_summary_for_character(character: Character, context: Context
     one_day_ago = now - timedelta(days=1)
 
     # --- Fetch data ---
-    all_transactions = get_wallet_transactions(character)
+    all_transactions = get_wallet_transactions(character, fetch_all=True)
     all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
 
     # --- 24-Hour Summary (Stateless) ---
     total_sales_24h, total_fees_24h, profit_24h = 0, 0, 0
+    sales_past_24_hours = []
     if all_transactions:
         sales_past_24_hours = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago]
         total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
@@ -1552,7 +1608,14 @@ async def run_daily_summary_for_character(character: Character, context: Context
         f"  - Total Fees (Broker + Tax): `{total_fees_month:,.2f} ISK`\n"
         f"  - *Gross Revenue (Sales - Fees):* `{gross_revenue_month:,.2f} ISK`"
     )
-    await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+    keyboard = [
+        [
+            InlineKeyboardButton("Show Monthly Chart", callback_data=f"chart_monthly_{character.id}"),
+            InlineKeyboardButton("Show Yearly Chart", callback_data=f"chart_yearly_{character.id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
     logging.info(f"Daily summary sent for {character.name}.")
 
 
@@ -1612,7 +1675,7 @@ def initialize_all_transactions_for_character(character: Character):
         return
 
     logging.info(f"Seeding transaction history for {character.name}...")
-    all_transactions = get_wallet_transactions(character)
+    all_transactions = get_wallet_transactions(character, fetch_all=True)
     if not all_transactions:
         logging.info(f"No historical transactions found to seed for {character.name}.")
         set_bot_state(state_key, 'true')
@@ -1889,7 +1952,7 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
     all_transactions = []
     all_order_history = []
     for char in characters:
-        transactions = get_wallet_transactions(char)
+        transactions = get_wallet_transactions(char, fetch_all=True)
         if transactions:
             for tx in transactions:
                 tx['character_name'] = char.name # Add character name for context
@@ -1948,6 +2011,205 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
+
+
+def format_isk(value):
+    """Formats a number into a human-readable ISK string."""
+    if abs(value) >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}b"
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.2f}m"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.2f}k"
+    return f"{value:.2f}"
+
+
+def generate_monthly_chart(character_id: int):
+    """Generates a line chart of sales, fees, and profit for the current month."""
+    character = get_character_by_id(character_id)
+    if not character:
+        return None
+
+    now = datetime.now(timezone.utc)
+    year, month = now.year, now.month
+    _, num_days = calendar.monthrange(year, month)
+    days = list(range(1, num_days + 1))
+
+    all_transactions = get_wallet_transactions(character, fetch_all=True)
+    all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+
+    daily_sales = {day: 0 for day in days}
+    daily_fees = {day: 0 for day in days}
+    daily_profit = {day: 0 for day in days}
+
+    # Filter for current month
+    monthly_sales_tx = [
+        tx for tx in all_transactions if not tx.get('is_buy') and
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == year and
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == month
+    ]
+    monthly_journal = [
+        e for e in all_journal_entries if
+        datetime.fromisoformat(e['date'].replace('Z', '+00:00')).year == year and
+        datetime.fromisoformat(e['date'].replace('Z', '+00:00')).month == month
+    ]
+
+    if not monthly_sales_tx and not monthly_journal:
+        return None # No data for this month
+
+    for day in days:
+        day_sales_tx = [tx for tx in monthly_sales_tx if datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).day == day]
+        day_journal = [e for e in monthly_journal if datetime.fromisoformat(e['date'].replace('Z', '+00:00')).day == day]
+
+        sales = sum(s['quantity'] * s['unit_price'] for s in day_sales_tx)
+        fees = sum(abs(e.get('amount', 0)) for e in day_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
+        profit = calculate_fifo_profit_for_summary(day_sales_tx, character_id) - fees
+
+        daily_sales[day] = sales
+        daily_fees[day] = fees
+        daily_profit[day] = profit
+
+    # --- Chart Generation ---
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    ax.plot(days, list(daily_sales.values()), label='Sales', color='cyan', marker='o', linestyle='-')
+    ax.plot(days, list(daily_profit.values()), label='Profit', color='lime', marker='o', linestyle='-')
+    ax.plot(days, list(daily_fees.values()), label='Fees', color='red', marker='o', linestyle='-')
+
+    ax.set_title(f'Monthly Performance for {character.name} - {now.strftime("%B %Y")}', color='white', fontsize=16)
+    ax.set_xlabel('Day of Month', color='white', fontsize=12)
+    ax.set_ylabel('ISK', color='white', fontsize=12)
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
+    ax.legend()
+    ax.tick_params(axis='x', colors='white')
+    ax.tick_params(axis='y', colors='white')
+    plt.setp(ax.spines.values(), color='gray')
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', transparent=True)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def generate_yearly_chart(character_id: int):
+    """Generates a line chart of sales, fees, and profit for the current year."""
+    character = get_character_by_id(character_id)
+    if not character:
+        return None
+
+    now = datetime.now(timezone.utc)
+    year = now.year
+    months = list(range(1, 13))
+    month_names = [calendar.month_abbr[m] for m in months]
+
+    all_transactions = get_wallet_transactions(character, fetch_all=True)
+    all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+
+    monthly_sales = {m: 0 for m in months}
+    monthly_fees = {m: 0 for m in months}
+    monthly_profit = {m: 0 for m in months}
+
+    # Filter for current year
+    yearly_sales_tx = [
+        tx for tx in all_transactions if not tx.get('is_buy') and
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == year
+    ]
+    yearly_journal = [
+        e for e in all_journal_entries if
+        datetime.fromisoformat(e['date'].replace('Z', '+00:00')).year == year
+    ]
+
+    if not yearly_sales_tx and not yearly_journal:
+        return None # No data for this year
+
+    for month in months:
+        month_sales_tx = [tx for tx in yearly_sales_tx if datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == month]
+        month_journal = [e for e in yearly_journal if datetime.fromisoformat(e['date'].replace('Z', '+00:00')).month == month]
+
+        sales = sum(s['quantity'] * s['unit_price'] for s in month_sales_tx)
+        fees = sum(abs(e.get('amount', 0)) for e in month_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
+        profit = calculate_fifo_profit_for_summary(month_sales_tx, character_id) - fees
+
+        monthly_sales[month] = sales
+        monthly_fees[month] = fees
+        monthly_profit[month] = profit
+
+    # --- Chart Generation ---
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    ax.plot(month_names, list(monthly_sales.values()), label='Sales', color='cyan', marker='o', linestyle='-')
+    ax.plot(month_names, list(monthly_profit.values()), label='Profit', color='lime', marker='o', linestyle='-')
+    ax.plot(month_names, list(monthly_fees.values()), label='Fees', color='red', marker='o', linestyle='-')
+
+    ax.set_title(f'Yearly Performance for {character.name} - {year}', color='white', fontsize=16)
+    ax.set_xlabel('Month', color='white', fontsize=12)
+    ax.set_ylabel('ISK', color='white', fontsize=12)
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
+    ax.legend()
+    ax.tick_params(axis='x', colors='white')
+    ax.tick_params(axis='y', colors='white')
+    plt.setp(ax.spines.values(), color='gray')
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', transparent=True)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles callbacks from the chart buttons."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        parts = query.data.split('_')
+        action = parts[0]
+        chart_type = parts[1]
+        character_id = int(parts[2])
+
+        if action != 'chart':
+            return # Not for us
+
+    except (IndexError, ValueError):
+        await query.edit_message_text(text="Invalid chart request.")
+        return
+
+
+    character = get_character_by_id(character_id)
+    if not character:
+        await query.edit_message_text(text="Error: Could not find character for this chart.")
+        return
+
+    # Let the user know we are working on it
+    await query.edit_message_text(text=f"Generating {chart_type} chart for {character.name}...")
+
+    chart_buffer = None
+    try:
+        if chart_type == 'monthly':
+            chart_buffer = generate_monthly_chart(character_id)
+        elif chart_type == 'yearly':
+            chart_buffer = generate_yearly_chart(character_id)
+        else:
+            await query.edit_message_text(text="Unknown chart type.")
+            return
+    except Exception as e:
+        logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
+        await query.edit_message_text(text=f"An error occurred while generating the chart for {character.name}.")
+        return
+
+
+    if chart_buffer:
+        # Delete the "Generating..." message and send the photo
+        await query.message.delete()
+        await context.bot.send_photo(chat_id=query.message.chat_id, photo=chart_buffer, caption=f"{chart_type.capitalize()} chart for {character.name}")
+    else:
+        # Edit the message to show no data was found
+        await query.edit_message_text(text=f"Could not generate {chart_type} chart for {character.name}. No data available for the period.")
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2355,6 +2617,7 @@ def main() -> None:
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("remove", remove_character_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(chart_callback_handler, pattern="^chart_"))
 
     # --- Schedule Jobs ---
     job_queue = application.job_queue
