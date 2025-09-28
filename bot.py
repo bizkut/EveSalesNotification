@@ -1611,7 +1611,6 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
     for i in range(0, len(year_buttons), 4):
         keyboard.append(year_buttons[i:i+4])
 
-    keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     return message, reply_markup
 
@@ -1626,13 +1625,22 @@ async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAU
         summary_data = await asyncio.to_thread(_calculate_summary_data, character)
         message, reply_markup = _format_summary_message(summary_data, character)
 
+        # Add a contextual back button based on how many characters the user has
+        user_characters = get_characters_for_user(update.effective_user.id)
+        back_button_callback = "summary" if len(user_characters) > 1 else "start_command"
+
+        new_keyboard = list(reply_markup.inline_keyboard) # Create a mutable copy
+        new_keyboard.append([InlineKeyboardButton("« Back", callback_data=back_button_callback)])
+        new_reply_markup = InlineKeyboardMarkup(new_keyboard)
+
+
         # Edit the placeholder message with the final content
         await context.bot.edit_message_text(
             chat_id=target_chat_id,
             message_id=sent_message.message_id,
             text=message,
             parse_mode='Markdown',
-            reply_markup=reply_markup
+            reply_markup=new_reply_markup
         )
     except Exception as e:
         logging.error(f"Failed to generate and send summary for {character.name}: {e}", exc_info=True)
@@ -1649,7 +1657,13 @@ async def run_daily_summary_for_character(character: Character, context: Context
     try:
         summary_data = _calculate_summary_data(character)
         message, reply_markup = _format_summary_message(summary_data, character)
-        await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
+
+        # For scheduled summaries, always add a simple back button to the main menu
+        new_keyboard = list(reply_markup.inline_keyboard)
+        new_keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        new_reply_markup = InlineKeyboardMarkup(new_keyboard)
+
+        await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=new_reply_markup)
         logging.info(f"Daily summary sent for {character.name}.")
     except Exception as e:
         logging.error(f"Failed to send daily summary for {character.name}: {e}", exc_info=True)
@@ -2695,14 +2709,6 @@ async def post_init(application: Application):
     """
     commands = [
         BotCommand("start", "Show the main menu & keyboard"),
-        BotCommand("add_character", "Authorize a new character"),
-        BotCommand("balance", "View wallet balance(s)"),
-        BotCommand("summary", "Request a market summary"),
-        BotCommand("sales", "View recent sales"),
-        BotCommand("buys", "View recent buys"),
-        BotCommand("notifications", "Manage notification settings"),
-        BotCommand("settings", "Manage character settings"),
-        BotCommand("remove", "Remove a character"),
     ]
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands have been set in the Telegram menu.")
