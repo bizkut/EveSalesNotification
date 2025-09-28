@@ -2094,12 +2094,44 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
-                await send_telegram_message(
-                    context,
-                    f"✅ Successfully added and synced **{character.name}**! I will now start monitoring their market activity.",
-                    chat_id=character.telegram_user_id,
-                    reply_markup=reply_markup
-                )
+                success_message = f"✅ Successfully added and synced **{character.name}**! I will now start monitoring their market activity."
+
+                # Check if we have a prompt message to edit, for a cleaner UX
+                prompt_state_key = f"add_character_prompt_{character.telegram_user_id}"
+                prompt_message_info = get_bot_state(prompt_state_key)
+
+                if prompt_message_info:
+                    try:
+                        chat_id_str, message_id_str = prompt_message_info.split(':')
+                        chat_id = int(chat_id_str)
+                        message_id = int(message_id_str)
+
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=success_message,
+                            reply_markup=reply_markup,
+                            parse_mode='Markdown'
+                        )
+                        # Clean up the state so we don't try to edit it again
+                        set_bot_state(prompt_state_key, '')
+                    except (ValueError, BadRequest) as e:
+                        logging.warning(f"Failed to edit 'Add Character' prompt (it may be too old), sending new message instead. Error: {e}")
+                        # Fallback to sending a new message if editing fails
+                        await send_telegram_message(
+                            context,
+                            success_message,
+                            chat_id=character.telegram_user_id,
+                            reply_markup=reply_markup
+                        )
+                else:
+                    # Fallback for cases where the prompt message ID wasn't stored
+                    await send_telegram_message(
+                        context,
+                        success_message,
+                        chat_id=character.telegram_user_id,
+                        reply_markup=reply_markup
+                    )
             else:
                 # If seeding fails, do NOT add them to the monitoring list.
                 # Inform the user and the bot will automatically try again on the next cycle.
@@ -2189,10 +2221,17 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
         "It may take a minute or two for the character to be fully registered with the bot."
     )
 
+    sent_message = None
     if update.callback_query:
         await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
+        sent_message = update.callback_query.message
     else:
-        await update.message.reply_text(message, reply_markup=reply_markup)
+        sent_message = await update.message.reply_text(message, reply_markup=reply_markup)
+
+    if sent_message:
+        chat_id = sent_message.chat_id
+        message_id = sent_message.message_id
+        set_bot_state(f"add_character_prompt_{user_id}", f"{chat_id}:{message_id}")
 
 
 async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
