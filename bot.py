@@ -1611,6 +1611,7 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
     for i in range(0, len(year_buttons), 4):
         keyboard.append(year_buttons[i:i+4])
 
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     return message, reply_markup
 
