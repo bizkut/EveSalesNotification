@@ -1701,7 +1701,17 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
 async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
     """Handles the interactive flow of generating and sending a summary message."""
     target_chat_id = update.effective_chat.id
-    sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating summary for {character.name}...")
+    query = update.callback_query
+    message_id = None
+
+    if query:
+        # If we came from a button, edit that message.
+        await query.edit_message_text(text=f"⏳ Generating summary for {character.name}...")
+        message_id = query.message.message_id
+    else:
+        # Otherwise, send a new message (e.g., for scheduled summaries).
+        sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating summary for {character.name}...")
+        message_id = sent_message.message_id
 
     try:
         # Run the synchronous data calculation in a thread to avoid blocking
@@ -1720,7 +1730,7 @@ async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAU
         # Edit the placeholder message with the final content
         await context.bot.edit_message_text(
             chat_id=target_chat_id,
-            message_id=sent_message.message_id,
+            message_id=message_id,
             text=message,
             parse_mode='Markdown',
             reply_markup=new_reply_markup
@@ -1729,7 +1739,7 @@ async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAU
         logging.error(f"Failed to generate and send summary for {character.name}: {e}", exc_info=True)
         await context.bot.edit_message_text(
             chat_id=target_chat_id,
-            message_id=sent_message.message_id,
+            message_id=message_id,
             text=f"❌ An error occurred while generating the summary for {character.name}."
         )
 
@@ -2430,10 +2440,13 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             chart_buffer = await asyncio.to_thread(generate_monthly_chart, character_id, year)
     except Exception as e:
         logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.edit_message_text(
             text=f"An error occurred while generating the chart for {character.name}.",
             chat_id=chat_id,
-            message_id=generating_message_id
+            message_id=generating_message_id,
+            reply_markup=reply_markup
         )
         return
 
@@ -2484,20 +2497,24 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text="Error: Could not find character for this chart.")
         return
 
-    # Edit the original message to show that we're working on it.
-    await query.edit_message_text(text=f"⏳ Generating {chart_type} chart for {character.name}. This may take a moment...")
+    # Delete the summary message and send a new "generating" message.
+    await query.message.delete()
+    generating_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"⏳ Generating {chart_type} chart for {character.name}. This may take a moment..."
+    )
 
     job_data = {
         'character_id': character_id,
         'chart_type': chart_type,
         'year': year,
-        'generating_message_id': query.message.message_id
+        'generating_message_id': generating_message.message_id
     }
     context.job_queue.run_once(generate_chart_job, when=1, data=job_data, chat_id=query.message.chat_id)
 
 
 async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Back to Summary' button press by deleting the chart and regenerating the summary."""
+    """Handles the 'Back to Summary' button press by editing the chart message back into the summary view."""
     query = update.callback_query
     await query.answer()
 
@@ -2512,10 +2529,7 @@ async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text(text="Error: Could not find character.")
         return
 
-    # Delete the chart message
-    await query.message.delete()
-
-    # Regenerate the summary for just this one character using the new interactive handler
+    # The chart message (from query.message) will be edited into the summary by this function.
     await _generate_and_send_summary(update, context, character)
 
 
@@ -3147,10 +3161,18 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("summary_char_"):
         user_id = update.effective_user.id
         char_id_str = data.split('_')[-1]
-        chars_to_query = get_characters_for_user(user_id) if char_id_str == "all" else [get_character_by_id(int(char_id_str))]
-        for char in chars_to_query:
-            await _generate_and_send_summary(update, context, char)
-            await asyncio.sleep(1)
+        if char_id_str == "all":
+            # If "All" is selected, delete the menu and send new messages for each summary.
+            await query.message.delete()
+            chars_to_query = get_characters_for_user(user_id)
+            for char in chars_to_query:
+                # We pass 'None' for the callback_query part of the update to force new messages
+                await _generate_and_send_summary(Update(update.update_id, message=query.message), context, char)
+                await asyncio.sleep(1) # Be nice to Telegram's API
+        else:
+            # If a single character is selected, edit the existing message.
+            char_to_query = get_character_by_id(int(char_id_str))
+            await _generate_and_send_summary(update, context, char_to_query)
 
     # --- Historical Transaction List (Sales & Buys) ---
     elif data.startswith("history_list_"):
