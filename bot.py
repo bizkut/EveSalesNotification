@@ -2806,14 +2806,14 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     if skills_data and 'skills' in skills_data:
         skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
         # Skill IDs for market orders:
-        # Trade (34): +4 orders/level
-        # Retail (16595): +8 orders/level
-        # Wholesale (21790): +16 orders/level
-        # Tycoon (21791): +32 orders/level
-        trade_level = skill_map.get(34, 0)
-        retail_level = skill_map.get(16595, 0)
-        wholesale_level = skill_map.get(21790, 0)
-        tycoon_level = skill_map.get(21791, 0)
+        # Trade (3443): +4 orders/level
+        # Retail (3444): +8 orders/level
+        # Wholesale (16596): +16 orders/level
+        # Tycoon (18580): +32 orders/level
+        trade_level = skill_map.get(3443, 0)
+        retail_level = skill_map.get(3444, 0)
+        wholesale_level = skill_map.get(16596, 0)
+        tycoon_level = skill_map.get(18580, 0)
 
         # 5 (base) + (Trade * 4) + (Retail * 8) + (Wholesale * 16) + (Tycoon * 32)
         max_orders = 5 + (trade_level * 4) + (retail_level * 8) + (wholesale_level * 16) + (tycoon_level * 32)
