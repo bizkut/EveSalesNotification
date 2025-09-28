@@ -2034,11 +2034,8 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         [f"Toggle Immediate Sales: {'On' if character.enable_immediate_sales_notifications else 'Off'}"],
         [f"Toggle Immediate Buys: {'On' if character.enable_immediate_buy_notifications else 'Off'}"],
         [f"Toggle Daily Summary: {'On' if character.enable_daily_summary else 'Off'}"],
+        ["Back to Notifications Menu"]
     ]
-    # Only show the 'Back' button if the user has multiple characters
-    user_characters = get_characters_for_user(character.telegram_user_id)
-    if len(user_characters) > 1:
-        keyboard.append(["Back to Notifications Menu"])
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     context.user_data['next_action'] = ('manage_notifications', character.id)
     await update.message.reply_text(
@@ -2058,11 +2055,8 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
     keyboard = [
         [f"Set Region ID ({character.region_id})"],
         [f"Set Wallet Alert ({character.wallet_balance_threshold:,.0f} ISK)"],
+        ["Back to Settings Menu"]
     ]
-    # Only show the 'Back' button if the user has multiple characters
-    user_characters = get_characters_for_user(character.telegram_user_id)
-    if len(user_characters) > 1:
-        keyboard.append(["Back to Settings Menu"])
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     context.user_data['next_action'] = ('manage_settings', character.id)
     await update.message.reply_text(
@@ -2173,7 +2167,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if text == "Back to Notifications Menu":
             context.user_data.clear()
-            await notifications_command(update, context)
+            user_characters = get_characters_for_user(user_id)
+            if len(user_characters) > 1:
+                await notifications_command(update, context)
+            else:
+                await start_command(update, context)
             return
 
         setting_to_toggle, current_value = None, None
@@ -2236,7 +2234,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         character_id = data
         if text == "Back to Settings Menu":
             context.user_data.clear()
-            await settings_command(update, context)
+            user_characters = get_characters_for_user(user_id)
+            if len(user_characters) > 1:
+                await settings_command(update, context)
+            else:
+                await start_command(update, context)
             return
 
         if text.startswith("Set Region ID"):
