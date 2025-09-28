@@ -2680,17 +2680,37 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text=f"❌ Could not fetch market orders for {character.name}. The ESI API might be unavailable.")
         return
 
+    # --- Order Capacity Calculation (must happen before filtering) ---
+    order_capacity_str = ""
+    if skills_data and 'skills' in skills_data:
+        skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
+        # Skill IDs: Trade (3443), Broker Relations (3446)
+        trade_level = skill_map.get(3443, 0)
+        broker_relations_level = skill_map.get(3446, 0)
+
+        # Formula for max orders based on EVE University Wiki:
+        # 5 (base) + (10 * Trade level) + (4 * Broker Relations level)
+        max_orders = 5 + (trade_level * 10) + (broker_relations_level * 4)
+        # Use len(all_orders) for the current count, not the filtered count
+        order_capacity_str = f"({len(all_orders)} / {max_orders} orders)"
+
     # Filter for buy or sell orders
     filtered_orders = [order for order in all_orders if bool(order.get('is_buy_order')) == is_buy]
-
     order_type_str = "Buy" if is_buy else "Sale"
+
+    # --- Message Formatting ---
+    header = f"📄 *Open {order_type_str} Orders for {character.name}* {order_capacity_str}\n\n"
+
     if not filtered_orders:
         # Provide a back button
         keyboard = [[InlineKeyboardButton("« Back", callback_data="open_orders")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
+        # Combine header and the "no orders" message
+        message = header + f"✅ No open {order_type_str.lower()} orders found."
         await query.edit_message_text(
-            text=f"✅ No open {order_type_str.lower()} orders found for {character.name}.",
-            reply_markup=reply_markup
+            text=message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
         return
 
@@ -2710,22 +2730,6 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     type_ids = [order['type_id'] for order in paginated_orders]
     location_ids = [order['location_id'] for order in paginated_orders]
     id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
-
-    # --- Order Capacity Calculation ---
-    order_capacity_str = ""
-    if skills_data and 'skills' in skills_data:
-        skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
-        # Skill IDs: Trade (3443), Broker Relations (3446)
-        trade_level = skill_map.get(3443, 0)
-        broker_relations_level = skill_map.get(3446, 0)
-
-        # Formula for max orders based on EVE University Wiki:
-        # 5 (base) + (10 * Trade level) + (4 * Broker Relations level)
-        max_orders = 5 + (trade_level * 10) + (broker_relations_level * 4)
-        order_capacity_str = f"({len(filtered_orders)} / {max_orders} orders)"
-
-    # --- Message Formatting ---
-    header = f"📄 *Open {order_type_str} Orders for {character.name}* {order_capacity_str}\n\n"
     message_lines = []
     for order in paginated_orders:
         item_name = id_to_name.get(order['type_id'], f"Type ID {order['type_id']}")
