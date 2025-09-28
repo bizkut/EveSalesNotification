@@ -2681,7 +2681,7 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Filter for buy or sell orders
-    filtered_orders = [order for order in all_orders if order.get('is_buy_order') == is_buy]
+    filtered_orders = [order for order in all_orders if bool(order.get('is_buy_order')) == is_buy]
 
     order_type_str = "Buy" if is_buy else "Sale"
     if not filtered_orders:
