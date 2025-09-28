@@ -1544,8 +1544,8 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
         f"  - *Gross Revenue (Sales - Fees):* `{summary_data['gross_revenue_month']:,.2f} ISK`"
     )
 
-    # Dynamically generate year buttons
-    available_years = summary_data['available_years']
+    # Dynamically generate year buttons, sorted from newest to oldest
+    available_years = sorted(summary_data['available_years'], reverse=True)
     year_buttons = [InlineKeyboardButton(f"Chart {year}", callback_data=f"chart_yearly_{character.id}_{year}") for year in available_years]
 
     # Always include the current month chart button
@@ -2082,6 +2082,8 @@ def generate_daily_chart_for_month(character_id: int):
     # --- Chart Generation ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(12, 7))
+    fig.patch.set_facecolor('#1c1c1c')  # Set outer background color
+    ax.set_facecolor('#282828')  # Set inner plot background color
 
     ax.plot(days, list(daily_sales.values()), label='Sales', color='cyan', marker='o', linestyle='-')
     ax.plot(days, list(daily_profit.values()), label='Profit', color='lime', marker='o', linestyle='-')
@@ -2098,7 +2100,7 @@ def generate_daily_chart_for_month(character_id: int):
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', transparent=True, bbox_inches='tight')
+    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight')
     plt.close(fig)
     buf.seek(0)
     return buf
@@ -2149,6 +2151,8 @@ def generate_yearly_chart(character_id: int, year: int):
     # --- Chart Generation ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(12, 7))
+    fig.patch.set_facecolor('#1c1c1c')  # Set outer background color
+    ax.set_facecolor('#282828')  # Set inner plot background color
 
     ax.plot(month_names, list(monthly_sales.values()), label='Sales', color='cyan', marker='o', linestyle='-')
     ax.plot(month_names, list(monthly_profit.values()), label='Profit', color='lime', marker='o', linestyle='-')
@@ -2165,7 +2169,7 @@ def generate_yearly_chart(character_id: int, year: int):
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', transparent=True, bbox_inches='tight')
+    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight')
     plt.close(fig)
     buf.seek(0)
     return buf
