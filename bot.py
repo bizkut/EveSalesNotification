@@ -2514,23 +2514,27 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Back to Summary' button press by editing the chart message back into the summary view."""
+    """Handles the 'Back to Summary' button press by deleting the chart and regenerating the summary."""
     query = update.callback_query
     await query.answer()
 
     try:
         character_id = int(query.data.split('_')[2])
     except (IndexError, ValueError):
-        await query.edit_message_text(text="Invalid request.")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Invalid request.")
         return
 
     character = get_character_by_id(character_id)
     if not character:
-        await query.edit_message_text(text="Error: Could not find character.")
+        await context.bot.send_message(chat_id=query.message.chat_id, text="Error: Could not find character.")
         return
 
-    # The chart message (from query.message) will be edited into the summary by this function.
-    await _generate_and_send_summary(update, context, character)
+    # Delete the chart message, as we cannot edit a media message into a text message.
+    await query.message.delete()
+
+    # Regenerate the summary as a new message.
+    # We create a new Update object without a callback_query to force sending a new message.
+    await _generate_and_send_summary(Update(update.update_id, message=query.message), context, character)
 
 
 async def _select_character_for_historical_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool):
