@@ -11,14 +11,15 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Multi-User & Character Support**: Any user can add multiple characters by interacting with the bot in a private message. All data is stored securely in a database.
 - **Private & Secure**: Notifications and command responses are sent directly to the user who owns the character.
 - **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds using efficient ETag-based polling.
-- **Intelligent Filtering & Grouping**: Notifications are sent for non-immediate orders, and multiple fills are grouped into a single, summarized notification.
+- **Dual Notification System**: Differentiates between non-immediate (limit) orders and immediate (market) orders, with separate notification toggles for each buy/sell category. Immediate order notifications are off by default.
+- **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data**:
   - **Real-Time Profit Tracking**: Sales notifications include FIFO-based gross profit calculations.
   - **Live Market Price Context**: Sales are compared against the current best buy order in your main trade hub.
   - **Trade Location & Wallet Balance**: All notifications include the trade location and your current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
-- **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, etc.) are configurable on a per-character basis via the bot's "Settings" menu.
+- **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, and all notification types) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
 - **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's history to report only on new activity and ensure profit calculations are accurate from day one.
 
