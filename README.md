@@ -14,18 +14,19 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Dual Notification System**: Differentiates between non-immediate (limit) orders and immediate (market) orders, with separate notification toggles for each buy/sell category. Immediate order notifications are off by default.
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data**:
-  - **Real-Time Profit Tracking**: Sales notifications include FIFO-based gross profit calculations.
+  - **Real-Time Profit Tracking**: Sales notifications include FIFO-based net profit calculations, accounting for all user-configured fees and taxes.
   - **Live Market Price Context**: Sales are compared against the current best buy order in your main trade hub.
   - **Accurate Trade Location**: Correctly identifies the true location of remote buys/sales by cross-referencing with order history.
   - **Wallet Balance**: All notifications include your current wallet balance.
-  - **Accurate Sale Detection**: The bot intelligently cross-references wallet transactions with journal entries to ensure only genuine market sales trigger a notification, filtering out noise from contract rewards or escrow returns from cancelled orders.
+- **Manual Fee Configuration**: Accurately track profit by manually setting your character's specific Broker's Fee, Sales Tax, and even a separate Citadel Broker's Fee for advanced trade setups. The bot no longer relies on the wallet journal, giving you full control.
+- **Order Modification Fee Tracking**: The bot now monitors your open orders for price changes and automatically logs the broker's fees incurred, ensuring that every ISK of your trading costs is accounted for.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot also displays your character's current order capacity (e.g., "152 / 305 orders").
 - **Public Character Info**: View a summary of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The summary now includes inline buttons to create an hourly (last 24h), daily (current month), and monthly (for all historical years) performance chart. After viewing a chart, you can easily return to the summary view using the "Back to Summary" button.
-- **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, and all notification types) are configurable on a per-character basis via the bot's menu.
+- **Highly Configurable**: All major settings (fees, taxes, wallet alerts, notification types, etc.) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
 - **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's entire transaction history to ensure profit calculations are accurate from day one. To prevent a flood of old alerts, a 1-hour grace period begins after the initial historical data sync is complete. During this time, no new notifications (sales, buys, cancellations, or expirations) will be sent. This ensures that only market activity occurring after the sync and grace period will trigger an alert.
 
@@ -131,11 +132,11 @@ All interaction with the bot is handled through a clean, inline button-based men
 ```
 ✅ Market Sale! ✅
 
-**Item:** `Tritanium` (`34`)
-**Quantity Sold:** `1000`
-**Avg. Your Price:** `10.50 ISK`
-**Jita Best Buy:** `10.45 ISK` (+0.48%)
-**Gross Profit (before fees):** `500.00 ISK`
+**Item:** `Tritanium`
+**Quantity:** `1,000` @ `10.00 ISK`
+**Jita Best Buy:** `9.95 ISK` (+0.50%)
+**Total Fees:** `1,050.00 ISK`
+**Net Profit:** `950.00 ISK`
 
 **Location:** `Jita 4-4 - Caldari Navy Assembly Plant`
 **Wallet Balance:** `1,234,567,890.12 ISK`
