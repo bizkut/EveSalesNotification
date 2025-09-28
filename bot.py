@@ -2863,7 +2863,21 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     # --- Character Removal Flow ---
     elif data.startswith("remove_select_"):
         char_id = int(data.split('_')[-1])
-        await remove_character_command(update, context) # This will now show the confirmation
+        character = get_character_by_id(char_id)
+        if not character:
+            await query.edit_message_text(text="Error: Character not found.")
+            return
+
+        keyboard = [
+            [InlineKeyboardButton("YES, REMOVE THIS CHARACTER", callback_data=f"remove_confirm_{character.id}")],
+            [InlineKeyboardButton("NO, CANCEL", callback_data="start_command")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = (
+            f"⚠️ *This is permanent and cannot be undone.* ⚠️\n\n"
+            f"Are you sure you want to remove your character **{character.name}** and all their associated data?"
+        )
+        await query.edit_message_text(text=message_text, reply_markup=reply_markup, parse_mode='Markdown')
 
     elif data.startswith("remove_confirm_"):
         char_id = int(data.split('_')[-1])
