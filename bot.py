@@ -2028,13 +2028,16 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("Error: Could not find this character.")
         return
 
+    user_characters = get_characters_for_user(character.telegram_user_id)
+    back_button_text = "Back to Main Menu" if len(user_characters) <= 1 else "Back to Notifications Menu"
+
     keyboard = [
         [f"Toggle Sales: {'On' if character.enable_sales_notifications else 'Off'}"],
         [f"Toggle Buys: {'On' if character.enable_buy_notifications else 'Off'}"],
         [f"Toggle Immediate Sales: {'On' if character.enable_immediate_sales_notifications else 'Off'}"],
         [f"Toggle Immediate Buys: {'On' if character.enable_immediate_buy_notifications else 'Off'}"],
         [f"Toggle Daily Summary: {'On' if character.enable_daily_summary else 'Off'}"],
-        ["Back to Notifications Menu"]
+        [back_button_text]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     context.user_data['next_action'] = ('manage_notifications', character.id)
@@ -2052,10 +2055,13 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("Error: Could not find this character.")
         return
 
+    user_characters = get_characters_for_user(character.telegram_user_id)
+    back_button_text = "Back to Main Menu" if len(user_characters) <= 1 else "Back to Settings Menu"
+
     keyboard = [
         [f"Set Region ID ({character.region_id})"],
         [f"Set Wallet Alert ({character.wallet_balance_threshold:,.0f} ISK)"],
-        ["Back to Settings Menu"]
+        [back_button_text]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     context.user_data['next_action'] = ('manage_settings', character.id)
@@ -2165,7 +2171,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         character_id = data
         character = get_character_by_id(character_id)
 
-        if text == "Back to Notifications Menu":
+        if text in ["Back to Notifications Menu", "Back to Main Menu"]:
             context.user_data.clear()
             user_characters = get_characters_for_user(user_id)
             if len(user_characters) > 1:
@@ -2232,7 +2238,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # --- General Settings Management ---
     if action_type == 'manage_settings':
         character_id = data
-        if text == "Back to Settings Menu":
+        if text in ["Back to Settings Menu", "Back to Main Menu"]:
             context.user_data.clear()
             user_characters = get_characters_for_user(user_id)
             if len(user_characters) > 1:
