@@ -2619,6 +2619,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(callback_query_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
+    # Start the bot
+    application.run_polling()
+
 
 async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays a menu to choose between open buy or sell orders."""
