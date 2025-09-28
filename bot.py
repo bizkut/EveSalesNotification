@@ -1245,11 +1245,16 @@ async def master_wallet_transaction_poll(application: Application):
                 if not history_backfilled_at_str:
                     logging.info(f"Skipping wallet poll for {character.name} because historical data has not been backfilled yet.")
                     continue
-
-                history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
-                if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
-                    logging.info(f"Skipping wallet poll for {character.name} (within 1-hour grace period after historical sync).")
-                    continue
+                try:
+                    history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+                    if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+                        logging.info(f"Skipping wallet poll for {character.name} (within 1-hour grace period after historical sync).")
+                        continue
+                except ValueError:
+                    # This handles the legacy 'true' value for characters who backfilled before this change.
+                    # We can safely assume their grace period is over.
+                    logging.debug(f"Could not parse backfill timestamp for {character.name} (likely legacy value). Proceeding with poll.")
+                    pass
 
                 logging.debug(f"Polling wallet for {character.name}")
                 try:
@@ -1430,11 +1435,16 @@ async def master_order_history_poll(application: Application):
                 if not history_backfilled_at_str:
                     logging.info(f"Skipping order history poll for {character.name} because historical data has not been backfilled yet.")
                     continue
-
-                history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
-                if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
-                    logging.info(f"Skipping order history poll for {character.name} (within 1-hour grace period after historical sync).")
-                    continue
+                try:
+                    history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+                    if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+                        logging.info(f"Skipping order history poll for {character.name} (within 1-hour grace period after historical sync).")
+                        continue
+                except ValueError:
+                    # This handles the legacy 'true' value for characters who backfilled before this change.
+                    # We can safely assume their grace period is over.
+                    logging.debug(f"Could not parse backfill timestamp for {character.name} (likely legacy value). Proceeding with poll.")
+                    pass
 
                 logging.debug(f"Polling order history for {character.name}")
                 try:
