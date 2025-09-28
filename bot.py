@@ -1638,15 +1638,29 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
         f"  - *Gross Revenue (Sales - Fees):* `{summary_data['gross_revenue_month']:,.2f} ISK`"
     )
 
-    # Dynamically generate year buttons, sorted from newest to oldest
-    available_years = sorted(summary_data['available_years'], reverse=True)
-    year_buttons = [InlineKeyboardButton(f"Chart {year}", callback_data=f"chart_yearly_{character.id}_{year}") for year in available_years]
+    # --- Chart Buttons ---
+    keyboard = []
+    now = summary_data['now']
+    current_year = now.year
 
-    # Always include the current month chart button
-    keyboard = [[InlineKeyboardButton("Daily Chart (This Month)", callback_data=f"chart_monthly_{character.id}_{now.year}")]]
-    # Add year buttons, chunked into rows of 4 for readability
-    for i in range(0, len(year_buttons), 4):
-        keyboard.append(year_buttons[i:i+4])
+    # First row of buttons: Hourly and Daily charts
+    chart_buttons_row1 = [
+        InlineKeyboardButton("Hourly Chart (24h)", callback_data=f"chart_hourly_{character.id}_{current_year}"),
+        InlineKeyboardButton("Daily Chart (This Month)", callback_data=f"chart_daily_{character.id}_{current_year}")
+    ]
+    keyboard.append(chart_buttons_row1)
+
+
+    # Dynamically generate year buttons for monthly charts, sorted from newest to oldest
+    available_years = sorted(summary_data['available_years'], reverse=True)
+    year_buttons = [
+        InlineKeyboardButton(f"Monthly Chart ({year})", callback_data=f"chart_monthly_{character.id}_{year}")
+        for year in available_years
+    ]
+
+    # Add monthly chart buttons, chunked into rows of 2 for readability
+    for i in range(0, len(year_buttons), 2):
+        keyboard.append(year_buttons[i:i+2])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     return message, reply_markup
@@ -2224,7 +2238,90 @@ def format_isk(value):
     return f"{value:.2f}"
 
 
-def generate_daily_chart_for_month(character_id: int):
+def generate_hourly_chart(character_id: int):
+    """Generates a line chart of sales, fees, and profit for the last 24 hours."""
+    character = get_character_by_id(character_id)
+    if not character:
+        return None
+
+    now = datetime.now(timezone.utc)
+    twenty_four_hours_ago = now - timedelta(days=1)
+
+    # Fetch data directly from the historical tables in the database
+    all_transactions = get_historical_transactions_from_db(character_id)
+    all_journal_entries = get_historical_journal_entries_from_db(character_id)
+
+    # Filter for the last 24 hours
+    hourly_sales_tx = [
+        tx for tx in all_transactions if not tx.get('is_buy') and
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > twenty_four_hours_ago
+    ]
+    hourly_journal = [
+        e for e in all_journal_entries if
+        datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > twenty_four_hours_ago
+    ]
+
+    if not hourly_sales_tx and not hourly_journal:
+        return None  # No data for this period
+
+    # Initialize data structures for each of the last 24 hours
+    hours = [(now - timedelta(hours=i)).strftime('%H:00') for i in range(24)]
+    hours.reverse() # From oldest to newest
+    hourly_sales = {hour: 0 for hour in hours}
+    hourly_fees = {hour: 0 for hour in hours}
+    hourly_profit = {hour: 0 for hour in hours}
+
+    for i in range(24):
+        hour_start = now - timedelta(hours=23-i)
+        hour_end = hour_start + timedelta(hours=1)
+        hour_label = hour_start.strftime('%H:00')
+
+        hour_sales_tx = [
+            tx for tx in hourly_sales_tx if
+            hour_start <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) < hour_end
+        ]
+        hour_journal = [
+            e for e in hourly_journal if
+            hour_start <= datetime.fromisoformat(e['date'].replace('Z', '+00:00')) < hour_end
+        ]
+
+        sales = sum(s['quantity'] * s['unit_price'] for s in hour_sales_tx)
+        fees = sum(abs(e.get('amount', 0)) for e in hour_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
+        profit = calculate_fifo_profit_for_summary(hour_sales_tx, character_id) - fees
+
+        hourly_sales[hour_label] = sales
+        hourly_fees[hour_label] = fees
+        hourly_profit[hour_label] = profit
+
+    # --- Chart Generation ---
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(12, 7))
+    fig.patch.set_facecolor('#1c1c1c')
+    ax.set_facecolor('#282828')
+
+    ax.plot(hours, list(hourly_sales.values()), label='Sales', color='cyan', marker='o', linestyle='-')
+    ax.plot(hours, list(hourly_profit.values()), label='Profit', color='lime', marker='o', linestyle='-')
+    ax.plot(hours, list(hourly_fees.values()), label='Fees', color='red', marker='o', linestyle='-')
+
+    ax.set_title(f'Hourly Performance for {character.name} (Last 24h)', color='white', fontsize=16)
+    ax.set_xlabel('Hour (UTC)', color='white', fontsize=12)
+    ax.set_ylabel('ISK', color='white', fontsize=12)
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
+    ax.legend()
+    plt.xticks(rotation=45, ha='right')
+    ax.tick_params(axis='x', colors='white')
+    ax.tick_params(axis='y', colors='white')
+    plt.setp(ax.spines.values(), color='gray')
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def generate_daily_chart(character_id: int):
     """Generates a line chart of sales, fees, and profit for the current month."""
     character = get_character_by_id(character_id)
     if not character:
@@ -2281,7 +2378,7 @@ def generate_daily_chart_for_month(character_id: int):
     ax.plot(days, list(daily_profit.values()), label='Profit', color='lime', marker='o', linestyle='-')
     ax.plot(days, list(daily_fees.values()), label='Fees', color='red', marker='o', linestyle='-')
 
-    ax.set_title(f'Monthly Performance for {character.name} - {now.strftime("%B %Y")}', color='white', fontsize=16)
+    ax.set_title(f'Daily Performance for {character.name} - {now.strftime("%B %Y")}', color='white', fontsize=16)
     ax.set_xlabel('Day of Month', color='white', fontsize=12)
     ax.set_ylabel('ISK', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
@@ -2297,7 +2394,7 @@ def generate_daily_chart_for_month(character_id: int):
     buf.seek(0)
     return buf
 
-def generate_yearly_chart(character_id: int, year: int):
+def generate_monthly_chart(character_id: int, year: int):
     """Generates a line chart of sales, fees, and profit for a specific year."""
     character = get_character_by_id(character_id)
     if not character:
@@ -2350,7 +2447,7 @@ def generate_yearly_chart(character_id: int, year: int):
     ax.plot(month_names, list(monthly_profit.values()), label='Profit', color='lime', marker='o', linestyle='-')
     ax.plot(month_names, list(monthly_fees.values()), label='Fees', color='red', marker='o', linestyle='-')
 
-    ax.set_title(f'Yearly Performance for {character.name} - {year}', color='white', fontsize=16)
+    ax.set_title(f'Monthly Performance for {character.name} - {year}', color='white', fontsize=16)
     ax.set_xlabel('Month', color='white', fontsize=12)
     ax.set_ylabel('ISK', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray')
@@ -2387,10 +2484,12 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     chart_buffer = None
     try:
-        if chart_type == 'monthly':
-            chart_buffer = generate_daily_chart_for_month(character_id)
-        elif chart_type == 'yearly':
-            chart_buffer = generate_yearly_chart(character_id, year)
+        if chart_type == 'hourly':
+            chart_buffer = await asyncio.to_thread(generate_hourly_chart, character_id)
+        elif chart_type == 'daily':
+            chart_buffer = await asyncio.to_thread(generate_daily_chart, character_id)
+        elif chart_type == 'monthly':
+            chart_buffer = await asyncio.to_thread(generate_monthly_chart, character_id, year)
     except Exception as e:
         logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
         await context.bot.edit_message_text(
