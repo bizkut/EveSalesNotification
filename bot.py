@@ -1336,16 +1336,23 @@ async def master_wallet_transaction_poll(application: Application):
                         if tx['is_buy']:
                             buys[tx['type_id']].append(tx)
                         else:
-                            # Verify that this non-buy transaction is actually a market sale
-                            ref_type = journal_ref_types.get(tx['journal_ref_id'])
-                            if ref_type == 'market_transaction':
-                                sales[tx['type_id']].append(tx)
+                            # This is the cross-referencing logic.
+                            journal_ref_id = tx['journal_ref_id']
+                            ref_type = journal_ref_types.get(journal_ref_id)
+
+                            logging.info(f"Analyzing transaction_id {tx['transaction_id']} for {character.name}...")
+                            logging.info(f"  - Transaction's journal_ref_id: {journal_ref_id}")
+
+                            if ref_type:
+                                logging.info(f"  - Found matching journal entry with ref_type: '{ref_type}'")
+                                if ref_type == 'market_transaction':
+                                    logging.info("  - DECISION: Confirmed as a market sale. Adding to sales queue.")
+                                    sales[tx['type_id']].append(tx)
+                                else:
+                                    logging.info(f"  - DECISION: Ignoring transaction. Reason: ref_type is not 'market_transaction'.")
                             else:
-                                logging.info(
-                                    f"Ignoring non-sale transaction for {character.name} "
-                                    f"(ID: {tx['transaction_id']}, Type: {ref_type}, "
-                                    f"Value: {tx['quantity'] * tx['unit_price']:,.2f} ISK)"
-                                )
+                                logging.warning(f"  - Could not find a matching journal entry for journal_ref_id: {journal_ref_id}")
+                                logging.warning(f"  - DECISION: Ignoring transaction. Reason: Missing journal entry link.")
 
                     all_type_ids = list(sales.keys()) + list(buys.keys())
                     all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
