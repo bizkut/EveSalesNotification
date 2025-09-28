@@ -2320,19 +2320,18 @@ def generate_hourly_chart(character_id: int):
 
     # Fetch data directly from the historical tables in the database
     all_transactions = get_historical_transactions_from_db(character_id)
-    all_journal_entries = get_historical_journal_entries_from_db(character_id)
+    all_trading_fees = get_trading_fees_from_db(character_id)
 
     # Filter for the last 24 hours
-    hourly_sales_tx = [
+    sales_past_24_hours = [
         tx for tx in all_transactions if not tx.get('is_buy') and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > twenty_four_hours_ago
     ]
-    hourly_journal = [
-        e for e in all_journal_entries if
-        datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > twenty_four_hours_ago
+    fees_past_24_hours = [
+        f for f in all_trading_fees if f['date'] > twenty_four_hours_ago
     ]
 
-    if not hourly_sales_tx and not hourly_journal:
+    if not sales_past_24_hours and not fees_past_24_hours:
         return None  # No data for this period
 
     # Initialize data structures for each of the last 24 hours
@@ -2348,17 +2347,23 @@ def generate_hourly_chart(character_id: int):
         hour_label = hour_start.strftime('%H:00')
 
         hour_sales_tx = [
-            tx for tx in hourly_sales_tx if
+            tx for tx in sales_past_24_hours if
             hour_start <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) < hour_end
         ]
-        hour_journal = [
-            e for e in hourly_journal if
-            hour_start <= datetime.fromisoformat(e['date'].replace('Z', '+00:00')) < hour_end
+        hour_trading_fees = [
+            f for f in fees_past_24_hours if hour_start <= f['date'] < hour_end
         ]
 
         sales = sum(s['quantity'] * s['unit_price'] for s in hour_sales_tx)
-        fees = sum(abs(e.get('amount', 0)) for e in hour_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
-        profit = calculate_fifo_profit_for_summary(hour_sales_tx, character_id) - fees
+
+        # Calculate fees based on sales and other trading fees
+        sales_broker_fees = sales * (character.broker_fee / 100.0)
+        sales_tax = sales * (character.sales_tax / 100.0)
+        other_fees = sum(f['fee_amount'] for f in hour_trading_fees)
+        fees = sales_broker_fees + sales_tax + other_fees
+
+        gross_profit = calculate_fifo_profit_for_summary(hour_sales_tx, character_id)
+        profit = gross_profit - fees
 
         hourly_sales[hour_label] = sales
         hourly_fees[hour_label] = fees
@@ -2405,8 +2410,7 @@ def generate_daily_chart(character_id: int):
 
     # Fetch data directly from the historical tables in the database
     all_transactions = get_historical_transactions_from_db(character_id)
-    all_journal_entries = get_historical_journal_entries_from_db(character_id)
-
+    all_trading_fees = get_trading_fees_from_db(character_id)
 
     daily_sales = {day: 0 for day in days}
     daily_fees = {day: 0 for day in days}
@@ -2418,22 +2422,27 @@ def generate_daily_chart(character_id: int):
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == year and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == month
     ]
-    monthly_journal = [
-        e for e in all_journal_entries if
-        datetime.fromisoformat(e['date'].replace('Z', '+00:00')).year == year and
-        datetime.fromisoformat(e['date'].replace('Z', '+00:00')).month == month
+    monthly_fees_tx = [
+        f for f in all_trading_fees if
+        f['date'].year == year and f['date'].month == month
     ]
 
-    if not monthly_sales_tx and not monthly_journal:
+    if not monthly_sales_tx and not monthly_fees_tx:
         return None # No data for this month
 
     for day in days:
         day_sales_tx = [tx for tx in monthly_sales_tx if datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).day == day]
-        day_journal = [e for e in monthly_journal if datetime.fromisoformat(e['date'].replace('Z', '+00:00')).day == day]
+        day_trading_fees = [f for f in monthly_fees_tx if f['date'].day == day]
 
         sales = sum(s['quantity'] * s['unit_price'] for s in day_sales_tx)
-        fees = sum(abs(e.get('amount', 0)) for e in day_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
-        profit = calculate_fifo_profit_for_summary(day_sales_tx, character_id) - fees
+
+        sales_broker_fees = sales * (character.broker_fee / 100.0)
+        sales_tax = sales * (character.sales_tax / 100.0)
+        other_fees = sum(f['fee_amount'] for f in day_trading_fees)
+        fees = sales_broker_fees + sales_tax + other_fees
+
+        gross_profit = calculate_fifo_profit_for_summary(day_sales_tx, character_id)
+        profit = gross_profit - fees
 
         daily_sales[day] = sales
         daily_fees[day] = fees
@@ -2476,7 +2485,7 @@ def generate_monthly_chart(character_id: int, year: int):
 
     # Fetch data directly from the historical tables in the database
     all_transactions = get_historical_transactions_from_db(character_id)
-    all_journal_entries = get_historical_journal_entries_from_db(character_id)
+    all_trading_fees = get_trading_fees_from_db(character_id)
 
 
     monthly_sales = {m: 0 for m in months}
@@ -2488,21 +2497,26 @@ def generate_monthly_chart(character_id: int, year: int):
         tx for tx in all_transactions if not tx.get('is_buy') and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == year
     ]
-    yearly_journal = [
-        e for e in all_journal_entries if
-        datetime.fromisoformat(e['date'].replace('Z', '+00:00')).year == year
+    yearly_fees_tx = [
+        f for f in all_trading_fees if f['date'].year == year
     ]
 
-    if not yearly_sales_tx and not yearly_journal:
+    if not yearly_sales_tx and not yearly_fees_tx:
         return None # No data for this year
 
     for month in months:
         month_sales_tx = [tx for tx in yearly_sales_tx if datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == month]
-        month_journal = [e for e in yearly_journal if datetime.fromisoformat(e['date'].replace('Z', '+00:00')).month == month]
+        month_trading_fees = [f for f in yearly_fees_tx if f['date'].month == month]
 
         sales = sum(s['quantity'] * s['unit_price'] for s in month_sales_tx)
-        fees = sum(abs(e.get('amount', 0)) for e in month_journal if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
-        profit = calculate_fifo_profit_for_summary(month_sales_tx, character_id) - fees
+
+        sales_broker_fees = sales * (character.broker_fee / 100.0)
+        sales_tax = sales * (character.sales_tax / 100.0)
+        other_fees = sum(f['fee_amount'] for f in month_trading_fees)
+        fees = sales_broker_fees + sales_tax + other_fees
+
+        gross_profit = calculate_fifo_profit_for_summary(month_sales_tx, character_id)
+        profit = gross_profit - fees
 
         monthly_sales[month] = sales
         monthly_fees[month] = fees
