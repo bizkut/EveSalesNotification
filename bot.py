@@ -1896,8 +1896,12 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
     """Helper function to fetch and display balances for a list of characters."""
+    query = update.callback_query
     char_names = ", ".join([c.name for c in characters])
-    await update.message.reply_text(f"Fetching balance(s) for {char_names}...")
+
+    # For callbacks, let the user know we're working on it
+    if query:
+        await query.edit_message_text(f"⏳ Fetching balance(s) for {char_names}...")
 
     message_lines = ["💰 *Wallet Balances* 💰\n"]
     total_balance = 0
@@ -1914,20 +1918,31 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
     if len(characters) > 1 and not errors:
         message_lines.append(f"\n**Combined Total:** `{total_balance:,.2f} ISK`")
 
-    # Use the main menu keyboard for the reply
-    keyboard = [
-        ["/balance", "/summary"],
-        ["/sales", "/buys"],
-        ["/notifications", "/settings"],
-        ["/add_character"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    final_text = "\n".join(message_lines)
 
-    await update.message.reply_text(
-        text="\n".join(message_lines),
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
+    if query:
+        # For callbacks, edit the message and add a "Back" button
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="start_command")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=final_text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    else:
+        # For commands, send a new message with a ReplyKeyboardMarkup
+        keyboard = [
+            ["/balance", "/summary"],
+            ["/sales", "/buys"],
+            ["/notifications", "/settings"],
+            ["/add_character"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(
+            text=final_text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1990,12 +2005,14 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool, characters: list[Character]) -> None:
     """Helper function to get the last 5 transactions (sales or buys) for a specific list of characters."""
-    user_id = update.effective_user.id
+    query = update.callback_query
     action = "buys" if is_buy else "sales"
     icon = "🛒" if is_buy else "✅"
-
     char_names = ", ".join([c.name for c in characters])
-    await update.message.reply_text(f"Fetching recent {action} for {char_names}...")
+
+    # For callbacks, let the user know we're working on it
+    if query:
+        await query.edit_message_text(f"⏳ Fetching recent {action} for {char_names}...")
 
     all_transactions = []
     all_order_history = []
@@ -2009,56 +2026,58 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
         if order_history:
             all_order_history.extend(order_history)
 
-    if not all_transactions:
-        await update.message.reply_text(f"No transaction history found for {char_names}.")
-        return
+    message_text = f"No transaction history found for {char_names}."
+    if all_transactions:
+        filtered_tx = sorted(
+            [tx for tx in all_transactions if tx.get('is_buy') == is_buy],
+            key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
+            reverse=True
+        )[:5]
 
-    filtered_tx = sorted(
-        [tx for tx in all_transactions if tx.get('is_buy') == is_buy],
-        key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')),
-        reverse=True
-    )[:5]
+        if not filtered_tx:
+            message_text = f"No recent {action} found for {char_names}."
+        else:
+            # Correct the location ID for each transaction by matching it to a historical order
+            for tx in filtered_tx:
+                if all_order_history:
+                    candidate_orders = [
+                        o for o in all_order_history
+                        if o.get('type_id') == tx.get('type_id') and
+                           o.get('is_buy_order') == tx.get('is_buy') and
+                           o.get('issued') and
+                           datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
+                    ]
+                    if candidate_orders:
+                        best_match_order = max(candidate_orders, key=lambda o: datetime.fromisoformat(o['issued'].replace('Z', '+00:00')))
+                        tx['location_id'] = best_match_order.get('location_id', tx['location_id'])
 
-    if not filtered_tx:
-        await update.message.reply_text(f"No recent {action} found for {char_names}.")
-        return
+            item_ids = [tx['type_id'] for tx in filtered_tx]
+            loc_ids = [tx['location_id'] for tx in filtered_tx]
+            id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)), character=characters[0])
 
-    # Correct the location ID for each transaction by matching it to a historical order
-    for tx in filtered_tx:
-        if all_order_history:
-            candidate_orders = [
-                o for o in all_order_history
-                if o.get('type_id') == tx.get('type_id') and
-                   o.get('is_buy_order') == tx.get('is_buy') and
-                   o.get('issued') and
-                   datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
-            ]
-            if candidate_orders:
-                best_match_order = max(candidate_orders, key=lambda o: datetime.fromisoformat(o['issued'].replace('Z', '+00:00')))
-                tx['location_id'] = best_match_order.get('location_id', tx['location_id'])
+            title_char_name = char_names if len(characters) == 1 else "All Characters"
+            message_lines = [f"{icon} *Last 5 {action.capitalize()} ({title_char_name})* {icon}\n"]
+            for tx in filtered_tx:
+                item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
+                loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
+                date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+                char_name_str = f" ({tx['character_name']})" if len(characters) > 1 else ""
+                message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.{char_name_str}")
+            message_text = "\n".join(message_lines)
 
-    item_ids = [tx['type_id'] for tx in filtered_tx]
-    loc_ids = [tx['location_id'] for tx in filtered_tx]
-    id_to_name = get_names_from_ids(list(set(item_ids + loc_ids)), character=characters[0])
-
-    title_char_name = char_names if len(characters) == 1 else "All Characters"
-    message_lines = [f"{icon} *Last 5 {action.capitalize()} ({title_char_name})* {icon}\n"]
-    for tx in filtered_tx:
-        item_name = id_to_name.get(tx['type_id'], 'Unknown Item')
-        loc_name = id_to_name.get(tx['location_id'], 'Unknown Location')
-        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-        char_name_str = f" ({tx['character_name']})" if len(characters) > 1 else ""
-        message_lines.append(f"• `{date_str}`: `{tx['quantity']}` x `{item_name}` for `{tx['unit_price']:,.2f} ISK` each at `{loc_name}`.{char_name_str}")
-
-    # Use the main menu keyboard for the reply
-    keyboard = [
-        ["/balance", "/summary"],
-        ["/sales", "/buys"],
-        ["/notifications", "/settings"],
-        ["/add_character"]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("\n".join(message_lines), parse_mode='Markdown', reply_markup=reply_markup)
+    if query:
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="start_command")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text=message_text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        keyboard = [
+            ["/balance", "/summary"],
+            ["/sales", "/buys"],
+            ["/notifications", "/settings"],
+            ["/add_character"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 def format_isk(value):
