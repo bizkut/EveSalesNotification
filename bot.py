@@ -52,6 +52,9 @@ class Character:
     enable_daily_summary: bool
     notification_batch_threshold: int
     created_at: datetime
+    broker_fee: float
+    sales_tax: float
+    citadel_broker_fee: float
 
 CHARACTERS: list[Character] = []
 
@@ -68,7 +71,8 @@ def load_characters_from_db():
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at
+                    enable_daily_summary, notification_batch_threshold, created_at,
+                    broker_fee, sales_tax, citadel_broker_fee
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -86,7 +90,8 @@ def load_characters_from_db():
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             region_id, wallet_balance_threshold,
             enable_sales, enable_buys,
-            enable_summary, batch_threshold, created_at
+            enable_summary, batch_threshold, created_at,
+            broker_fee, sales_tax, citadel_broker_fee
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -103,7 +108,10 @@ def load_characters_from_db():
             enable_buy_notifications=bool(enable_buys),
             enable_daily_summary=bool(enable_summary),
             notification_batch_threshold=batch_threshold,
-            created_at=created_at
+            created_at=created_at,
+            broker_fee=float(broker_fee),
+            sales_tax=float(sales_tax),
+            citadel_broker_fee=float(citadel_broker_fee)
         )
         CHARACTERS.append(character)
         logging.info(f"Loaded character: {character.name} ({character.id})")
@@ -139,18 +147,60 @@ def setup_database():
                     enable_buy_notifications BOOLEAN DEFAULT TRUE,
                     enable_daily_summary BOOLEAN DEFAULT TRUE,
                     notification_batch_threshold INTEGER DEFAULT 3,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now())
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
+                    broker_fee REAL DEFAULT 3.0,
+                    sales_tax REAL DEFAULT 7.5,
+                    citadel_broker_fee REAL DEFAULT 3.0
                 )
             """)
+
+            # Migration: Add new fee columns if they don't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'broker_fee'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'broker_fee' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN broker_fee REAL DEFAULT 3.0;")
+                logging.info("Migration for 'broker_fee' complete.")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'sales_tax'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'sales_tax' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN sales_tax REAL DEFAULT 7.5;")
+                logging.info("Migration for 'sales_tax' complete.")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'citadel_broker_fee'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'citadel_broker_fee' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN citadel_broker_fee REAL DEFAULT 3.0;")
+                logging.info("Migration for 'citadel_broker_fee' complete.")
+
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS market_orders (
                     order_id BIGINT NOT NULL,
                     character_id INTEGER NOT NULL,
                     volume_remain INTEGER NOT NULL,
+                    price NUMERIC(17, 2) NOT NULL,
                     PRIMARY KEY (order_id, character_id)
                 )
             """)
+            # Migration: Add price column to market_orders if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'market_orders' AND column_name = 'price'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'price' column to market_orders table...")
+                # Add the column and set a default that will be updated on the next poll
+                cursor.execute("ALTER TABLE market_orders ADD COLUMN price NUMERIC(17, 2) DEFAULT 0.0;")
+                logging.info("Migration for 'price' complete.")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trading_fees (
+                    fee_id SERIAL PRIMARY KEY,
+                    character_id INTEGER NOT NULL,
+                    fee_amount NUMERIC(17, 2) NOT NULL,
+                    reason TEXT NOT NULL,
+                    date TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trading_fees_char_date ON trading_fees (character_id, date DESC);")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bot_state (
                     key TEXT PRIMARY KEY,
@@ -232,42 +282,6 @@ def setup_database():
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_trans_char_date ON historical_transactions (character_id, date DESC);")
 
-            cursor.execute("""
-            CREATE TABLE IF NOT EXISTS historical_journal_entries (
-                entry_id BIGINT NOT NULL,
-                character_id INTEGER NOT NULL,
-                date TIMESTAMP WITH TIME ZONE NOT NULL,
-                ref_type TEXT NOT NULL,
-                amount DOUBLE PRECISION,
-                balance DOUBLE PRECISION,
-                context_id BIGINT,
-                context_id_type TEXT,
-                description TEXT,
-                first_party_id INTEGER,
-                reason TEXT,
-                second_party_id INTEGER,
-                tax DOUBLE PRECISION,
-                tax_receiver_id INTEGER,
-                -- Added to link fees back to transactions
-                journal_ref_id BIGINT,
-                PRIMARY KEY (entry_id, character_id)
-            )
-            """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_journal_char_date ON historical_journal_entries (character_id, date DESC);")
-
-            # Migration: Add journal_ref_id to historical_journal_entries table if it doesn't exist
-            cursor.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'historical_journal_entries' AND column_name = 'journal_ref_id'
-            """)
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'journal_ref_id' column to historical_journal_entries table...")
-                cursor.execute("ALTER TABLE historical_journal_entries ADD COLUMN journal_ref_id BIGINT;")
-                logging.info("Migration for 'journal_ref_id' complete.")
-
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_journal_ref_id ON historical_journal_entries (journal_ref_id);")
-
-
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -332,13 +346,14 @@ def set_bot_state(key, value):
         database.release_db_connection(conn)
 
 def get_tracked_market_orders(character_id):
-    """Retrieves all tracked market orders for a specific character."""
+    """Retrieves all tracked market orders for a specific character, including price."""
     conn = database.get_db_connection()
     orders = {}
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT order_id, volume_remain FROM market_orders WHERE character_id = %s", (character_id,))
-            orders = {row[0]: row[1] for row in cursor.fetchall()}
+            cursor.execute("SELECT order_id, volume_remain, price FROM market_orders WHERE character_id = %s", (character_id,))
+            # Convert price from Decimal to float
+            orders = {row[0]: {'volume_remain': row[1], 'price': float(row[2])} for row in cursor.fetchall()}
     finally:
         database.release_db_connection(conn)
     return orders
@@ -350,15 +365,39 @@ def update_tracked_market_orders(character_id, orders):
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
-            orders_with_char_id = [(o[0], character_id, o[1]) for o in orders]
+            # orders is now expected to be a list of dicts: [{'order_id': X, 'volume_remain': Y, 'price': Z}, ...]
+            orders_with_char_id = [
+                (o['order_id'], character_id, o['volume_remain'], o['price']) for o in orders
+            ]
             upsert_query = """
-                INSERT INTO market_orders (order_id, character_id, volume_remain)
-                VALUES (%s, %s, %s)
+                INSERT INTO market_orders (order_id, character_id, volume_remain, price)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (order_id, character_id) DO UPDATE
-                SET volume_remain = EXCLUDED.volume_remain;
+                SET volume_remain = EXCLUDED.volume_remain,
+                    price = EXCLUDED.price;
             """
             cursor.executemany(upsert_query, orders_with_char_id)
             conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+
+def add_trading_fee(character_id: int, fee_amount: float, reason: str, date: datetime = None):
+    """Adds a record of a trading fee to the database."""
+    if date is None:
+        date = datetime.now(timezone.utc)
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO trading_fees (character_id, fee_amount, reason, date)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (character_id, fee_amount, reason, date)
+            )
+            conn.commit()
+        logging.info(f"Recorded trading fee for char {character_id}: {fee_amount:,.2f} ISK ({reason}).")
     finally:
         database.release_db_connection(conn)
 
@@ -560,7 +599,9 @@ def get_character_by_id(character_id: int) -> Character | None:
 
 def update_character_setting(character_id: int, setting: str, value: any):
     """Updates a specific setting for a character in the database."""
-    allowed_settings = ["region_id", "wallet_balance_threshold"]
+    allowed_settings = [
+        "region_id", "wallet_balance_threshold", "broker_fee", "sales_tax", "citadel_broker_fee"
+    ]
     if setting not in allowed_settings:
         logging.error(f"Attempted to update an invalid setting: {setting}")
         return
@@ -568,6 +609,10 @@ def update_character_setting(character_id: int, setting: str, value: any):
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
+            # Use a parameterized query for the column name to prevent SQL injection,
+            # even though we've already validated the setting against a safelist.
+            # psycopg2 doesn't support parameterizing column names directly, so we format it in.
+            # This is safe due to the allowlist check above.
             query = f"UPDATE characters SET {setting} = %s WHERE character_id = %s"
             cursor.execute(query, (value, character_id))
             conn.commit()
@@ -628,40 +673,6 @@ def get_historical_transactions_from_db(character_id: int) -> list:
         database.release_db_connection(conn)
     return transactions
 
-def get_historical_journal_entries_from_db(character_id: int) -> list:
-    """Retrieves all historical journal entries for a character from the local database."""
-    conn = database.get_db_connection()
-    entries = []
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT entry_id, date, ref_type, amount, balance, context_id, context_id_type, description, first_party_id, reason, second_party_id, tax, tax_receiver_id, journal_ref_id FROM historical_journal_entries WHERE character_id = %s",
-                (character_id,)
-            )
-            rows = cursor.fetchall()
-            # Reconstruct the dictionary to match the ESI response format
-            for row in rows:
-                entries.append({
-                    "id": row[0],
-                    "date": row[1].isoformat(),
-                    "ref_type": row[2],
-                    "amount": row[3],
-                    "balance": row[4],
-                    "context_id": row[5],
-                    "context_id_type": row[6],
-                    "description": row[7],
-                    "first_party_id": row[8],
-                    "reason": row[9],
-                    "second_party_id": row[10],
-                    "tax": row[11],
-                    "tax_receiver_id": row[12],
-                    "ref_id": row[13] # Add journal_ref_id back in as ref_id
-                })
-    finally:
-        database.release_db_connection(conn)
-    return entries
-
-
 def delete_character(character_id: int):
     """Deletes a character and all of their associated data from the database."""
     conn = database.get_db_connection()
@@ -675,7 +686,7 @@ def delete_character(character_id: int):
                 "purchase_lots",
                 "processed_orders",
                 "historical_transactions",
-                "historical_journal_entries"
+                "trading_fees"
             ]
             for table in tables_to_delete_from:
                 cursor.execute(f"DELETE FROM {table} WHERE character_id = %s", (character_id,))
@@ -819,50 +830,6 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
             return (cached_response['data'], cached_response['headers']) if return_headers else cached_response['data']
         return (None, None) if return_headers else None
 
-
-def get_wallet_journal(character, fetch_all=False, return_headers=False):
-    """
-    Fetches wallet journal entries from ESI.
-    If fetch_all is True, retrieves all pages. Otherwise, fetches only the first page.
-    Returns the list of entries, or None on failure. Optionally returns headers.
-    """
-    if not character:
-        return (None, None) if return_headers else None
-
-    all_journal_entries, page = [], 1
-    url = f"https://esi.evetech.net/v6/characters/{character.id}/wallet/journal/"
-    first_page_headers = None
-
-    while True:
-        params = {"datasource": "tranquility", "page": page}
-        revalidate_this_page = (not fetch_all) or (page == 1)
-        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
-
-        if data is None: # Explicitly check for API failure
-            logging.error(f"Failed to fetch page {page} of wallet journal for {character.name}.")
-            return (None, None) if return_headers else None
-
-        if page == 1:
-            first_page_headers = headers
-
-        if not data: # Empty list means no more pages
-            break
-
-        all_journal_entries.extend(data)
-
-        if not fetch_all:
-            break
-
-        pages_header = headers.get('x-pages') if headers else None
-        if not pages_header or int(pages_header) <= page:
-            break
-
-        page += 1
-        time.sleep(0.1)
-
-    if return_headers:
-        return all_journal_entries, first_page_headers
-    return all_journal_entries
 
 def get_access_token(refresh_token):
     url = "https://login.eveonline.com/v2/oauth/token"
@@ -1237,25 +1204,6 @@ def get_ids_from_db(table_name: str, id_column: str, character_id: int, ids_to_c
     return existing_ids
 
 
-def get_journal_ref_types_from_db(character_id: int, journal_ref_ids: list) -> dict:
-    """Retrieves a mapping of journal_ref_id -> ref_type from the local database."""
-    if not journal_ref_ids:
-        return {}
-    conn = database.get_db_connection()
-    ref_id_to_type_map = {}
-    try:
-        with conn.cursor() as cursor:
-            placeholders = ','.join(['%s'] * len(journal_ref_ids))
-            # Note: The column in the DB is also named journal_ref_id
-            query = f"SELECT journal_ref_id, ref_type FROM historical_journal_entries WHERE character_id = %s AND journal_ref_id IN ({placeholders})"
-            cursor.execute(query, [character_id] + journal_ref_ids)
-            ref_id_to_type_map = {row[0]: row[1] for row in cursor.fetchall()}
-    finally:
-        database.release_db_connection(conn)
-    logging.debug(f"Resolved {len(ref_id_to_type_map)} journal ref types from local DB.")
-    return ref_id_to_type_map
-
-
 async def master_wallet_transaction_poll(application: Application):
     """
     A single, continuous polling loop that checks for new wallet transactions
@@ -1313,39 +1261,16 @@ async def master_wallet_transaction_poll(application: Application):
                     # Add new transactions to our historical database
                     add_historical_transactions_to_db(character.id, new_transactions)
 
-                    # --- Now handle journal entries ---
-                    recent_journal_entries = get_wallet_journal(character)
-                    if recent_journal_entries:
-                        journal_ids_from_esi = [e['id'] for e in recent_journal_entries]
-                        existing_journal_ids = get_ids_from_db('historical_journal_entries', 'entry_id', character.id, journal_ids_from_esi)
-                        new_journal_entry_ids = set(journal_ids_from_esi) - existing_journal_ids
-
-                        if new_journal_entry_ids:
-                            new_journal_entries = [e for e in recent_journal_entries if e['id'] in new_journal_entry_ids]
-                            logging.info(f"Detected {len(new_journal_entries)} new journal entries for {character.name}.")
-                            add_historical_journal_entries_to_db(character.id, new_journal_entries)
-
-
                     # --- Transaction Classification ---
-                    # Get the journal ref types to distinguish real sales from other credit events (e.g., escrow refunds)
-                    journal_ref_ids = [tx['journal_ref_id'] for tx in new_transactions]
-                    journal_ref_types = get_journal_ref_types_from_db(character.id, journal_ref_ids)
-
+                    # With the journal gone, we assume all non-buy transactions are sales
+                    # and all buy transactions are buys. The broker's fee for buys will be
+                    # calculated and recorded separately.
                     sales, buys = defaultdict(list), defaultdict(list)
                     for tx in new_transactions:
                         if tx['is_buy']:
                             buys[tx['type_id']].append(tx)
                         else:
-                            # Verify that this non-buy transaction is actually a market sale
-                            ref_type = journal_ref_types.get(tx['journal_ref_id'])
-                            if ref_type == 'market_transaction':
-                                sales[tx['type_id']].append(tx)
-                            else:
-                                logging.info(
-                                    f"Ignoring non-sale transaction for {character.name} "
-                                    f"(ID: {tx['transaction_id']}, Type: {ref_type}, "
-                                    f"Value: {tx['quantity'] * tx['unit_price']:,.2f} ISK)"
-                                )
+                            sales[tx['type_id']].append(tx)
 
                     all_type_ids = list(sales.keys()) + list(buys.keys())
                     all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
@@ -1354,19 +1279,64 @@ async def master_wallet_transaction_poll(application: Application):
 
                     # --- Unconditional Data Processing ---
 
-                    # Process ALL Buys for FIFO accounting
+                    # Process ALL Buys for FIFO accounting and record broker's fee
                     if buys:
                         for type_id, tx_group in buys.items():
                             for tx in tx_group:
+                                # Add to FIFO lots for profit tracking
                                 add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+
+                                # Calculate and record the broker's fee for this buy transaction
+                                total_cost = tx['quantity'] * tx['unit_price']
+
+                                # Determine which broker fee to use
+                                # This is a simplification; a more robust solution would check the structure type.
+                                # For now, we rely on the user setting different fees as an indicator.
+                                broker_fee_percent = character.broker_fee
+                                scc_surcharge = 0
+                                if character.citadel_broker_fee != character.broker_fee:
+                                    broker_fee_percent = character.citadel_broker_fee
+                                    scc_surcharge = 0.005 # 0.5%
+
+                                fee_from_percent = total_cost * (broker_fee_percent / 100.0)
+                                broker_fee = max(100, fee_from_percent) # Minimum 100 ISK fee
+                                total_fee = broker_fee + (total_cost * scc_surcharge)
+
+                                add_trading_fee(
+                                    character_id=character.id,
+                                    fee_amount=total_fee,
+                                    reason="Buy Order Broker's Fee",
+                                    date=datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
+                                )
+
 
                     # Process Sales for FIFO accounting and prepare details for potential notification
                     sales_details = []
                     if sales:
                         for type_id, tx_group in sales.items():
                             total_quantity = sum(t['quantity'] for t in tx_group)
+                            total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+
+                            # Calculate COGS using FIFO
                             cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-                            sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs})
+
+                            # Calculate fees based on character settings
+                            broker_fee = total_value * (character.broker_fee / 100.0)
+                            sales_tax = total_value * (character.sales_tax / 100.0)
+                            total_fees = broker_fee + sales_tax
+
+                            # Calculate net profit
+                            net_profit = None
+                            if cogs is not None:
+                                net_profit = total_value - cogs - total_fees
+
+                            sales_details.append({
+                                'type_id': type_id,
+                                'tx_group': tx_group,
+                                'cogs': cogs,
+                                'total_fees': total_fees,
+                                'net_profit': net_profit
+                            })
 
                     # --- Conditional Notifications ---
                     if character.notifications_enabled:
@@ -1418,34 +1388,43 @@ async def master_wallet_transaction_poll(application: Application):
                             if len(sales_details) > character.notification_batch_threshold:
                                 header = f"✅ *Multiple Market Sales ({character.name})* ✅"
                                 item_lines = []
-                                grand_total_value, grand_total_cogs = 0, 0
+                                grand_total_value, grand_total_net_profit, grand_total_fees = 0, 0, 0
                                 for sale_info in sales_details:
                                     total_quantity = sum(t['quantity'] for t in sale_info['tx_group'])
                                     total_value = sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group'])
                                     grand_total_value += total_value
-                                    if sale_info['cogs'] is not None: grand_total_cogs += sale_info['cogs']
+                                    grand_total_fees += sale_info['total_fees']
+                                    if sale_info['net_profit'] is not None: grand_total_net_profit += sale_info['net_profit']
                                     item_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`")
-                                profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
-                                footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}"
+
+                                profit_line = f"\n**Total Net Profit:** `{grand_total_net_profit:,.2f} ISK`" if grand_total_net_profit > 0 else ""
+                                footer = (f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`"
+                                          f"\n**Total Fees:** `{grand_total_fees:,.2f} ISK`"
+                                          f"{profit_line}")
                                 if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
                                 await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
                             elif sales_details:
                                 for sale_info in sales_details:
-                                    type_id, tx_group, cogs = sale_info['type_id'], sale_info['tx_group'], sale_info['cogs']
+                                    type_id, tx_group, total_fees, net_profit = sale_info['type_id'], sale_info['tx_group'], sale_info['total_fees'], sale_info['net_profit']
                                     total_quantity = sum(t['quantity'] for t in tx_group)
                                     total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
                                     avg_price = total_value / total_quantity
-                                    profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
+
+                                    profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
+                                    fees_line = f"**Total Fees:** `{total_fees:,.2f} ISK`"
+
                                     region_orders = get_region_market_orders(character.region_id, type_id, force_revalidate=True)
                                     best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
                                     price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `N/A`"
                                     if best_buy_order_price > 0:
                                         price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
                                         price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
+
                                     message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
                                                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                                                f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
-                                               f"{price_comparison_line}\n{profit_line}\n"
+                                               f"{price_comparison_line}\n"
+                                               f"{fees_line}{profit_line}\n\n"
                                                f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
                                                f"**Wallet:** `{wallet_balance:,.2f} ISK`")
                                     await send_telegram_message(context, message, chat_id=character.telegram_user_id)
@@ -1577,6 +1556,131 @@ async def master_order_history_poll(application: Application):
         await asyncio.sleep(60)
 
 
+async def master_open_order_update_poll(application: Application):
+    """
+    A continuous polling loop that checks for changes in open market orders,
+    such as price updates, and records the associated broker's fees.
+    """
+    context = ContextTypes.DEFAULT_TYPE(application=application)
+    while True:
+        logging.info("Starting master open order update polling cycle.")
+        characters_to_poll = list(CHARACTERS)
+
+        if not characters_to_poll:
+            logging.debug("No characters to poll for open order updates. Sleeping.")
+        else:
+            for character in characters_to_poll:
+                # Grace period check
+                history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+                if not history_backfilled_at_str:
+                    logging.info(f"Skipping open order poll for {character.name} because historical data has not been backfilled yet.")
+                    continue
+                try:
+                    history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+                    if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+                        logging.info(f"Skipping open order poll for {character.name} (within 1-hour grace period).")
+                        continue
+                except ValueError:
+                    pass # Legacy value, grace period is over.
+
+                logging.debug(f"Polling open orders for {character.name}")
+                try:
+                    # 1. Fetch current orders from ESI and DB
+                    esi_orders_list = get_market_orders(character, force_revalidate=True)
+                    if esi_orders_list is None:
+                        logging.error(f"Failed to fetch open orders for {character.name}. Skipping.")
+                        continue
+
+                    tracked_orders = get_tracked_market_orders(character.id)
+                    esi_orders = {o['order_id']: o for o in esi_orders_list}
+
+                    # 2. Identify new, modified, and removed orders
+                    tracked_order_ids = set(tracked_orders.keys())
+                    esi_order_ids = set(esi_orders.keys())
+
+                    new_order_ids = esi_order_ids - tracked_order_ids
+                    removed_order_ids = tracked_order_ids - esi_order_ids
+                    existing_order_ids = esi_order_ids.intersection(tracked_order_ids)
+
+                    # 3. Process new orders - log initial broker's fee
+                    if new_order_ids:
+                        logging.info(f"Detected {len(new_order_ids)} new open orders for {character.name}.")
+                        for order_id in new_order_ids:
+                            order = esi_orders[order_id]
+                            order_value = order['price'] * order['volume_total']
+
+                            fee_percent = character.broker_fee
+                            scc_surcharge = 0
+                            # Use citadel fee for buy orders if it's different
+                            if order['is_buy_order'] and character.citadel_broker_fee != character.broker_fee:
+                                fee_percent = character.citadel_broker_fee
+                                scc_surcharge = 0.005
+
+                            fee_from_percent = order_value * (fee_percent / 100.0)
+                            broker_fee = max(100, fee_from_percent)
+                            total_fee = broker_fee + (order_value * scc_surcharge)
+
+                            add_trading_fee(
+                                character_id=character.id,
+                                fee_amount=total_fee,
+                                reason=f"New {'Buy' if order['is_buy_order'] else 'Sell'} Order",
+                                date=datetime.fromisoformat(order['issued'].replace('Z', '+00:00'))
+                            )
+
+                    # 4. Process existing orders for price changes
+                    for order_id in existing_order_ids:
+                        esi_order = esi_orders[order_id]
+                        tracked_order = tracked_orders[order_id]
+
+                        # Check if the price has been modified
+                        if esi_order['price'] != tracked_order['price']:
+                            logging.info(f"Detected price change for order {order_id} for {character.name}.")
+
+                            # A price modification is like creating a new order. Fee is on the new total value.
+                            new_order_value = esi_order['price'] * esi_order['volume_total']
+
+                            fee_percent = character.broker_fee
+                            scc_surcharge = 0
+                            if esi_order['is_buy_order'] and character.citadel_broker_fee != character.broker_fee:
+                                fee_percent = character.citadel_broker_fee
+                                scc_surcharge = 0.005
+
+                            fee_from_percent = new_order_value * (fee_percent / 100.0)
+                            broker_fee = max(100, fee_from_percent)
+                            total_fee = broker_fee + (new_order_value * scc_surcharge)
+
+                            add_trading_fee(
+                                character_id=character.id,
+                                fee_amount=total_fee,
+                                reason=f"Modified {'Buy' if esi_order['is_buy_order'] else 'Sell'} Order Price",
+                                date=datetime.now(timezone.utc) # Modification time isn't in ESI, use current time
+                            )
+
+                    # 5. Update the database with the latest state from ESI
+                    if esi_orders_list:
+                        orders_to_update = [
+                            {
+                                'order_id': o['order_id'],
+                                'volume_remain': o['volume_remain'],
+                                'price': o['price']
+                            } for o in esi_orders_list
+                        ]
+                        update_tracked_market_orders(character.id, orders_to_update)
+
+                    # 6. Remove orders that are no longer active
+                    if removed_order_ids:
+                        logging.info(f"Removing {len(removed_order_ids)} filled/cancelled orders from tracking for {character.name}.")
+                        remove_tracked_market_orders(character.id, list(removed_order_ids))
+
+                except Exception as e:
+                    logging.error(f"Error processing open orders for {character.name}: {e}", exc_info=True)
+                finally:
+                    await asyncio.sleep(1) # Stagger requests
+
+        logging.info("Master open order update polling cycle complete. Sleeping for 300 seconds.")
+        await asyncio.sleep(300) # Check every 5 minutes
+
+
 def calculate_fifo_profit_for_summary(sales_transactions, character_id):
     """
     Calculates the total profit for a given list of sales transactions using
@@ -1611,6 +1715,23 @@ def calculate_fifo_profit_for_summary(sales_transactions, character_id):
     return total_sales_value - total_cogs
 
 
+def get_trading_fees_from_db(character_id: int) -> list:
+    """Retrieves all recorded trading fees for a character from the local database."""
+    conn = database.get_db_connection()
+    fees = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT fee_amount, date FROM trading_fees WHERE character_id = %s",
+                (character_id,)
+            )
+            # Convert decimal fee_amount to float
+            fees = [{"fee_amount": float(row[0]), "date": row[1]} for row in cursor.fetchall()]
+    finally:
+        database.release_db_connection(conn)
+    return fees
+
+
 def _calculate_summary_data(character: Character) -> dict:
     """Fetches all necessary data from the local DB and calculates summary statistics."""
     logging.info(f"Calculating summary data for {character.name} from local database...")
@@ -1620,33 +1741,50 @@ def _calculate_summary_data(character: Character) -> dict:
 
     # --- Fetch data from local database ---
     all_transactions = get_historical_transactions_from_db(character.id)
-    all_journal_entries = get_historical_journal_entries_from_db(character.id)
+    all_trading_fees = get_trading_fees_from_db(character.id)
 
-    # --- 24-Hour Summary (Stateless) ---
-    total_sales_24h, total_fees_24h, profit_24h = 0, 0, 0
-    sales_past_24_hours = []
-    if all_transactions:
-        sales_past_24_hours = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago]
+    # --- 24-Hour Summary ---
+    total_sales_24h = 0
+    sales_past_24_hours = [
+        tx for tx in all_transactions if not tx.get('is_buy') and
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago
+    ]
+    if sales_past_24_hours:
         total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
 
-    if all_journal_entries:
-        journal_past_24_hours = [e for e in all_journal_entries if datetime.fromisoformat(e['date'].replace('Z', '+00:00')) > one_day_ago]
-        total_brokers_fees_24h = sum(abs(e.get('amount', 0)) for e in journal_past_24_hours if e.get('ref_type') == 'brokers_fee')
-        total_transaction_tax_24h = sum(abs(e.get('amount', 0)) for e in journal_past_24_hours if e.get('ref_type') == 'transaction_tax')
-        total_fees_24h = total_brokers_fees_24h + total_transaction_tax_24h
+    # Calculate sales-related fees for the last 24h
+    sales_broker_fees_24h = total_sales_24h * (character.broker_fee / 100.0)
+    sales_tax_24h = total_sales_24h * (character.sales_tax / 100.0)
 
-    if all_transactions:
-        profit_24h = calculate_fifo_profit_for_summary(sales_past_24_hours, character.id) - total_fees_24h
+    # Get other trading fees (buy orders, modifications) from the last 24h
+    other_fees_24h = sum(
+        f['fee_amount'] for f in all_trading_fees if f['date'] > one_day_ago
+    )
+    total_fees_24h = sales_broker_fees_24h + sales_tax_24h + other_fees_24h
 
-    # --- Monthly Summary (Stateless) ---
-    total_sales_month, total_fees_month = 0, 0
-    if all_transactions:
-        sales_this_month = [tx for tx in all_transactions if not tx.get('is_buy') and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == now.month and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == now.year]
+    # Calculate profit for the last 24h
+    gross_profit_24h = calculate_fifo_profit_for_summary(sales_past_24_hours, character.id)
+    profit_24h = gross_profit_24h - total_fees_24h
+
+    # --- Monthly Summary ---
+    total_sales_month = 0
+    sales_this_month = [
+        tx for tx in all_transactions if not tx.get('is_buy') and
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == now.month and
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == now.year
+    ]
+    if sales_this_month:
         total_sales_month = sum(s['quantity'] * s['unit_price'] for s in sales_this_month)
 
-    if all_journal_entries:
-        journal_this_month = [e for e in all_journal_entries if datetime.fromisoformat(e['date'].replace('Z', '+00:00')).month == now.month and datetime.fromisoformat(e['date'].replace('Z', '+00:00')).year == now.year]
-        total_fees_month = sum(abs(e.get('amount', 0)) for e in journal_this_month if e.get('ref_type') in ['brokers_fee', 'transaction_tax'])
+    # Calculate sales-related fees for the current month
+    sales_broker_fees_month = total_sales_month * (character.broker_fee / 100.0)
+    sales_tax_month = total_sales_month * (character.sales_tax / 100.0)
+
+    # Get other trading fees for the current month
+    other_fees_month = sum(
+        f['fee_amount'] for f in all_trading_fees if f['date'].month == now.month and f['date'].year == now.year
+    )
+    total_fees_month = sales_broker_fees_month + sales_tax_month + other_fees_month
 
     gross_revenue_month = total_sales_month - total_fees_month
     wallet_balance = get_wallet_balance(character)
@@ -1830,43 +1968,9 @@ def add_historical_transactions_to_db(character_id: int, transactions: list):
         database.release_db_connection(conn)
 
 
-def add_historical_journal_entries_to_db(character_id: int, entries: list):
-    """Adds a list of journal entries to the historical_journal_entries table."""
-    if not entries:
-        return
-    conn = database.get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            data_to_insert = [
-                (
-                    e['id'], character_id, e['date'], e['ref_type'],
-                    e.get('amount'), e.get('balance'), e.get('context_id'),
-                    e.get('context_id_type'), e.get('description'), e.get('first_party_id'),
-                    e.get('reason'), e.get('second_party_id'), e.get('tax'), e.get('tax_receiver_id'),
-                    # The journal entry's ref_id links it to a transaction's journal_ref_id
-                    e.get('ref_id')
-                ) for e in entries
-            ]
-            cursor.executemany(
-                """
-                INSERT INTO historical_journal_entries (
-                    entry_id, character_id, date, ref_type, amount, balance, context_id,
-                    context_id_type, description, first_party_id, reason, second_party_id,
-                    tax, tax_receiver_id, journal_ref_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (entry_id, character_id) DO NOTHING
-                """,
-                data_to_insert
-            )
-            conn.commit()
-            logging.info(f"Inserted/updated {len(data_to_insert)} records into historical_journal_entries for char {character_id}.")
-    finally:
-        database.release_db_connection(conn)
-
-
 def backfill_all_character_history(character: Character) -> bool:
     """
-    Performs a one-time backfill of all transaction and journal history from
+    Performs a one-time backfill of all transaction history from
     ESI into the local database for a given character.
     Returns True on success, False on any ESI failure.
     """
@@ -1892,14 +1996,6 @@ def backfill_all_character_history(character: Character) -> bool:
             add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
         logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for FIFO tracking for {character.name}.")
 
-
-    # --- Backfill Journal Entries ---
-    logging.info(f"Fetching all wallet journal entries for {character.name}...")
-    all_journal_entries = get_wallet_journal(character, fetch_all=True)
-    if all_journal_entries is None:
-        logging.error(f"Failed to fetch wallet journal during history backfill for {character.name}.")
-        return False
-    add_historical_journal_entries_to_db(character.id, all_journal_entries)
 
     # --- Backfill Order History (for cancelled/expired notifications) ---
     logging.info(f"Seeding order history for {character.name}...")
@@ -2672,9 +2768,11 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
 
     keyboard = [
         [InlineKeyboardButton("ℹ️ Character Info", callback_data=f"character_info_{character.id}")],
-        [InlineKeyboardButton(f"Trade Region: {character.region_id}", callback_data=f"set_region_{character.id}")],
-        [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
         [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
+        [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
+        [InlineKeyboardButton(f"Broker's Fee: {character.broker_fee:.2f}%", callback_data=f"set_broker_fee_{character.id}")],
+        [InlineKeyboardButton(f"Sales Tax: {character.sales_tax:.2f}%", callback_data=f"set_sales_tax_{character.id}")],
+        [InlineKeyboardButton(f"Citadel Broker's Fee: {character.citadel_broker_fee:.2f}%", callback_data=f"set_citadel_broker_fee_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2927,6 +3025,29 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text("❌ Invalid input. Please enter a valid number. Try again or type `cancel`.")
             return # Keep waiting
 
+    elif action_type in ['set_broker_fee_value', 'set_sales_tax_value', 'set_citadel_broker_fee_value']:
+        try:
+            # Remove '%' if user includes it, then convert to float
+            new_value = float(text.strip().replace('%', ''))
+            if not (0 <= new_value <= 100):
+                await update.message.reply_text("❌ Invalid input. Please enter a percentage value between 0 and 100. Try again or type `cancel`.")
+                return
+
+            setting_key_map = {
+                'set_broker_fee_value': 'broker_fee',
+                'set_sales_tax_value': 'sales_tax',
+                'set_citadel_broker_fee_value': 'citadel_broker_fee'
+            }
+            setting_key = setting_key_map[action_type]
+            setting_name = setting_key.replace('_', ' ').replace(' fee', "'s Fee").title()
+
+            update_character_setting(character_id, setting_key, new_value)
+            await update.message.reply_text(f"✅ {setting_name} updated to {new_value:.2f}%.")
+            load_characters_from_db()
+        except ValueError:
+            await update.message.reply_text("❌ Invalid input. Please enter a valid percentage (e.g., `3.5`). Try again or type `cancel`.")
+            return # Keep waiting
+
     # Clear the state and show the settings menu again
     context.user_data.clear()
     await _show_character_settings(update, context, get_character_by_id(character_id))
@@ -2944,7 +3065,8 @@ async def post_init(application: Application):
     # Start the master polling loops as background tasks
     asyncio.create_task(master_wallet_transaction_poll(application))
     asyncio.create_task(master_order_history_poll(application))
-    logging.info("Master polling loops for transactions and orders have been started.")
+    asyncio.create_task(master_open_order_update_poll(application))
+    logging.info("Master polling loops for transactions, order history, and open order updates have been started.")
 
     # Schedule the job to check for new characters
     application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
@@ -3386,6 +3508,21 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         char_id = int(data.split('_')[-1])
         context.user_data['next_action'] = ('set_wallet_value', char_id)
         await query.message.reply_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
+
+    elif data.startswith("set_broker_fee_"):
+        char_id = int(data.split('_')[-1])
+        context.user_data['next_action'] = ('set_broker_fee_value', char_id)
+        await query.message.reply_text("Please enter your character's Broker's Fee percentage (e.g., `3.0`).\n\nType `cancel` to go back.")
+
+    elif data.startswith("set_sales_tax_"):
+        char_id = int(data.split('_')[-1])
+        context.user_data['next_action'] = ('set_sales_tax_value', char_id)
+        await query.message.reply_text("Please enter your character's Sales Tax percentage (e.g., `7.5`).\n\nType `cancel` to go back.")
+
+    elif data.startswith("set_citadel_broker_fee_"):
+        char_id = int(data.split('_')[-1])
+        context.user_data['next_action'] = ('set_citadel_broker_fee_value', char_id)
+        await query.message.reply_text("Please enter your Citadel Broker's Fee percentage for buy orders (or the same as your normal broker's fee if not applicable).\n\nType `cancel` to go back.")
 
     # --- Character Removal Flow ---
     elif data.startswith("remove_select_"):
