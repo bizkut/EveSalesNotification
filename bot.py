@@ -792,10 +792,10 @@ def get_wallet_journal(character, fetch_all=False, return_headers=False):
     """
     Fetches wallet journal entries from ESI.
     If fetch_all is True, retrieves all pages. Otherwise, fetches only the first page.
-    Returns the list of entries and optionally the headers from the first page request.
+    Returns the list of entries, or None on failure. Optionally returns headers.
     """
     if not character:
-        return ([], None) if return_headers else []
+        return (None, None) if return_headers else None
 
     all_journal_entries, page = [], 1
     url = f"https://esi.evetech.net/v6/characters/{character.id}/wallet/journal/"
@@ -806,17 +806,19 @@ def get_wallet_journal(character, fetch_all=False, return_headers=False):
         revalidate_this_page = (not fetch_all) or (page == 1)
         data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
 
+        if data is None: # Explicitly check for API failure
+            logging.error(f"Failed to fetch page {page} of wallet journal for {character.name}.")
+            return (None, None) if return_headers else None
+
         if page == 1:
             first_page_headers = headers
 
-        if not data:
-            if page == 1 and not fetch_all:
-                logging.error(f"Failed to fetch first page of wallet journal for {character.name}")
+        if not data: # Empty list means no more pages
             break
 
         all_journal_entries.extend(data)
 
-        if not fetch_all:  # If we're not fetching all, we're done after the first page.
+        if not fetch_all:
             break
 
         pages_header = headers.get('x-pages') if headers else None
@@ -863,10 +865,10 @@ def get_wallet_transactions(character, fetch_all=False, return_headers=False):
     """
     Fetches wallet transactions from ESI.
     If fetch_all is True, retrieves all pages. Otherwise, fetches only the first page.
-    Returns the list of transactions and optionally the headers from the first page request.
+    Returns the list of transactions, or None on failure. Optionally returns headers.
     """
     if not character:
-        return ([], None) if return_headers else []
+        return (None, None) if return_headers else None
 
     all_transactions, page = [], 1
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/transactions/"
@@ -877,15 +879,14 @@ def get_wallet_transactions(character, fetch_all=False, return_headers=False):
         revalidate_this_page = (not fetch_all) or (page == 1)
         data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
 
+        if data is None: # Explicitly check for API failure
+            logging.error(f"Failed to fetch page {page} of wallet transactions for {character.name}.")
+            return (None, None) if return_headers else None
+
         if page == 1:
             first_page_headers = headers
 
-        if data is None:
-            if page == 1 and not fetch_all: # Only error if we expected data
-                logging.error(f"Failed to fetch wallet transactions for {character.name}, ESI request failed.")
-            return ([], None) if return_headers else []
-
-        if not data: # An empty list is a valid response, it just means no more pages.
+        if not data: # Empty list means no more pages
             break
 
         all_transactions.extend(data)
@@ -923,6 +924,7 @@ def get_wallet_balance(character, return_headers=False):
 def get_market_orders_history(character, return_headers=False, force_revalidate=False):
     """
     Fetches all pages of historical market orders from ESI.
+    Returns the list of orders, or None on failure. Optionally returns headers.
     """
     if not character:
         return (None, None) if return_headers else None
@@ -934,15 +936,17 @@ def get_market_orders_history(character, return_headers=False, force_revalidate=
 
     while True:
         params = {"datasource": "tranquility", "page": page}
-        # Only force revalidation on the first page, as subsequent pages are unlikely to change
-        # if the first one hasn't. This is a small optimization.
         revalidate_this_page = force_revalidate and page == 1
         data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+
+        if data is None: # Explicitly check for API failure
+            logging.error(f"Failed to fetch page {page} of order history for {character.name}.")
+            return (None, None) if return_headers else None
 
         if page == 1:
             first_page_headers = headers
 
-        if not data:
+        if not data: # Empty list means no more pages
             break
 
         all_orders.extend(data)
