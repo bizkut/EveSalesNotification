@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import asyncio
 import telegram
 from telegram.error import BadRequest
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 import io
 import matplotlib
@@ -2078,18 +2078,10 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
             reply_markup=reply_markup
         )
     else:
-        # For commands, send a new message with a ReplyKeyboardMarkup
-        keyboard = [
-            ["/balance", "/summary"],
-            ["/sales", "/buys"],
-            ["/notifications", "/settings"],
-            ["/add_character"]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        # For commands, send a new message
         await update.message.reply_text(
             text=final_text,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
+            parse_mode='Markdown'
         )
 
 
@@ -2218,14 +2210,7 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(text=message_text, parse_mode='Markdown', reply_markup=reply_markup)
     else:
-        keyboard = [
-            ["/balance", "/summary"],
-            ["/sales", "/buys"],
-            ["/notifications", "/settings"],
-            ["/add_character"]
-        ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await update.message.reply_text(message_text, parse_mode='Markdown')
 
 
 def format_isk(value):
@@ -2771,14 +2756,6 @@ def main() -> None:
 
     # --- Add command handlers ---
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("add_character", add_character_command))
-    application.add_handler(CommandHandler("notifications", notifications_command))
-    application.add_handler(CommandHandler("balance", balance_command))
-    application.add_handler(CommandHandler("summary", summary_command))
-    application.add_handler(CommandHandler("sales", sales_command))
-    application.add_handler(CommandHandler("buys", buys_command))
-    application.add_handler(CommandHandler("settings", settings_command))
-    application.add_handler(CommandHandler("remove", remove_character_command))
     application.add_handler(CallbackQueryHandler(callback_query_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
