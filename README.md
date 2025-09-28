@@ -25,7 +25,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The `/summary` command now includes inline buttons to create a daily sales/profit/fees chart for the current month, as well as monthly charts for all historical years with transaction data. After viewing a chart, you can easily return to the summary view using the "Back to Summary" button.
 - **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, and all notification types) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
-- **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's history to report only on new activity and ensure profit calculations are accurate from day one.
+- **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's entire transaction history to ensure profit calculations are accurate from day one. To prevent a flood of old alerts, notifications are paused for a few minutes while this initial sync completes silently. You will only be notified of market activity that occurs *after* the sync is finished.
 
 ---
 
