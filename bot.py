@@ -3233,12 +3233,24 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         char_id = int(data.split('_')[-1])
         character = get_character_by_id(char_id)
         char_name = character.name if character else f"ID {char_id}"
-        await query.edit_message_text(f"Removing character {char_name} and deleting all associated data...")
+
+        # First, show a message that the process is starting
+        await query.edit_message_text(f"⏳ Removing character **{char_name}** and deleting all associated data...", parse_mode='Markdown')
+
+        # Perform the deletion
         delete_character(char_id)
-        load_characters_from_db() # Refresh global list
-        await query.edit_message_text(f"✅ Character {char_name} has been successfully removed.")
-        await asyncio.sleep(2)
-        await start_command(update, context) # Show main menu again
+        load_characters_from_db() # Refresh the global list
+
+        # Finally, show the success message with a back button
+        success_message = f"✅ Character **{char_name}** has been successfully removed."
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="start_command")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            text=success_message,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
 
     # --- Charting Callbacks ---
     elif data.startswith("chart_"):
