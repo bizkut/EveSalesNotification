@@ -20,6 +20,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
   - **Wallet Balance**: All notifications include your current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
+- **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The `/summary` command now includes inline buttons to create a daily sales/profit/fees chart for the current month, as well as monthly charts for all historical years with transaction data.
 - **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, and all notification types) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
 - **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's history to report only on new activity and ensure profit calculations are accurate from day one.
@@ -111,7 +112,7 @@ All interaction with the bot is handled through a simple, button-based menu in y
     -   **🔔 Manage Notifications**: View and toggle master notification settings for each of your characters.
     -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, daily summary time, and wallet balance alerts.
     -   **💰 View Balances**: Fetches the current wallet balance for your character(s).
-    -   **📊 Request Summary**: Manually triggers the daily summary report for your character(s).
+    -   **📊 Request Summary**: Manually triggers the daily summary report for your character(s). This report now includes inline buttons to generate on-demand performance charts.
     -   **📈 View Sales**: Shows the 5 most recent sales for a selected character.
     -   **🛒 View Buys**: Shows the 5 most recent buys for a selected character.
     -   **🗑️ Remove Character**: Starts the process of removing a character and all of their associated data.
