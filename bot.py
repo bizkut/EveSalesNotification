@@ -1159,8 +1159,9 @@ async def master_wallet_transaction_poll(application: Application):
                             # and were issued before the transaction occurred.
                             candidate_orders = [
                                 o for o in order_history
-                                if o['type_id'] == tx['type_id'] and
-                                   o['is_buy_order'] == tx['is_buy'] and
+                                if o.get('type_id') == tx.get('type_id') and
+                                   o.get('is_buy_order') == tx.get('is_buy') and
+                                   o.get('issued') and
                                    datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
                             ]
 
