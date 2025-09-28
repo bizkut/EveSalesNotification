@@ -50,6 +50,7 @@ class Character:
     enable_buy_notifications: bool
     enable_daily_summary: bool
     notification_batch_threshold: int
+    created_at: datetime
 
 CHARACTERS: list[Character] = []
 
@@ -66,7 +67,7 @@ def load_characters_from_db():
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold
+                    enable_daily_summary, notification_batch_threshold, created_at
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -84,7 +85,7 @@ def load_characters_from_db():
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             region_id, wallet_balance_threshold,
             enable_sales, enable_buys,
-            enable_summary, batch_threshold
+            enable_summary, batch_threshold, created_at
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -100,7 +101,8 @@ def load_characters_from_db():
             enable_sales_notifications=bool(enable_sales),
             enable_buy_notifications=bool(enable_buys),
             enable_daily_summary=bool(enable_summary),
-            notification_batch_threshold=batch_threshold
+            notification_batch_threshold=batch_threshold,
+            created_at=created_at
         )
         CHARACTERS.append(character)
         logging.info(f"Loaded character: {character.name} ({character.id})")
@@ -135,7 +137,8 @@ def setup_database():
                     enable_sales_notifications BOOLEAN DEFAULT TRUE,
                     enable_buy_notifications BOOLEAN DEFAULT TRUE,
                     enable_daily_summary BOOLEAN DEFAULT TRUE,
-                    notification_batch_threshold INTEGER DEFAULT 3
+                    notification_batch_threshold INTEGER DEFAULT 3,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now())
                 )
             """)
 
@@ -187,6 +190,17 @@ def setup_database():
                 logging.info("Applying migration: Altering esi_names.item_id to BIGINT...")
                 cursor.execute("ALTER TABLE esi_names ALTER COLUMN item_id TYPE BIGINT;")
                 logging.info("Migration complete.")
+
+            # Migration: Add created_at to characters table for notification grace period
+            cursor.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'characters' AND column_name = 'created_at'
+            """)
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'created_at' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now());")
+                cursor.execute("UPDATE characters SET created_at = timezone('UTC', now()) WHERE created_at IS NULL;")
+                logging.info("Migration for 'created_at' complete.")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS esi_cache (
@@ -459,7 +473,7 @@ def get_characters_for_user(telegram_user_id):
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold
+                    enable_daily_summary, notification_batch_threshold, created_at
                 FROM characters WHERE telegram_user_id = %s
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -468,7 +482,7 @@ def get_characters_for_user(telegram_user_id):
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold
+                    enable_summary, batch_threshold, created_at
                 ) = row
 
                 user_characters.append(Character(
@@ -480,7 +494,8 @@ def get_characters_for_user(telegram_user_id):
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
-                    notification_batch_threshold=batch_threshold
+                    notification_batch_threshold=batch_threshold,
+                    created_at=created_at
                 ))
     finally:
         database.release_db_connection(conn)
@@ -498,7 +513,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold
+                    enable_daily_summary, notification_batch_threshold, created_at
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -508,7 +523,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold
+                    enable_summary, batch_threshold, created_at
                 ) = row
 
                 character = Character(
@@ -520,7 +535,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
-                    notification_batch_threshold=batch_threshold
+                    notification_batch_threshold=batch_threshold,
+                    created_at=created_at
                 )
     finally:
         database.release_db_connection(conn)
@@ -1209,6 +1225,11 @@ async def master_wallet_transaction_poll(application: Application):
                     logging.warning(f"Skipping wallet poll for character {character.name} ({character.id}) because they have been removed.")
                     continue
 
+                # Grace period for new characters to allow initial sync to complete
+                if (datetime.now(timezone.utc) - character.created_at) < timedelta(minutes=5):
+                    logging.info(f"Skipping wallet poll for new character {character.name} (within 5-minute grace period).")
+                    continue
+
                 logging.debug(f"Polling wallet for {character.name}")
                 try:
                     # Fetch only the most recent page of transactions from ESI
@@ -1381,6 +1402,11 @@ async def master_order_history_poll(application: Application):
                 # Security Check: Ensure character hasn't been deleted since the job started.
                 if character.id not in [c.id for c in CHARACTERS]:
                     logging.warning(f"Skipping order history poll for character {character.name} ({character.id}) because they have been removed.")
+                    continue
+
+                # Grace period for new characters to allow initial sync to complete
+                if (datetime.now(timezone.utc) - character.created_at) < timedelta(minutes=5):
+                    logging.info(f"Skipping order history poll for new character {character.name} (within 5-minute grace period).")
                     continue
 
                 logging.debug(f"Polling order history for {character.name}")
