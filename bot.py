@@ -2768,13 +2768,17 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     order_capacity_str = ""
     if skills_data and 'skills' in skills_data:
         skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
-        # Skill IDs: Trade (3443), Broker Relations (3446)
-        trade_level = skill_map.get(3443, 0)
-        broker_relations_level = skill_map.get(3446, 0)
+        # Skill IDs for market orders:
+        # Retail (16595): +8 orders/level
+        # Wholesale (21790): +16 orders/level
+        # Tycoon (21791): +32 orders/level
+        retail_level = skill_map.get(16595, 0)
+        wholesale_level = skill_map.get(21790, 0)
+        tycoon_level = skill_map.get(21791, 0)
 
-        # Formula for max orders based on EVE University Wiki:
-        # 5 (base) + (10 * Trade level) + (4 * Broker Relations level)
-        max_orders = 5 + (trade_level * 10) + (broker_relations_level * 4)
+        # New formula for max orders:
+        # 5 (base) + (Retail * 8) + (Wholesale * 16) + (Tycoon * 32)
+        max_orders = 5 + (retail_level * 8) + (wholesale_level * 16) + (tycoon_level * 32)
         # Use len(all_orders) for the current count, not the filtered count
         order_capacity_str = f"({len(all_orders)} / {max_orders} orders)"
 
