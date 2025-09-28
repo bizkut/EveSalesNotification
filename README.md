@@ -16,7 +16,8 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Rich Contextual Data**:
   - **Real-Time Profit Tracking**: Sales notifications include FIFO-based gross profit calculations.
   - **Live Market Price Context**: Sales are compared against the current best buy order in your main trade hub.
-  - **Trade Location & Wallet Balance**: All notifications include the trade location and your current wallet balance.
+  - **Accurate Trade Location**: Correctly identifies the true location of remote buys/sales by cross-referencing with order history.
+  - **Wallet Balance**: All notifications include your current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, and all notification types) are configurable on a per-character basis via the bot's menu.
