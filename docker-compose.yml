@@ -42,7 +42,7 @@ services:
     build: .
     container_name: eve-market-webapp
     restart: unless-stopped
-    command: ["gunicorn", "--bind", "0.0.0.0:5000", "webapp:app"]
+    command: ["gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "${LOG_LEVEL}", "webapp:app"]
     environment:
       - PYTHONUNBUFFERED=1
       - ESI_CLIENT_ID=${ESI_CLIENT_ID}
