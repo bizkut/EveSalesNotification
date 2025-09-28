@@ -1555,6 +1555,13 @@ async def master_order_history_poll(application: Application):
                             await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                             await asyncio.sleep(1)
 
+                    # Remove the cancelled and expired orders from the active tracking table.
+                    orders_to_remove = cancelled_orders + expired_orders
+                    if orders_to_remove:
+                        order_ids_to_remove = [o['order_id'] for o in orders_to_remove]
+                        remove_tracked_market_orders(character.id, order_ids_to_remove)
+                        logging.info(f"Removed {len(order_ids_to_remove)} cancelled/expired orders from active tracking for {character.name}.")
+
                     add_processed_orders(character.id, [o['order_id'] for o in new_orders])
 
                 except Exception as e:
