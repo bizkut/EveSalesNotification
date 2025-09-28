@@ -2202,18 +2202,23 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Delete the "Generating..." message first
     await context.bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
 
+    keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     if chart_buffer:
         # Send the photo as a new message
         await context.bot.send_photo(
             chat_id=chat_id,
             photo=chart_buffer,
-            caption=f"{chart_type.capitalize()} chart for {character.name}"
+            caption=f"{chart_type.capitalize()} chart for {character.name}",
+            reply_markup=reply_markup
         )
     else:
         # Send a new message indicating no data was found
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"Could not generate {chart_type} chart for {character.name}. No data available for the period."
+            text=f"Could not generate {chart_type} chart for {character.name}. No data available for the period.",
+            reply_markup=reply_markup
         )
 
 
@@ -2251,6 +2256,30 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         'generating_message_id': query.message.message_id
     }
     context.job_queue.run_once(generate_chart_job, when=1, data=job_data, chat_id=query.message.chat_id)
+
+
+async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Back to Summary' button press."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        character_id = int(query.data.split('_')[2])
+    except (IndexError, ValueError):
+        await query.edit_message_text(text="Invalid request.")
+        return
+
+    character = get_character_by_id(character_id)
+    if not character:
+        # This message will be ephemeral as the original message is deleted.
+        await query.edit_message_text(text="Error: Could not find character.")
+        return
+
+    # Delete the chart message
+    await query.message.delete()
+
+    # Regenerate the summary for just this one character
+    await _run_summary_for_characters(update, context, [character])
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2659,6 +2688,7 @@ def main() -> None:
     application.add_handler(CommandHandler("remove", remove_character_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(chart_callback_handler, pattern="^chart_"))
+    application.add_handler(CallbackQueryHandler(back_to_summary_handler, pattern="^summary_back_"))
 
     # --- Schedule Jobs ---
     job_queue = application.job_queue
