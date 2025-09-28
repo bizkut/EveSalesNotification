@@ -41,7 +41,6 @@ class Character:
     notification_batch_threshold: int
 
 CHARACTERS: list[Character] = []
-SUMMARY_DATA_CACHE = {}
 
 
 def load_characters_from_db():
@@ -130,20 +129,6 @@ def setup_database():
             """)
 
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS processed_transactions (
-                    transaction_id BIGINT NOT NULL,
-                    character_id INTEGER NOT NULL,
-                    PRIMARY KEY (transaction_id, character_id)
-                )
-            """)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS processed_journal_entries (
-                    entry_id BIGINT NOT NULL,
-                    character_id INTEGER NOT NULL,
-                    PRIMARY KEY (entry_id, character_id)
-                )
-            """)
-            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS market_orders (
                     order_id BIGINT NOT NULL,
                     character_id INTEGER NOT NULL,
@@ -201,6 +186,46 @@ def setup_database():
                     headers JSONB
                 )
             """)
+
+            # New tables for persistent historical data
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS historical_transactions (
+                transaction_id BIGINT NOT NULL,
+                character_id INTEGER NOT NULL,
+                client_id INTEGER NOT NULL,
+                date TIMESTAMP WITH TIME ZONE NOT NULL,
+                is_buy BOOLEAN NOT NULL,
+                is_personal BOOLEAN NOT NULL,
+                journal_ref_id BIGINT NOT NULL,
+                location_id BIGINT NOT NULL,
+                quantity INTEGER NOT NULL,
+                type_id INTEGER NOT NULL,
+                unit_price DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (transaction_id, character_id)
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_trans_char_date ON historical_transactions (character_id, date DESC);")
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS historical_journal_entries (
+                entry_id BIGINT NOT NULL,
+                character_id INTEGER NOT NULL,
+                date TIMESTAMP WITH TIME ZONE NOT NULL,
+                ref_type TEXT NOT NULL,
+                amount DOUBLE PRECISION,
+                balance DOUBLE PRECISION,
+                context_id BIGINT,
+                context_id_type TEXT,
+                description TEXT,
+                first_party_id INTEGER,
+                reason TEXT,
+                second_party_id INTEGER,
+                tax DOUBLE PRECISION,
+                tax_receiver_id INTEGER,
+                PRIMARY KEY (entry_id, character_id)
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_journal_char_date ON historical_journal_entries (character_id, date DESC);")
 
 
             conn.commit()
@@ -308,62 +333,6 @@ def remove_tracked_market_orders(character_id, order_ids):
             cursor.executemany(
                 "DELETE FROM market_orders WHERE order_id = %s AND character_id = %s",
                 orders_to_delete
-            )
-            conn.commit()
-    finally:
-        database.release_db_connection(conn)
-
-def get_processed_transactions(character_id):
-    """Retrieves all processed transaction IDs for a character from the database."""
-    conn = database.get_db_connection()
-    processed_ids = set()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT transaction_id FROM processed_transactions WHERE character_id = %s", (character_id,))
-            processed_ids = {row[0] for row in cursor.fetchall()}
-    finally:
-        database.release_db_connection(conn)
-    return processed_ids
-
-def add_processed_transactions(character_id, transaction_ids):
-    """Adds a list of transaction IDs for a character to the database."""
-    if not transaction_ids:
-        return
-    conn = database.get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            data_to_insert = [(tx_id, character_id) for tx_id in transaction_ids]
-            cursor.executemany(
-                "INSERT INTO processed_transactions (transaction_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                data_to_insert
-            )
-            conn.commit()
-    finally:
-        database.release_db_connection(conn)
-
-def get_processed_journal_entries(character_id):
-    """Retrieves all processed journal entry IDs for a character from the database."""
-    conn = database.get_db_connection()
-    processed_ids = set()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT entry_id FROM processed_journal_entries WHERE character_id = %s", (character_id,))
-            processed_ids = {row[0] for row in cursor.fetchall()}
-    finally:
-        database.release_db_connection(conn)
-    return processed_ids
-
-def add_processed_journal_entries(character_id, entry_ids):
-    """Adds a list of journal entry IDs for a character to the database."""
-    if not entry_ids:
-        return
-    conn = database.get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            data_to_insert = [(entry_id, character_id) for entry_id in entry_ids]
-            cursor.executemany(
-                "INSERT INTO processed_journal_entries (entry_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                data_to_insert
             )
             conn.commit()
     finally:
@@ -588,6 +557,68 @@ def update_character_notification_setting(character_id: int, setting: str, value
     logging.info(f"Updated {column_name} for character {character_id} to {value}.")
 
 
+def get_historical_transactions_from_db(character_id: int) -> list:
+    """Retrieves all historical transactions for a character from the local database."""
+    conn = database.get_db_connection()
+    transactions = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT transaction_id, client_id, date, is_buy, is_personal, journal_ref_id, location_id, quantity, type_id, unit_price FROM historical_transactions WHERE character_id = %s",
+                (character_id,)
+            )
+            rows = cursor.fetchall()
+            # Reconstruct the dictionary to match the ESI response format
+            for row in rows:
+                transactions.append({
+                    "transaction_id": row[0],
+                    "client_id": row[1],
+                    "date": row[2].isoformat(),
+                    "is_buy": row[3],
+                    "is_personal": row[4],
+                    "journal_ref_id": row[5],
+                    "location_id": row[6],
+                    "quantity": row[7],
+                    "type_id": row[8],
+                    "unit_price": row[9]
+                })
+    finally:
+        database.release_db_connection(conn)
+    return transactions
+
+def get_historical_journal_entries_from_db(character_id: int) -> list:
+    """Retrieves all historical journal entries for a character from the local database."""
+    conn = database.get_db_connection()
+    entries = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT entry_id, date, ref_type, amount, balance, context_id, context_id_type, description, first_party_id, reason, second_party_id, tax, tax_receiver_id FROM historical_journal_entries WHERE character_id = %s",
+                (character_id,)
+            )
+            rows = cursor.fetchall()
+            # Reconstruct the dictionary to match the ESI response format
+            for row in rows:
+                entries.append({
+                    "id": row[0],
+                    "date": row[1].isoformat(),
+                    "ref_type": row[2],
+                    "amount": row[3],
+                    "balance": row[4],
+                    "context_id": row[5],
+                    "context_id_type": row[6],
+                    "description": row[7],
+                    "first_party_id": row[8],
+                    "reason": row[9],
+                    "second_party_id": row[10],
+                    "tax": row[11],
+                    "tax_receiver_id": row[12]
+                })
+    finally:
+        database.release_db_connection(conn)
+    return entries
+
+
 def delete_character(character_id: int):
     """Deletes a character and all of their associated data from the database."""
     conn = database.get_db_connection()
@@ -597,11 +628,11 @@ def delete_character(character_id: int):
 
             # List of tables with a direct character_id foreign key
             tables_to_delete_from = [
-                "processed_transactions",
-                "processed_journal_entries",
                 "market_orders",
                 "purchase_lots",
                 "processed_orders",
+                "historical_transactions",
+                "historical_journal_entries"
             ]
             for table in tables_to_delete_from:
                 cursor.execute(f"DELETE FROM {table} WHERE character_id = %s", (character_id,))
@@ -746,50 +777,36 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
         return (None, None) if return_headers else None
 
 
-def get_wallet_journal(character, processed_entry_ids=None, fetch_all=False):
+def get_wallet_journal(character, fetch_all=False, return_headers=False):
     """
     Fetches wallet journal entries from ESI.
-    If fetch_all is True, retrieves all pages.
-    Otherwise, stops fetching when it encounters an already processed entry.
-    Returns the list of entries and the headers from the first page request.
+    If fetch_all is True, retrieves all pages. Otherwise, fetches only the first page.
+    Returns the list of entries and optionally the headers from the first page request.
     """
-    if not character: return [], None
-    if processed_entry_ids is None:
-        processed_entry_ids = set()
+    if not character:
+        return ([], None) if return_headers else []
 
     all_journal_entries, page = [], 1
     url = f"https://esi.evetech.net/v6/characters/{character.id}/wallet/journal/"
-
-    stop_fetching = False
     first_page_headers = None
 
-    while not stop_fetching:
+    while True:
         params = {"datasource": "tranquility", "page": page}
-        data, headers = make_esi_request(url, character=character, params=params, return_headers=True)
+        revalidate_this_page = (not fetch_all) or (page == 1)
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
 
         if page == 1:
             first_page_headers = headers
 
         if not data:
-            if page == 1:
+            if page == 1 and not fetch_all:
                 logging.error(f"Failed to fetch first page of wallet journal for {character.name}")
-                return [], None
             break
 
-        if fetch_all:
-            all_journal_entries.extend(data)
-        else:
-            page_entries = []
-            for entry in data:
-                if entry['id'] in processed_entry_ids:
-                    stop_fetching = True
-                    break
-                page_entries.append(entry)
-            all_journal_entries.extend(page_entries)
+        all_journal_entries.extend(data)
 
-            if stop_fetching:
-                logging.info(f"Found previously processed journal entry. Stopping fetch for char {character.name}.")
-                break
+        if not fetch_all:  # If we're not fetching all, we're done after the first page.
+            break
 
         pages_header = headers.get('x-pages') if headers else None
         if not pages_header or int(pages_header) <= page:
@@ -798,7 +815,9 @@ def get_wallet_journal(character, processed_entry_ids=None, fetch_all=False):
         page += 1
         time.sleep(0.1)
 
-    return all_journal_entries, first_page_headers
+    if return_headers:
+        return all_journal_entries, first_page_headers
+    return all_journal_entries
 
 def get_access_token(refresh_token):
     url = "https://login.eveonline.com/v2/oauth/token"
@@ -829,28 +848,21 @@ def get_character_details_from_token(access_token):
         logging.error(f"Error getting character details: {e}")
         return None, None
 
-def get_wallet_transactions(character, processed_tx_ids=None, fetch_all=False, return_headers=False):
+def get_wallet_transactions(character, fetch_all=False, return_headers=False):
     """
     Fetches wallet transactions from ESI.
-    If fetch_all is True, retrieves all pages.
-    Otherwise, stops fetching when it encounters an already processed transaction.
+    If fetch_all is True, retrieves all pages. Otherwise, fetches only the first page.
     Returns the list of transactions and optionally the headers from the first page request.
     """
     if not character:
         return ([], None) if return_headers else []
-    if processed_tx_ids is None:
-        processed_tx_ids = set()
 
     all_transactions, page = [], 1
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/transactions/"
-
-    stop_fetching = False
     first_page_headers = None
 
-    while not stop_fetching:
+    while True:
         params = {"datasource": "tranquility", "page": page}
-        # When fetching for new data, we should always revalidate.
-        # When fetching all, we can allow the cache to work for subsequent pages.
         revalidate_this_page = (not fetch_all) or (page == 1)
         data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
 
@@ -865,20 +877,10 @@ def get_wallet_transactions(character, processed_tx_ids=None, fetch_all=False, r
         if not data: # An empty list is a valid response, it just means no more pages.
             break
 
-        if fetch_all:
-            all_transactions.extend(data)
-        else:
-            page_transactions = []
-            for tx in data:
-                if tx['transaction_id'] in processed_tx_ids:
-                    stop_fetching = True
-                    break
-                page_transactions.append(tx)
-            all_transactions.extend(page_transactions)
+        all_transactions.extend(data)
 
-            if stop_fetching:
-                logging.info(f"Found previously processed transaction. Stopping fetch for char {character.name}.")
-                break
+        if not fetch_all:
+            break
 
         pages_header = headers.get('x-pages') if headers else None
         if not pages_header or int(pages_header) <= page:
@@ -1148,6 +1150,24 @@ def get_next_run_delay(headers):
     except (ValueError, TypeError):
         return 60
 
+def get_ids_from_db(table_name: str, id_column: str, character_id: int, ids_to_check: list) -> set:
+    """Checks a table for which of the given IDs already exist for a character."""
+    if not ids_to_check:
+        return set()
+    conn = database.get_db_connection()
+    existing_ids = set()
+    try:
+        with conn.cursor() as cursor:
+            placeholders = ','.join(['%s'] * len(ids_to_check))
+            query = f"SELECT {id_column} FROM {table_name} WHERE character_id = %s AND {id_column} IN ({placeholders})"
+            # Note: The character_id must be passed as a tuple/list element
+            cursor.execute(query, [character_id] + ids_to_check)
+            existing_ids = {row[0] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
+    return existing_ids
+
+
 async def master_wallet_transaction_poll(application: Application):
     """
     A single, continuous polling loop that checks for new wallet transactions
@@ -1165,13 +1185,38 @@ async def master_wallet_transaction_poll(application: Application):
             for character in characters_to_poll:
                 logging.debug(f"Polling wallet for {character.name}")
                 try:
-                    processed_tx_ids = get_processed_transactions(character.id)
-                    new_transactions, _ = get_wallet_transactions(character, processed_tx_ids=processed_tx_ids, return_headers=True)
-
-                    if not new_transactions:
+                    # Fetch only the most recent page of transactions from ESI
+                    recent_transactions = get_wallet_transactions(character)
+                    if not recent_transactions:
                         continue
 
+                    # Find which of these are genuinely new by checking against our historical DB
+                    tx_ids_from_esi = [tx['transaction_id'] for tx in recent_transactions]
+                    existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
+                    new_transaction_ids = set(tx_ids_from_esi) - existing_tx_ids
+
+                    if not new_transaction_ids:
+                        continue
+
+                    new_transactions = [tx for tx in recent_transactions if tx['transaction_id'] in new_transaction_ids]
                     logging.info(f"Detected {len(new_transactions)} new transactions for {character.name}.")
+
+                    # Add new transactions to our historical database
+                    add_historical_transactions_to_db(character.id, new_transactions)
+
+                    # --- Now handle journal entries ---
+                    recent_journal_entries = get_wallet_journal(character)
+                    if recent_journal_entries:
+                        journal_ids_from_esi = [e['id'] for e in recent_journal_entries]
+                        existing_journal_ids = get_ids_from_db('historical_journal_entries', 'entry_id', character.id, journal_ids_from_esi)
+                        new_journal_entry_ids = set(journal_ids_from_esi) - existing_journal_ids
+
+                        if new_journal_entry_ids:
+                            new_journal_entries = [e for e in recent_journal_entries if e['id'] in new_journal_entry_ids]
+                            logging.info(f"Detected {len(new_journal_entries)} new journal entries for {character.name}.")
+                            add_historical_journal_entries_to_db(character.id, new_journal_entries)
+
+
                     # --- Transaction Classification ---
                     sales, buys = defaultdict(list), defaultdict(list)
                     for tx in new_transactions:
@@ -1191,7 +1236,7 @@ async def master_wallet_transaction_poll(application: Application):
                     if buys:
                         for type_id, tx_group in buys.items():
                             for tx in tx_group:
-                                add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'])
+                                add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
 
                     # Process Sales for FIFO accounting and prepare details for potential notification
                     sales_details = []
@@ -1283,8 +1328,6 @@ async def master_wallet_transaction_poll(application: Application):
                                                f"**Wallet:** `{wallet_balance:,.2f} ISK`")
                                     await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                                     await asyncio.sleep(1)
-
-                    add_processed_transactions(character.id, [tx['transaction_id'] for tx in new_transactions])
 
                 except Exception as e:
                     logging.error(f"Error processing wallet for {character.name}: {e}", exc_info=True)
@@ -1426,22 +1469,15 @@ def calculate_fifo_profit_for_summary(sales_transactions, character_id):
 
 
 def _calculate_summary_data(character: Character) -> dict:
-    """Fetches all necessary data and calculates summary statistics."""
-    logging.info(f"Calculating summary data for {character.name}...")
+    """Fetches all necessary data from the local DB and calculates summary statistics."""
+    logging.info(f"Calculating summary data for {character.name} from local database...")
 
     now = datetime.now(timezone.utc)
     one_day_ago = now - timedelta(days=1)
 
-    # --- Fetch data ---
-    all_transactions = get_wallet_transactions(character, fetch_all=True)
-    all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
-
-    # --- Cache the data for chart generation ---
-    SUMMARY_DATA_CACHE[character.id] = {
-        'transactions': all_transactions,
-        'journal_entries': all_journal_entries,
-        'timestamp': now
-    }
+    # --- Fetch data from local database ---
+    all_transactions = get_historical_transactions_from_db(character.id)
+    all_journal_entries = get_historical_journal_entries_from_db(character.id)
 
     # --- 24-Hour Summary (Stateless) ---
     total_sales_24h, total_fees_24h, profit_24h = 0, 0, 0
@@ -1582,83 +1618,124 @@ async def master_daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             logging.error(f"Error running daily summary for {character.name}: {e}")
     logging.info("Finished daily summary job.")
 
-def initialize_journal_history_for_character(character: Character):
-    """On first add, seeds the journal history to prevent old entries from appearing in the 24h summary."""
+def add_historical_transactions_to_db(character_id: int, transactions: list):
+    """Adds a list of transaction records to the historical_transactions table."""
+    if not transactions:
+        return
     conn = database.get_db_connection()
-    is_seeded = None
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT 1 FROM processed_journal_entries WHERE character_id = %s LIMIT 1", (character.id,))
-            is_seeded = cursor.fetchone()
+            data_to_insert = [
+                (
+                    tx['transaction_id'], character_id, tx['client_id'], tx['date'],
+                    tx['is_buy'], tx['is_personal'], tx['journal_ref_id'],
+                    tx['location_id'], tx['quantity'], tx['type_id'], tx['unit_price']
+                ) for tx in transactions
+            ]
+            cursor.executemany(
+                """
+                INSERT INTO historical_transactions (
+                    transaction_id, character_id, client_id, date, is_buy, is_personal,
+                    journal_ref_id, location_id, quantity, type_id, unit_price
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (transaction_id, character_id) DO NOTHING
+                """,
+                data_to_insert
+            )
+            conn.commit()
+            logging.info(f"Inserted/updated {len(data_to_insert)} records into historical_transactions for char {character_id}.")
     finally:
         database.release_db_connection(conn)
 
-    if is_seeded:
-        logging.info(f"Character {character.name} already has seeded journal history. Skipping.")
+
+def add_historical_journal_entries_to_db(character_id: int, entries: list):
+    """Adds a list of journal entries to the historical_journal_entries table."""
+    if not entries:
         return
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [
+                (
+                    e['id'], character_id, e['date'], e['ref_type'],
+                    e.get('amount'), e.get('balance'), e.get('context_id'),
+                    e.get('context_id_type'), e.get('description'), e.get('first_party_id'),
+                    e.get('reason'), e.get('second_party_id'), e.get('tax'), e.get('tax_receiver_id')
+                ) for e in entries
+            ]
+            cursor.executemany(
+                """
+                INSERT INTO historical_journal_entries (
+                    entry_id, character_id, date, ref_type, amount, balance, context_id,
+                    context_id_type, description, first_party_id, reason, second_party_id,
+                    tax, tax_receiver_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (entry_id, character_id) DO NOTHING
+                """,
+                data_to_insert
+            )
+            conn.commit()
+            logging.info(f"Inserted/updated {len(data_to_insert)} records into historical_journal_entries for char {character_id}.")
+    finally:
+        database.release_db_connection(conn)
 
-    logging.info(f"First run for {character.name} detected. Seeding journal history...")
-    historical_journal, _ = get_wallet_journal(character, fetch_all=True)
-    if not historical_journal:
-        logging.warning(f"No historical journal found for {character.name}. Seeding complete with no data.")
-        add_processed_journal_entries(character.id, [-1])  # Dummy entry to mark as processed
-        return
 
-    historical_ids = [entry['id'] for entry in historical_journal]
-    add_processed_journal_entries(character.id, historical_ids)
-    logging.info(f"Seeded {len(historical_ids)} historical journal entries for {character.name}.")
-
-
-def initialize_all_transactions_for_character(character: Character):
-    """On first add, seeds the database with all historical wallet transactions."""
-    state_key = f"transactions_seeded_{character.id}"
+def backfill_all_character_history(character: Character):
+    """
+    Performs a one-time backfill of all transaction and journal history from
+    ESI into the local database for a given character.
+    """
+    state_key = f"history_backfilled_{character.id}"
     if get_bot_state(state_key) == 'true':
-        logging.info(f"Transaction history already seeded for {character.name}. Skipping.")
+        logging.info(f"Full history already backfilled for {character.name}. Skipping.")
         return
 
-    logging.info(f"Seeding transaction history for {character.name}...")
+    logging.warning(f"Starting full history backfill for {character.name}. This may take some time...")
+
+    # --- Backfill Transactions ---
+    logging.info(f"Fetching all wallet transactions for {character.name}...")
     all_transactions = get_wallet_transactions(character, fetch_all=True)
-    if not all_transactions:
-        logging.info(f"No historical transactions found to seed for {character.name}.")
-        set_bot_state(state_key, 'true')
-        return
-
-    buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-    if buy_transactions:
-        for tx in buy_transactions:
-            add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
-        logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for FIFO tracking for {character.name}.")
-
-    transaction_ids = [tx['transaction_id'] for tx in all_transactions]
-    add_processed_transactions(character.id, transaction_ids)
-    logging.info(f"Marked {len(transaction_ids)} historical transactions as processed for {character.name}.")
-    set_bot_state(state_key, 'true')
+    if all_transactions:
+        add_historical_transactions_to_db(character.id, all_transactions)
+        # Also populate purchase lots for FIFO, same as the old seeding logic
+        buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
+        if buy_transactions:
+            for tx in buy_transactions:
+                add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+            logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for FIFO tracking for {character.name}.")
+    else:
+        logging.info(f"No historical transactions found to backfill for {character.name}.")
 
 
-def initialize_order_history_for_character(character: Character):
-    """On first add, seeds the database with all historical orders."""
-    state_key = f"order_history_seeded_{character.id}"
-    if get_bot_state(state_key) == 'true':
-        logging.info(f"Order history already seeded for {character.name}. Skipping.")
-        return
+    # --- Backfill Journal Entries ---
+    logging.info(f"Fetching all wallet journal entries for {character.name}...")
+    all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+    if all_journal_entries:
+        add_historical_journal_entries_to_db(character.id, all_journal_entries)
+    else:
+        logging.info(f"No historical journal entries found to backfill for {character.name}.")
 
+    # --- Backfill Order History (for cancelled/expired notifications) ---
     logging.info(f"Seeding order history for {character.name}...")
     all_historical_orders = get_market_orders_history(character)
     if all_historical_orders:
         order_ids = [o['order_id'] for o in all_historical_orders]
+        # We still need to mark these as "processed" for the notification system
         add_processed_orders(character.id, order_ids)
         logging.info(f"Seeded {len(order_ids)} historical orders for {character.name}.")
     else:
         logging.info(f"No historical orders found to seed for {character.name}.")
+
+
+    # --- Mark as complete ---
     set_bot_state(state_key, 'true')
+    logging.warning(f"Full history backfill for {character.name} is complete.")
 
 
 def seed_data_for_character(character: Character):
     """Initializes all historical data for a character if it hasn't been done before."""
     logging.info(f"Checking/seeding historical data for character: {character.name} ({character.id})")
-    initialize_journal_history_for_character(character)
-    initialize_all_transactions_for_character(character)
-    initialize_order_history_for_character(character)
+    backfill_all_character_history(character)
     logging.info(f"Finished checking/seeding data for {character.name}.")
 
 
@@ -1966,15 +2043,9 @@ def generate_daily_chart_for_month(character_id: int):
     _, num_days = calendar.monthrange(year, month)
     days = list(range(1, num_days + 1))
 
-    # Use cached data if available, otherwise fetch it
-    cached_data = SUMMARY_DATA_CACHE.get(character_id)
-    if cached_data:
-        all_transactions = cached_data['transactions']
-        all_journal_entries = cached_data['journal_entries']
-    else:
-        logging.warning(f"Cache miss for chart generation for char {character_id}. Re-fetching data.")
-        all_transactions = get_wallet_transactions(character, fetch_all=True)
-        all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+    # Fetch data directly from the historical tables in the database
+    all_transactions = get_historical_transactions_from_db(character_id)
+    all_journal_entries = get_historical_journal_entries_from_db(character_id)
 
 
     daily_sales = {day: 0 for day in days}
@@ -2041,15 +2112,9 @@ def generate_yearly_chart(character_id: int, year: int):
     months = list(range(1, 13))
     month_names = [calendar.month_abbr[m] for m in months]
 
-    # Use cached data if available, otherwise fetch it
-    cached_data = SUMMARY_DATA_CACHE.get(character_id)
-    if cached_data:
-        all_transactions = cached_data['transactions']
-        all_journal_entries = cached_data['journal_entries']
-    else:
-        logging.warning(f"Cache miss for chart generation for char {character_id}. Re-fetching data.")
-        all_transactions = get_wallet_transactions(character, fetch_all=True)
-        all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+    # Fetch data directly from the historical tables in the database
+    all_transactions = get_historical_transactions_from_db(character_id)
+    all_journal_entries = get_historical_journal_entries_from_db(character_id)
 
 
     monthly_sales = {m: 0 for m in months}
