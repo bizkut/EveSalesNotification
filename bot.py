@@ -1220,6 +1220,25 @@ def get_ids_from_db(table_name: str, id_column: str, character_id: int, ids_to_c
     return existing_ids
 
 
+def get_journal_ref_types_from_db(character_id: int, journal_ref_ids: list) -> dict:
+    """Retrieves a mapping of journal_ref_id -> ref_type from the local database."""
+    if not journal_ref_ids:
+        return {}
+    conn = database.get_db_connection()
+    ref_id_to_type_map = {}
+    try:
+        with conn.cursor() as cursor:
+            placeholders = ','.join(['%s'] * len(journal_ref_ids))
+            # Note: The column in the DB is also named journal_ref_id
+            query = f"SELECT journal_ref_id, ref_type FROM historical_journal_entries WHERE character_id = %s AND journal_ref_id IN ({placeholders})"
+            cursor.execute(query, [character_id] + journal_ref_ids)
+            ref_id_to_type_map = {row[0]: row[1] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
+    logging.debug(f"Resolved {len(ref_id_to_type_map)} journal ref types from local DB.")
+    return ref_id_to_type_map
+
+
 async def master_wallet_transaction_poll(application: Application):
     """
     A single, continuous polling loop that checks for new wallet transactions
@@ -1291,12 +1310,25 @@ async def master_wallet_transaction_poll(application: Application):
 
 
                     # --- Transaction Classification ---
+                    # Get the journal ref types to distinguish real sales from other credit events (e.g., escrow refunds)
+                    journal_ref_ids = [tx['journal_ref_id'] for tx in new_transactions]
+                    journal_ref_types = get_journal_ref_types_from_db(character.id, journal_ref_ids)
+
                     sales, buys = defaultdict(list), defaultdict(list)
                     for tx in new_transactions:
                         if tx['is_buy']:
                             buys[tx['type_id']].append(tx)
                         else:
-                            sales[tx['type_id']].append(tx)
+                            # Verify that this non-buy transaction is actually a market sale
+                            ref_type = journal_ref_types.get(tx['journal_ref_id'])
+                            if ref_type == 'market_transaction':
+                                sales[tx['type_id']].append(tx)
+                            else:
+                                logging.info(
+                                    f"Ignoring non-sale transaction for {character.name} "
+                                    f"(ID: {tx['transaction_id']}, Type: {ref_type}, "
+                                    f"Value: {tx['quantity'] * tx['unit_price']:,.2f} ISK)"
+                                )
 
                     all_type_ids = list(sales.keys()) + list(buys.keys())
                     all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]

@@ -18,6 +18,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
   - **Live Market Price Context**: Sales are compared against the current best buy order in your main trade hub.
   - **Accurate Trade Location**: Correctly identifies the true location of remote buys/sales by cross-referencing with order history.
   - **Wallet Balance**: All notifications include your current wallet balance.
+  - **Accurate Sale Detection**: The bot intelligently cross-references wallet transactions with journal entries to ensure only genuine market sales trigger a notification, filtering out noise from contract rewards or escrow returns from cancelled orders.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot also displays your character's current order capacity (e.g., "152 / 305 orders").
