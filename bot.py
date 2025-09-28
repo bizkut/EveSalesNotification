@@ -1189,11 +1189,11 @@ def get_ids_from_db(table_name: str, id_column: str, character_id: int, ids_to_c
     return existing_ids
 
 
-async def master_wallet_transaction_poll(application: Application):
+async def update_historical_data_job(application: Application):
     """
-    A single, continuous polling loop that checks for new wallet transactions
-    for all monitored characters. It ensures data processing is separate from
-    notification sending.
+    A continuous background job that polls for new wallet transactions and
+    journal entries for all characters to keep the historical database up-to-date.
+    This job is responsible for data integrity, not for sending notifications.
     """
     context = ContextTypes.DEFAULT_TYPE(application=application)
     while True:
@@ -1246,116 +1246,196 @@ async def master_wallet_transaction_poll(application: Application):
                         else:
                             sales[tx['type_id']].append(tx)
 
-                    all_type_ids = list(sales.keys()) + list(buys.keys())
-                    all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
-                    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [character.region_id])), character=character)
-                    wallet_balance = get_wallet_balance(character)
+                    # --- Data Processing for FIFO ---
 
-                    # --- Unconditional Data Processing ---
-
-                    # Process ALL Buys for FIFO accounting
+                    # Process all new buys to add them to the purchase lots for FIFO accounting.
                     if buys:
                         for type_id, tx_group in buys.items():
                             for tx in tx_group:
                                 add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
 
-                    # Process Sales for FIFO accounting and prepare details for potential notification
-                    sales_details = []
+                    # Process all new sales to consume from the purchase lots for FIFO accounting.
                     if sales:
                         for type_id, tx_group in sales.items():
                             total_quantity = sum(t['quantity'] for t in tx_group)
-                            cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-                            sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs})
-
-                    # --- Conditional Notifications ---
-                    if character.notifications_enabled:
-                        # Low Balance Alert
-                        if wallet_balance is not None and character.wallet_balance_threshold > 0:
-                            state_key = f"low_balance_alert_sent_at_{character.id}"
-                            last_alert_str = get_bot_state(state_key)
-                            alert_sent_recently = False
-                            if last_alert_str:
-                                last_alert_time = datetime.fromisoformat(last_alert_str)
-                                if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
-                                    alert_sent_recently = True
-                            if wallet_balance < character.wallet_balance_threshold and not alert_sent_recently:
-                                alert_message = (f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\n"
-                                                 f"Your wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n"
-                                                 f"**Current Balance:** `{wallet_balance:,.2f}` ISK")
-                                await send_telegram_message(context, alert_message, chat_id=character.telegram_user_id)
-                                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
-                            elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
-                                set_bot_state(state_key, '')
-
-                        # Buy Notifications
-                        if buys and character.enable_buy_notifications:
-                            if len(buys) > character.notification_batch_threshold:
-                                header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
-                                item_lines = []
-                                grand_total_cost = sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group)
-                                for type_id, tx_group in buys.items():
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    item_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
-                                footer = f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`"
-                                if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
-                            else:
-                                for type_id, tx_group in buys.items():
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                    message = (f"🛒 *Market Buy ({character.name})* 🛒\n\n"
-                                               f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                                               f"**Quantity:** `{total_quantity}`\n"
-                                               f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
-                                               f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
-                                               f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                                    await send_telegram_message(context, message, chat_id=character.telegram_user_id)
-                                    await asyncio.sleep(1)
-
-                        # Sale Notifications
-                        if sales_details and character.enable_sales_notifications:
-                            if len(sales_details) > character.notification_batch_threshold:
-                                header = f"✅ *Multiple Market Sales ({character.name})* ✅"
-                                item_lines = []
-                                grand_total_value, grand_total_cogs = 0, 0
-                                for sale_info in sales_details:
-                                    total_quantity = sum(t['quantity'] for t in sale_info['tx_group'])
-                                    total_value = sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group'])
-                                    grand_total_value += total_value
-                                    if sale_info['cogs'] is not None: grand_total_cogs += sale_info['cogs']
-                                    item_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`")
-                                profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
-                                footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}"
-                                if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
-                            else:
-                                for sale_info in sales_details:
-                                    type_id, tx_group, cogs = sale_info['type_id'], sale_info['tx_group'], sale_info['cogs']
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                    avg_price = total_value / total_quantity
-                                    profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
-                                    region_orders = get_region_market_orders(character.region_id, type_id, force_revalidate=True)
-                                    best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
-                                    price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `N/A`"
-                                    if best_buy_order_price > 0:
-                                        price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
-                                        price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
-                                    message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
-                                               f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                                               f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
-                                               f"{price_comparison_line}\n{profit_line}\n"
-                                               f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
-                                               f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                                    await send_telegram_message(context, message, chat_id=character.telegram_user_id)
-                                    await asyncio.sleep(1)
+                            # This function updates the purchase lots in the DB, which is essential for profit tracking.
+                            calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
 
                 except Exception as e:
                     logging.error(f"Error processing wallet for {character.name}: {e}", exc_info=True)
                 finally:
                     await asyncio.sleep(1)
 
-        logging.info("Master wallet transaction polling cycle complete. Sleeping for 60 seconds.")
+        logging.info("Historical data update cycle complete. Sleeping for 60 seconds.")
+        await asyncio.sleep(60)
+
+
+async def live_notification_job(application: Application):
+    """
+    A continuous background job that polls for new wallet transactions and sends
+    live notifications to users. It uses a timestamp-based approach to avoid
+    sending duplicate notifications.
+    """
+    context = ContextTypes.DEFAULT_TYPE(application=application)
+    while True:
+        logging.info("Starting live notification polling cycle.")
+        # Get characters who have notifications enabled
+        characters_to_notify = [c for c in list(CHARACTERS) if c.notifications_enabled]
+
+        if not characters_to_notify:
+            logging.debug("No characters to poll for live notifications. Sleeping.")
+        else:
+            for character in characters_to_notify:
+                logging.debug(f"Polling for live notifications for {character.name}")
+                try:
+                    # 1. Get last notified timestamp from DB
+                    state_key = f"last_notified_ts_{character.id}"
+                    last_notified_ts_str = get_bot_state(state_key)
+
+                    # If this is the first time running for this character, we set the
+                    # timestamp to now and skip notifications for this cycle to prevent
+                    # notifying about historical transactions.
+                    if not last_notified_ts_str:
+                        set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+                        logging.info(f"Initializing notification timestamp for {character.name}. No notifications will be sent this cycle.")
+                        continue
+
+                    last_notified_ts = datetime.fromisoformat(last_notified_ts_str)
+
+                    # 2. Fetch only the most recent page of transactions
+                    recent_transactions = get_wallet_transactions(character)
+                    if not recent_transactions:
+                        continue
+
+                    # 3. Filter for transactions with a timestamp strictly newer than the last one we notified about.
+                    new_transactions = sorted(
+                        [tx for tx in recent_transactions if datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > last_notified_ts],
+                        key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00'))
+                    )
+
+
+                    if not new_transactions:
+                        continue
+
+                    logging.info(f"Detected {len(new_transactions)} new transactions to notify for {character.name}.")
+
+                    # --- Transaction Classification & Notification Logic ---
+                    sales, buys = defaultdict(list), defaultdict(list)
+                    for tx in new_transactions:
+                        if tx['is_buy']:
+                            buys[tx['type_id']].append(tx)
+                        else:
+                            sales[tx['type_id']].append(tx)
+
+                    all_type_ids = list(sales.keys()) + list(buys.keys())
+                    all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
+                    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [character.region_id])), character=character)
+                    wallet_balance = get_wallet_balance(character)
+
+
+                    # --- Low Balance Alert ---
+                    if wallet_balance is not None and character.wallet_balance_threshold > 0:
+                        state_key_balance = f"low_balance_alert_sent_at_{character.id}"
+                        last_alert_str = get_bot_state(state_key_balance)
+                        alert_sent_recently = False
+                        if last_alert_str:
+                            last_alert_time = datetime.fromisoformat(last_alert_str)
+                            if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
+                                alert_sent_recently = True
+                        if wallet_balance < character.wallet_balance_threshold and not alert_sent_recently:
+                            alert_message = (f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\n"
+                                             f"Your wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n"
+                                             f"**Current Balance:** `{wallet_balance:,.2f}` ISK")
+                            await send_telegram_message(context, alert_message, chat_id=character.telegram_user_id)
+                            set_bot_state(state_key_balance, datetime.now(timezone.utc).isoformat())
+                        elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
+                            set_bot_state(state_key_balance, '')
+
+
+                    # --- Buy Notifications ---
+                    if buys and character.enable_buy_notifications:
+                        if len(buys) > character.notification_batch_threshold:
+                            header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
+                            item_lines = []
+                            grand_total_cost = sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group)
+                            for type_id, tx_group in buys.items():
+                                total_quantity = sum(t['quantity'] for t in tx_group)
+                                item_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
+                            footer = f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`"
+                            if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                            await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
+                        else:
+                            for type_id, tx_group in buys.items():
+                                total_quantity = sum(t['quantity'] for t in tx_group)
+                                total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+                                message = (f"🛒 *Market Buy ({character.name})* 🛒\n\n"
+                                           f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
+                                           f"**Quantity:** `{total_quantity}`\n"
+                                           f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
+                                           f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
+                                           f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+                                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                                await asyncio.sleep(1)
+
+
+                    # --- Sale Notifications ---
+                    if sales and character.enable_sales_notifications:
+                        # Prepare sales details with profit calculation
+                        sales_details = []
+                        for type_id, tx_group in sales.items():
+                            # Here we use the read-only profit calculation function
+                            profit = calculate_fifo_profit_for_summary(tx_group, character.id)
+                            sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'profit': profit})
+
+                        if len(sales_details) > character.notification_batch_threshold:
+                            header = f"✅ *Multiple Market Sales ({character.name})* ✅"
+                            item_lines = []
+                            grand_total_value, grand_total_profit = 0, 0
+                            for sale_info in sales_details:
+                                total_quantity = sum(t['quantity'] for t in sale_info['tx_group'])
+                                total_value = sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group'])
+                                grand_total_value += total_value
+                                if sale_info['profit'] is not None: grand_total_profit += sale_info['profit']
+                                item_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`")
+                            profit_line = f"\n**Total Net Profit:** `{grand_total_profit:,.2f} ISK`"
+                            footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}"
+                            if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                            await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
+                        else:
+                            for sale_info in sales_details:
+                                type_id, tx_group, profit = sale_info['type_id'], sale_info['tx_group'], sale_info['profit']
+                                total_quantity = sum(t['quantity'] for t in tx_group)
+                                total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+                                avg_price = total_value / total_quantity
+                                profit_line = f"\n**Net Profit:** `{profit:,.2f} ISK`" if profit is not None else "\n**Profit:** `N/A (No purchase history)`"
+                                region_orders = get_region_market_orders(character.region_id, type_id, force_revalidate=True)
+                                best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
+                                price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `N/A`"
+                                if best_buy_order_price > 0:
+                                    price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
+                                    price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
+                                message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
+                                           f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
+                                           f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
+                                           f"{price_comparison_line}{profit_line}\n"
+                                           f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
+                                           f"**Wallet:** `{wallet_balance:,.2f} ISK`")
+                                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                                await asyncio.sleep(1)
+
+
+                    # 4. Update the last notified timestamp to the newest transaction's timestamp
+                    latest_tx_ts = datetime.fromisoformat(new_transactions[-1]['date'].replace('Z', '+00:00'))
+                    set_bot_state(state_key, latest_tx_ts.isoformat())
+                    logging.info(f"Updated notification timestamp for {character.name} to {latest_tx_ts.isoformat()}")
+
+
+                except Exception as e:
+                    logging.error(f"Error processing live notifications for {character.name}: {e}", exc_info=True)
+                finally:
+                    await asyncio.sleep(1) # Stagger requests per character
+
+        logging.info("Live notification polling cycle complete. Sleeping for 60 seconds.")
         await asyncio.sleep(60)
 
 
@@ -1869,7 +1949,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 raise e # Re-raise if it's not the expected error
             logging.info("Message not modified, skipping edit.")
     else:
-        await update.message.reply_text(text=message, reply_markup=reply_markup)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=message, reply_markup=reply_markup)
 
 
 async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1928,7 +2008,7 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
     if update.callback_query:
         await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
     else:
-        await update.message.reply_text(message, reply_markup=reply_markup)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=message, reply_markup=reply_markup)
 
 
 async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
@@ -1975,7 +2055,8 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
             ["/add_character"]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text(
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
             text=final_text,
             parse_mode='Markdown',
             reply_markup=reply_markup
@@ -2114,7 +2195,12 @@ async def _get_last_5_transactions(update: Update, context: ContextTypes.DEFAULT
             ["/add_character"]
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=reply_markup)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=message_text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 
 def format_isk(value):
@@ -2599,10 +2685,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if text.lower() == 'cancel':
         await update.message.reply_text("Action cancelled.")
         context.user_data.clear()
-        # Create a fake update object to show the settings again
-        fake_query = type('obj', (object,), {'data': f'settings_char_{character_id}'})
-        fake_update = type('obj', (object,), {'callback_query': fake_query, 'effective_chat': update.effective_chat, 'effective_message': update.message, 'effective_user': update.effective_user})
-        await _show_character_settings(fake_update, context, get_character_by_id(character_id))
+        # Call the settings menu function with the current update.
+        # Since this update is a text message, it has no callback_query,
+        # so _show_character_settings will correctly send a new message
+        # instead of trying to edit one.
+        await _show_character_settings(update, context, get_character_by_id(character_id))
         return
 
     if action_type == 'set_region_value':
@@ -2647,10 +2734,11 @@ async def post_init(application: Application):
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands have been set in the Telegram menu.")
 
-    # Start the master polling loops as background tasks
-    asyncio.create_task(master_wallet_transaction_poll(application))
+    # Start the background jobs
+    asyncio.create_task(update_historical_data_job(application))
+    asyncio.create_task(live_notification_job(application))
     asyncio.create_task(master_order_history_poll(application))
-    logging.info("Master polling loops for transactions and orders have been started.")
+    logging.info("Started background jobs for historical data, live notifications, and order history.")
 
     # Schedule the job to check for new characters
     application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
