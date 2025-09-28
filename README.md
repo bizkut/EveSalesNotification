@@ -91,18 +91,6 @@ docker-compose up --build -d
 
 The bot and its companion web app will now start.
 
-### Step 3: (Optional) Configure Cloudflare Tunnel
-
-This bot includes an integrated [Cloudflare Tunnel](https://www.cloudflare.com/products/tunnel/) service to easily and securely expose the web app to the internet.
-
-1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel. Note down the **tunnel name** and the **tunnel token**.
-2.  In your tunnel's dashboard, configure the **Public Hostname**. Set the hostname you want (e.g., `eve.gametrader.my`) to point to the internal `webapp` service at `http://webapp:5000`.
-3.  Create a `.env` file by copying the example: `cp .env.example .env`
-4.  Open the new `.env` file and paste your **tunnel name** and **token** into the corresponding variables.
-5.  Finally, ensure your `CALLBACK_URL` and `WEBAPP_URL` in `config.py` use your public `https` hostname (e.g., `https://eve.gametrader.my`).
-
-If you choose not to use the tunnel, you can safely ignore the `.env` file and will need to set up your own reverse proxy.
-
 ---
 
 ## Usage
@@ -166,5 +154,5 @@ All interaction with the bot is handled through a clean, inline button-based men
 If you ever need to completely reset the bot's history (e.g., to re-seed or after a major update), follow these steps:
 
 1.  Stop and remove the container: `docker-compose down`
-2.  Remove the persistent data volume: `docker volume rm <project_name>_processed_data`
+2.  Remove the persistent data volume: `docker volume rm <project_name>_postgres_data`
 3.  Restart the bot: `docker-compose up --build -d`
