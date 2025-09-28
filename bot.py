@@ -3267,15 +3267,7 @@ async def _display_historical_transactions(update: Update, context: ContextTypes
 
     # --- Profit & Fee Calculation (for Sales only) ---
     if not is_buy:
-        all_journal_entries = get_historical_journal_entries_from_db(character.id)
-        # 1. Create a map of transaction journal_ref_id -> total fees
-        fee_map = defaultdict(float)
-        for entry in all_journal_entries:
-            # The journal's ref_id corresponds to the transaction's journal_ref_id
-            if entry.get('ref_type') in ['brokers_fee', 'transaction_tax'] and entry.get('ref_id'):
-                fee_map[entry['ref_id']] += abs(entry.get('amount', 0))
-
-        # 2. Simulate inventory and calculate COGS for each sale in-memory
+        # Simulate inventory and calculate COGS and fees for each sale in-memory
         inventory = defaultdict(list) # {type_id: [lot1, lot2, ...]} where lot is {'quantity': X, 'price': Y}
         # Process all transactions chronologically to build up state
         sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
@@ -3285,7 +3277,7 @@ async def _display_historical_transactions(update: Update, context: ContextTypes
             type_id = tx['type_id']
             if tx.get('is_buy'):
                 inventory[type_id].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-            else: # It's a sale
+            else: # It's a sale, calculate its profit and fees
                 cogs = 0
                 remaining_to_sell = tx['quantity']
                 lots_to_consume_from = inventory.get(type_id, [])
@@ -3303,24 +3295,24 @@ async def _display_historical_transactions(update: Update, context: ContextTypes
                         lot['quantity'] -= quantity_from_lot
                         if lot['quantity'] == 0:
                             lots_consumed_count += 1
-
-                    # Remove fully consumed lots from the front of the list for the next iteration
+                    # Remove fully consumed lots
                     inventory[type_id] = lots_to_consume_from[lots_consumed_count:]
-
                     if remaining_to_sell > 0:
-                        # We ran out of purchase history for this item, so profit is partial/unknown
                         cogs_calculable = False
 
-                # Store calculated data for this specific sale
-                fees = fee_map.get(tx['journal_ref_id'], 0)
+                # Calculate fees based on character settings
                 sale_value = tx['quantity'] * tx['unit_price']
-                if cogs_calculable:
-                    profit = sale_value - cogs - fees
-                    sale_profit_data[tx['transaction_id']] = {'cogs': cogs, 'fees': fees, 'profit': profit}
-                else:
-                    sale_profit_data[tx['transaction_id']] = {'cogs': None, 'fees': fees, 'profit': None}
+                broker_fee = sale_value * (character.broker_fee / 100.0)
+                sales_tax = sale_value * (character.sales_tax / 100.0)
+                total_fees = broker_fee + sales_tax
 
-        # 3. Annotate the original transaction objects with the calculated data
+                profit = None
+                if cogs_calculable:
+                    profit = sale_value - cogs - total_fees
+
+                sale_profit_data[tx['transaction_id']] = {'cogs': cogs if cogs_calculable else None, 'fees': total_fees, 'profit': profit}
+
+        # Annotate the original transaction objects with the calculated data
         for tx in all_transactions:
             if tx['transaction_id'] in sale_profit_data:
                 tx.update(sale_profit_data[tx['transaction_id']])
