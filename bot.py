@@ -37,12 +37,11 @@ class Character:
     wallet_balance_threshold: int
     enable_sales_notifications: bool
     enable_buy_notifications: bool
-    enable_immediate_sales_notifications: bool
-    enable_immediate_buy_notifications: bool
     enable_daily_summary: bool
     notification_batch_threshold: int
 
 CHARACTERS: list[Character] = []
+SUMMARY_DATA_CACHE = {}
 
 
 def load_characters_from_db():
@@ -57,7 +56,6 @@ def load_characters_from_db():
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_immediate_sales_notifications, enable_immediate_buy_notifications,
                     enable_daily_summary, notification_batch_threshold
                 FROM characters
             """)
@@ -75,7 +73,7 @@ def load_characters_from_db():
         (
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             region_id, wallet_balance_threshold,
-            enable_sales, enable_buys, enable_immediate_sales, enable_immediate_buys,
+            enable_sales, enable_buys,
             enable_summary, batch_threshold
         ) = row
 
@@ -91,8 +89,6 @@ def load_characters_from_db():
             wallet_balance_threshold=wallet_balance_threshold,
             enable_sales_notifications=bool(enable_sales),
             enable_buy_notifications=bool(enable_buys),
-            enable_immediate_sales_notifications=bool(enable_immediate_sales),
-            enable_immediate_buy_notifications=bool(enable_immediate_buys),
             enable_daily_summary=bool(enable_summary),
             notification_batch_threshold=batch_threshold
         )
@@ -128,8 +124,6 @@ def setup_database():
                     wallet_balance_threshold BIGINT DEFAULT 0,
                     enable_sales_notifications BOOLEAN DEFAULT TRUE,
                     enable_buy_notifications BOOLEAN DEFAULT TRUE,
-                    enable_immediate_sales_notifications BOOLEAN DEFAULT FALSE,
-                    enable_immediate_buy_notifications BOOLEAN DEFAULT FALSE,
                     enable_daily_summary BOOLEAN DEFAULT TRUE,
                     notification_batch_threshold INTEGER DEFAULT 3
                 )
@@ -208,24 +202,6 @@ def setup_database():
                 )
             """)
 
-            # Migration: Add immediate notification columns if they don't exist
-            cursor.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name='characters' AND column_name='enable_immediate_sales_notifications'
-            """)
-            if cursor.fetchone() is None:
-                logging.info("Applying migration: Adding 'enable_immediate_sales_notifications' to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN enable_immediate_sales_notifications BOOLEAN DEFAULT FALSE")
-                logging.info("Migration complete.")
-
-            cursor.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name='characters' AND column_name='enable_immediate_buy_notifications'
-            """)
-            if cursor.fetchone() is None:
-                logging.info("Applying migration: Adding 'enable_immediate_buy_notifications' to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN enable_immediate_buy_notifications BOOLEAN DEFAULT FALSE")
-                logging.info("Migration complete.")
 
             conn.commit()
     finally:
@@ -503,7 +479,6 @@ def get_characters_for_user(telegram_user_id):
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_immediate_sales_notifications, enable_immediate_buy_notifications,
                     enable_daily_summary, notification_batch_threshold
                 FROM characters WHERE telegram_user_id = %s
             """, (telegram_user_id,))
@@ -512,7 +487,7 @@ def get_characters_for_user(telegram_user_id):
                 (
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
-                    enable_sales, enable_buys, enable_immediate_sales, enable_immediate_buys,
+                    enable_sales, enable_buys,
                     enable_summary, batch_threshold
                 ) = row
 
@@ -524,8 +499,6 @@ def get_characters_for_user(telegram_user_id):
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
-                    enable_immediate_sales_notifications=bool(enable_immediate_sales),
-                    enable_immediate_buy_notifications=bool(enable_immediate_buys),
                     enable_daily_summary=bool(enable_summary),
                     notification_batch_threshold=batch_threshold
                 ))
@@ -545,7 +518,6 @@ def get_character_by_id(character_id: int) -> Character | None:
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_immediate_sales_notifications, enable_immediate_buy_notifications,
                     enable_daily_summary, notification_batch_threshold
                 FROM characters WHERE character_id = %s
             """, (character_id,))
@@ -555,7 +527,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                 (
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
-                    enable_sales, enable_buys, enable_immediate_sales, enable_immediate_buys,
+                    enable_sales, enable_buys,
                     enable_summary, batch_threshold
                 ) = row
 
@@ -567,8 +539,6 @@ def get_character_by_id(character_id: int) -> Character | None:
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
-                    enable_immediate_sales_notifications=bool(enable_immediate_sales),
-                    enable_immediate_buy_notifications=bool(enable_immediate_buys),
                     enable_daily_summary=bool(enable_summary),
                     notification_batch_threshold=batch_threshold
                 )
@@ -600,8 +570,6 @@ def update_character_notification_setting(character_id: int, setting: str, value
     allowed_settings = {
         "sales": "enable_sales_notifications",
         "buys": "enable_buy_notifications",
-        "immediate_sales": "enable_immediate_sales_notifications",
-        "immediate_buys": "enable_immediate_buy_notifications",
         "summary": "enable_daily_summary"
     }
     if setting not in allowed_settings:
@@ -1205,68 +1173,33 @@ async def master_wallet_transaction_poll(application: Application):
 
                     logging.info(f"Detected {len(new_transactions)} new transactions for {character.name}.")
                     # --- Transaction Classification ---
-                    order_history = get_market_orders_history(character, force_revalidate=True)
-                    immediate_sales, immediate_buys = defaultdict(list), defaultdict(list)
-                    non_immediate_sales, non_immediate_buys = defaultdict(list), defaultdict(list)
-
+                    sales, buys = defaultdict(list), defaultdict(list)
                     for tx in new_transactions:
-                        is_immediate = False
-                        if order_history:
-                            # Find candidate orders that match the transaction's item and type (buy/sell)
-                            # and were issued before the transaction occurred.
-                            candidate_orders = [
-                                o for o in order_history
-                                if o.get('type_id') == tx.get('type_id') and
-                                   o.get('is_buy_order') == tx.get('is_buy') and
-                                   o.get('issued') and
-                                   datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) <= datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
-                            ]
-
-                            if candidate_orders:
-                                # Find the most recent order placed before the transaction.
-                                best_match_order = max(candidate_orders, key=lambda o: datetime.fromisoformat(o['issued'].replace('Z', '+00:00')))
-
-                                # If the transaction happened within 2 minutes of the order being placed, it's immediate.
-                                time_diff = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) - datetime.fromisoformat(best_match_order['issued'].replace('Z', '+00:00'))
-                                if time_diff.total_seconds() < 120:
-                                    is_immediate = True
-
                         if tx['is_buy']:
-                            (immediate_buys if is_immediate else non_immediate_buys)[tx['type_id']].append(tx)
+                            buys[tx['type_id']].append(tx)
                         else:
-                            (immediate_sales if is_immediate else non_immediate_sales)[tx['type_id']].append(tx)
+                            sales[tx['type_id']].append(tx)
 
-                    all_type_ids = list(immediate_sales.keys()) + list(immediate_buys.keys()) + list(non_immediate_sales.keys()) + list(non_immediate_buys.keys())
-                    all_loc_ids = [t['location_id'] for txs in list(immediate_sales.values()) + list(immediate_buys.values()) + list(non_immediate_sales.values()) + list(non_immediate_buys.values()) for t in txs]
+                    all_type_ids = list(sales.keys()) + list(buys.keys())
+                    all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
                     id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [character.region_id])), character=character)
                     wallet_balance = get_wallet_balance(character)
 
                     # --- Unconditional Data Processing ---
 
                     # Process ALL Buys for FIFO accounting
-                    if immediate_buys:
-                        for type_id, tx_group in immediate_buys.items():
-                            for tx in tx_group:
-                                add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'])
-                    if non_immediate_buys:
-                        for type_id, tx_group in non_immediate_buys.items():
+                    if buys:
+                        for type_id, tx_group in buys.items():
                             for tx in tx_group:
                                 add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'])
 
                     # Process Sales for FIFO accounting and prepare details for potential notification
-                    non_immediate_sales_details = []
-                    if non_immediate_sales:
-                        for type_id, tx_group in non_immediate_sales.items():
+                    sales_details = []
+                    if sales:
+                        for type_id, tx_group in sales.items():
                             total_quantity = sum(t['quantity'] for t in tx_group)
                             cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-                            non_immediate_sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs})
-
-                    immediate_sales_details = []
-                    if immediate_sales:
-                        for type_id, tx_group in immediate_sales.items():
-                            total_quantity = sum(t['quantity'] for t in tx_group)
-                            cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-                            immediate_sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs})
+                            sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs})
 
                     # --- Conditional Notifications ---
                     if character.notifications_enabled:
@@ -1288,20 +1221,20 @@ async def master_wallet_transaction_poll(application: Application):
                             elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
                                 set_bot_state(state_key, '')
 
-                        # Non-Immediate Buy Notifications
-                        if non_immediate_buys and character.enable_buy_notifications:
-                            if len(non_immediate_buys) > character.notification_batch_threshold:
+                        # Buy Notifications
+                        if buys and character.enable_buy_notifications:
+                            if len(buys) > character.notification_batch_threshold:
                                 header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
                                 item_lines = []
-                                grand_total_cost = sum(tx['quantity'] * tx['unit_price'] for tx_group in non_immediate_buys.values() for tx in tx_group)
-                                for type_id, tx_group in non_immediate_buys.items():
+                                grand_total_cost = sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group)
+                                for type_id, tx_group in buys.items():
                                     total_quantity = sum(t['quantity'] for t in tx_group)
                                     item_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
                                 footer = f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`"
                                 if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
                                 await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
                             else:
-                                for type_id, tx_group in non_immediate_buys.items():
+                                for type_id, tx_group in buys.items():
                                     total_quantity = sum(t['quantity'] for t in tx_group)
                                     total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
                                     message = (f"🛒 *Market Buy ({character.name})* 🛒\n\n"
@@ -1313,38 +1246,13 @@ async def master_wallet_transaction_poll(application: Application):
                                     await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                                     await asyncio.sleep(1)
 
-                        # Immediate Buy Notifications
-                        if immediate_buys and character.enable_immediate_buy_notifications:
-                            if len(immediate_buys) > character.notification_batch_threshold:
-                                header = f"⚡ *Immediate Market Buys ({character.name})* ⚡"
-                                item_lines = []
-                                grand_total_cost = sum(tx['quantity'] * tx['unit_price'] for tx_group in immediate_buys.values() for tx in tx_group)
-                                for type_id, tx_group in immediate_buys.items():
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    item_lines.append(f"  • Bought: `{total_quantity}` x `{id_to_name.get(type_id, 'Unknown')}`")
-                                footer = f"\n**Total Cost:** `{grand_total_cost:,.2f} ISK`"
-                                if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
-                            else:
-                                for type_id, tx_group in immediate_buys.items():
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                    message = (f"⚡ *Immediate Market Buy ({character.name})* ⚡\n\n"
-                                               f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                                               f"**Quantity:** `{total_quantity}`\n"
-                                               f"**Total Cost:** `{total_cost:,.2f} ISK`\n"
-                                               f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
-                                               f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                                    await send_telegram_message(context, message, chat_id=character.telegram_user_id)
-                                    await asyncio.sleep(1)
-
-                        # Non-Immediate Sale Notifications
-                        if non_immediate_sales_details and character.enable_sales_notifications:
-                            if len(non_immediate_sales_details) > character.notification_batch_threshold:
+                        # Sale Notifications
+                        if sales_details and character.enable_sales_notifications:
+                            if len(sales_details) > character.notification_batch_threshold:
                                 header = f"✅ *Multiple Market Sales ({character.name})* ✅"
                                 item_lines = []
                                 grand_total_value, grand_total_cogs = 0, 0
-                                for sale_info in non_immediate_sales_details:
+                                for sale_info in sales_details:
                                     total_quantity = sum(t['quantity'] for t in sale_info['tx_group'])
                                     total_value = sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group'])
                                     grand_total_value += total_value
@@ -1355,7 +1263,7 @@ async def master_wallet_transaction_poll(application: Application):
                                 if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
                                 await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
                             else:
-                                for sale_info in non_immediate_sales_details:
+                                for sale_info in sales_details:
                                     type_id, tx_group, cogs = sale_info['type_id'], sale_info['tx_group'], sale_info['cogs']
                                     total_quantity = sum(t['quantity'] for t in tx_group)
                                     total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
@@ -1368,44 +1276,6 @@ async def master_wallet_transaction_poll(application: Application):
                                         price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
                                         price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
                                     message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
-                                               f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
-                                               f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
-                                               f"{price_comparison_line}\n{profit_line}\n"
-                                               f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
-                                               f"**Wallet:** `{wallet_balance:,.2f} ISK`")
-                                    await send_telegram_message(context, message, chat_id=character.telegram_user_id)
-                                    await asyncio.sleep(1)
-
-                        # Immediate Sale Notifications
-                        if immediate_sales_details and character.enable_immediate_sales_notifications:
-                            if len(immediate_sales_details) > character.notification_batch_threshold:
-                                header = f"⚡ *Immediate Market Sales ({character.name})* ⚡"
-                                item_lines = []
-                                grand_total_value, grand_total_cogs = 0, 0
-                                for sale_info in immediate_sales_details:
-                                    total_quantity = sum(t['quantity'] for t in sale_info['tx_group'])
-                                    total_value = sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group'])
-                                    grand_total_value += total_value
-                                    if sale_info['cogs'] is not None: grand_total_cogs += sale_info['cogs']
-                                    item_lines.append(f"  • Sold: `{total_quantity}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`")
-                                profit_line = f"\n**Total Gross Profit:** `{grand_total_value - grand_total_cogs:,.2f} ISK`" if grand_total_cogs > 0 else ""
-                                footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`{profit_line}"
-                                if wallet_balance is not None: footer += f"\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                await send_paginated_message(context, header, item_lines, footer, chat_id=character.telegram_user_id)
-                            else:
-                                for sale_info in immediate_sales_details:
-                                    type_id, tx_group, cogs = sale_info['type_id'], sale_info['tx_group'], sale_info['cogs']
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                    avg_price = total_value / total_quantity
-                                    profit_line = f"\n**Gross Profit:** `{total_value - cogs:,.2f} ISK`" if cogs is not None else "\n**Profit:** `N/A`"
-                                    region_orders = get_region_market_orders(character.region_id, type_id, force_revalidate=True)
-                                    best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
-                                    price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `N/A`"
-                                    if best_buy_order_price > 0:
-                                        price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
-                                        price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
-                                    message = (f"⚡ *Immediate Market Sale ({character.name})* ⚡\n\n"
                                                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                                                f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
                                                f"{price_comparison_line}\n{profit_line}\n"
@@ -1555,9 +1425,9 @@ def calculate_fifo_profit_for_summary(sales_transactions, character_id):
     return total_sales_value - total_cogs
 
 
-async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
-    """Calculates and prepares the daily summary data for a single character."""
-    logging.info(f"Calculating daily summary for {character.name}...")
+def _calculate_summary_data(character: Character) -> dict:
+    """Fetches all necessary data and calculates summary statistics."""
+    logging.info(f"Calculating summary data for {character.name}...")
 
     now = datetime.now(timezone.utc)
     one_day_ago = now - timedelta(days=1)
@@ -1565,6 +1435,13 @@ async def run_daily_summary_for_character(character: Character, context: Context
     # --- Fetch data ---
     all_transactions = get_wallet_transactions(character, fetch_all=True)
     all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+
+    # --- Cache the data for chart generation ---
+    SUMMARY_DATA_CACHE[character.id] = {
+        'transactions': all_transactions,
+        'journal_entries': all_journal_entries,
+        'timestamp': now
+    }
 
     # --- 24-Hour Summary (Stateless) ---
     total_sales_24h, total_fees_24h, profit_24h = 0, 0, 0
@@ -1595,35 +1472,93 @@ async def run_daily_summary_for_character(character: Character, context: Context
     gross_revenue_month = total_sales_month - total_fees_month
     wallet_balance = get_wallet_balance(character)
 
-    # --- Send Message & Update State ---
+    # --- Available Years for Charts ---
+    available_years = []
+    if all_transactions:
+        available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions)))
+
+    return {
+        "now": now,
+        "wallet_balance": wallet_balance,
+        "total_sales_24h": total_sales_24h,
+        "total_fees_24h": total_fees_24h,
+        "profit_24h": profit_24h,
+        "total_sales_month": total_sales_month,
+        "total_fees_month": total_fees_month,
+        "gross_revenue_month": gross_revenue_month,
+        "available_years": available_years
+    }
+
+
+def _format_summary_message(summary_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
+    """Formats the summary data into a message string and keyboard."""
+    now = summary_data['now']
     message = (
         f"📊 *Daily Market Summary ({character.name})*\n"
-        f"_{now.strftime('%Y-%m-%d')}_\n\n"
-        f"*Wallet Balance:* `{wallet_balance or 0:,.2f} ISK`\n\n"
+        f"_{now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
+        f"*Wallet Balance:* `{summary_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
         f"*Past 24 Hours:*\n"
-        f"  - Total Sales Value: `{total_sales_24h:,.2f} ISK`\n"
-        f"  - Total Fees (Broker + Tax): `{total_fees_24h:,.2f} ISK`\n"
-        f"  - **Profit (FIFO):** `{profit_24h:,.2f} ISK`\n\n"
+        f"  - Total Sales Value: `{summary_data['total_sales_24h']:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{summary_data['total_fees_24h']:,.2f} ISK`\n"
+        f"  - **Profit (FIFO):** `{summary_data['profit_24h']:,.2f} ISK`\n\n"
         f"---\n\n"
         f"🗓️ *Current Month Summary ({now.strftime('%B %Y')}):*\n"
-        f"  - Total Sales Value: `{total_sales_month:,.2f} ISK`\n"
-        f"  - Total Fees (Broker + Tax): `{total_fees_month:,.2f} ISK`\n"
-        f"  - *Gross Revenue (Sales - Fees):* `{gross_revenue_month:,.2f} ISK`"
+        f"  - Total Sales Value: `{summary_data['total_sales_month']:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{summary_data['total_fees_month']:,.2f} ISK`\n"
+        f"  - *Gross Revenue (Sales - Fees):* `{summary_data['gross_revenue_month']:,.2f} ISK`"
     )
 
     # Dynamically generate year buttons
-    available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions)))
+    available_years = summary_data['available_years']
     year_buttons = [InlineKeyboardButton(f"Chart {year}", callback_data=f"chart_yearly_{character.id}_{year}") for year in available_years]
 
     # Always include the current month chart button
-    keyboard = [[InlineKeyboardButton("Show Monthly Chart", callback_data=f"chart_monthly_{character.id}_{now.year}")]]
+    keyboard = [[InlineKeyboardButton("Daily Chart (This Month)", callback_data=f"chart_monthly_{character.id}_{now.year}")]]
     # Add year buttons, chunked into rows of 4 for readability
     for i in range(0, len(year_buttons), 4):
         keyboard.append(year_buttons[i:i+4])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
-    logging.info(f"Daily summary sent for {character.name}.")
+    return message, reply_markup
+
+
+async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
+    """Handles the interactive flow of generating and sending a summary message."""
+    target_chat_id = update.effective_chat.id
+    sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating summary for {character.name}...")
+
+    try:
+        # Run the synchronous data calculation in a thread to avoid blocking
+        summary_data = await asyncio.to_thread(_calculate_summary_data, character)
+        message, reply_markup = _format_summary_message(summary_data, character)
+
+        # Edit the placeholder message with the final content
+        await context.bot.edit_message_text(
+            chat_id=target_chat_id,
+            message_id=sent_message.message_id,
+            text=message,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logging.error(f"Failed to generate and send summary for {character.name}: {e}", exc_info=True)
+        await context.bot.edit_message_text(
+            chat_id=target_chat_id,
+            message_id=sent_message.message_id,
+            text=f"❌ An error occurred while generating the summary for {character.name}."
+        )
+
+
+async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
+    """Calculates and sends the daily summary for a single character (for scheduled jobs)."""
+    logging.info(f"Running scheduled daily summary for {character.name}...")
+    try:
+        summary_data = _calculate_summary_data(character)
+        message, reply_markup = _format_summary_message(summary_data, character)
+        await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
+        logging.info(f"Daily summary sent for {character.name}.")
+    except Exception as e:
+        logging.error(f"Failed to send daily summary for {character.name}: {e}", exc_info=True)
 
 
 async def master_daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1921,13 +1856,10 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if len(user_characters) == 1:
-        char_names = ", ".join([c.name for c in user_characters])
-        await update.message.reply_text(f"Generating summary for {char_names}...")
-        for char in user_characters:
-            await run_daily_summary_for_character(char, context)
-            await asyncio.sleep(1)
-        await update.message.reply_text(f"✅ Summaries sent for {char_names}!")
+        # If only one character, generate the summary directly
+        await _generate_and_send_summary(update, context, user_characters[0])
     else:
+        # If multiple, prompt for selection
         keyboard = [[char.name] for char in user_characters]
         keyboard.append(["All Characters"])
         keyboard.append(["Main Menu"])
@@ -2023,7 +1955,7 @@ def format_isk(value):
     return f"{value:.2f}"
 
 
-def generate_monthly_chart(character_id: int):
+def generate_daily_chart_for_month(character_id: int):
     """Generates a line chart of sales, fees, and profit for the current month."""
     character = get_character_by_id(character_id)
     if not character:
@@ -2034,8 +1966,16 @@ def generate_monthly_chart(character_id: int):
     _, num_days = calendar.monthrange(year, month)
     days = list(range(1, num_days + 1))
 
-    all_transactions = get_wallet_transactions(character, fetch_all=True)
-    all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+    # Use cached data if available, otherwise fetch it
+    cached_data = SUMMARY_DATA_CACHE.get(character_id)
+    if cached_data:
+        all_transactions = cached_data['transactions']
+        all_journal_entries = cached_data['journal_entries']
+    else:
+        logging.warning(f"Cache miss for chart generation for char {character_id}. Re-fetching data.")
+        all_transactions = get_wallet_transactions(character, fetch_all=True)
+        all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+
 
     daily_sales = {day: 0 for day in days}
     daily_fees = {day: 0 for day in days}
@@ -2101,8 +2041,16 @@ def generate_yearly_chart(character_id: int, year: int):
     months = list(range(1, 13))
     month_names = [calendar.month_abbr[m] for m in months]
 
-    all_transactions = get_wallet_transactions(character, fetch_all=True)
-    all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+    # Use cached data if available, otherwise fetch it
+    cached_data = SUMMARY_DATA_CACHE.get(character_id)
+    if cached_data:
+        all_transactions = cached_data['transactions']
+        all_journal_entries = cached_data['journal_entries']
+    else:
+        logging.warning(f"Cache miss for chart generation for char {character_id}. Re-fetching data.")
+        all_transactions = get_wallet_transactions(character, fetch_all=True)
+        all_journal_entries, _ = get_wallet_journal(character, fetch_all=True)
+
 
     monthly_sales = {m: 0 for m in months}
     monthly_fees = {m: 0 for m in months}
@@ -2179,7 +2127,7 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     chart_buffer = None
     try:
         if chart_type == 'monthly':
-            chart_buffer = generate_monthly_chart(character_id)
+            chart_buffer = generate_daily_chart_for_month(character_id)
         elif chart_type == 'yearly':
             chart_buffer = generate_yearly_chart(character_id, year)
     except Exception as e:
@@ -2251,31 +2199,26 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Back to Summary' button press."""
+    """Handles the 'Back to Summary' button press by deleting the chart and regenerating the summary."""
     query = update.callback_query
     await query.answer()
 
     try:
         character_id = int(query.data.split('_')[2])
     except (IndexError, ValueError):
-        # This message will be ephemeral as the original message is deleted.
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Invalid request.")
+        await query.edit_message_text(text="Invalid request.")
         return
 
     character = get_character_by_id(character_id)
     if not character:
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Error: Could not find character.")
+        await query.edit_message_text(text="Error: Could not find character.")
         return
 
     # Delete the chart message
     await query.message.delete()
 
-    # Let the user know we're working on it by sending a new message
-    await context.bot.send_message(chat_id=query.message.chat_id, text=f"Generating summary for {character.name}...")
-
-    # Regenerate the summary for just this one character
-    await run_daily_summary_for_character(character, context)
-    await context.bot.send_message(chat_id=query.message.chat_id, text=f"✅ Summary sent for {character.name}!")
+    # Regenerate the summary for just this one character using the new interactive handler
+    await _generate_and_send_summary(update, context, character)
 
 
 async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2379,8 +2322,6 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
     keyboard = [
         [f"Toggle Sales: {'On' if character.enable_sales_notifications else 'Off'}"],
         [f"Toggle Buys: {'On' if character.enable_buy_notifications else 'Off'}"],
-        [f"Toggle Immediate Sales: {'On' if character.enable_immediate_sales_notifications else 'Off'}"],
-        [f"Toggle Immediate Buys: {'On' if character.enable_immediate_buy_notifications else 'Off'}"],
         [f"Toggle Daily Summary: {'On' if character.enable_daily_summary else 'Off'}"],
         [back_button_text]
     ]
@@ -2485,12 +2426,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if action_type == 'select_char_for_balance':
             await _show_balance_for_characters(update, context, characters_to_query)
         elif action_type == 'select_char_for_summary':
-            char_names = ", ".join([c.name for c in characters_to_query])
-            await update.message.reply_text(f"Generating summary for {char_names}...")
+            # This will now generate summaries one by one for the selected characters
             for char in characters_to_query:
-                await run_daily_summary_for_character(char, context)
-                await asyncio.sleep(1)
-            await update.message.reply_text(f"✅ Summaries sent for {char_names}!")
+                await _generate_and_send_summary(update, context, char)
+                await asyncio.sleep(1)  # Small delay between messages
         elif action_type == 'select_char_for_sales':
             await _get_last_5_transactions(update, context, is_buy=False, characters=characters_to_query)
         elif action_type == 'select_char_for_buys':
@@ -2535,10 +2474,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             setting_to_toggle, current_value = "sales", character.enable_sales_notifications
         elif text.startswith("Toggle Buys"):
             setting_to_toggle, current_value = "buys", character.enable_buy_notifications
-        elif text.startswith("Toggle Immediate Sales"):
-            setting_to_toggle, current_value = "immediate_sales", character.enable_immediate_sales_notifications
-        elif text.startswith("Toggle Immediate Buys"):
-            setting_to_toggle, current_value = "immediate_buys", character.enable_immediate_buy_notifications
         elif text.startswith("Toggle Daily Summary"):
             setting_to_toggle, current_value = "summary", character.enable_daily_summary
 
