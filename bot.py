@@ -2032,35 +2032,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(text=message, reply_markup=reply_markup)
 
 
-async def notifications_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Allows a user to select a character to manage their notification settings
-    using an InlineKeyboardMarkup.
-    """
-    user_id = update.effective_user.id
-    user_characters = get_characters_for_user(user_id)
-    chat_id = update.effective_chat.id
-    message_id = update.effective_message.message_id
-
-    if not user_characters:
-        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
-        return
-
-    if len(user_characters) == 1:
-        await _show_notification_settings(update, context, user_characters[0])
-    else:
-        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"notifications_char_{char.id}")] for char in user_characters]
-        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        message_text = "Please select a character to manage their notification settings:"
-
-        # Edit the existing message if from a callback, otherwise send a new one
-        if update.callback_query:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
-
-
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Provides a link for the user to add a new EVE Online character.
@@ -2626,8 +2597,7 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         await context.bot.send_message(update.effective_chat.id, "Error: Could not find this character.")
         return
 
-    user_characters = get_characters_for_user(character.telegram_user_id)
-    back_callback = "start_command" if len(user_characters) <= 1 else "notifications"
+    back_callback = f"settings_char_{character.id}"
 
     keyboard = [
         [InlineKeyboardButton(f"Sales Notifications: {'✅ On' if character.enable_sales_notifications else '❌ Off'}", callback_data=f"toggle_sales_{character.id}")],
@@ -2668,6 +2638,7 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
     keyboard = [
         [InlineKeyboardButton(f"Trade Region: {character.region_id}", callback_data=f"set_region_{character.id}")],
         [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
+        [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3150,7 +3121,6 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "summary": await summary_command(update, context)
     elif data == "sales": await sales_command(update, context)
     elif data == "buys": await buys_command(update, context)
-    elif data == "notifications": await notifications_command(update, context)
     elif data == "settings": await settings_command(update, context)
     elif data == "add_character": await add_character_command(update, context)
     elif data == "remove": await remove_character_command(update, context)
