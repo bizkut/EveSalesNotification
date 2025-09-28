@@ -22,6 +22,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot also displays your character's current order capacity (e.g., "152 / 305 orders").
+- **Public Character Info**: View a summary of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The summary now includes inline buttons to create an hourly (last 24h), daily (current month), and monthly (for all historical years) performance chart. After viewing a chart, you can easily return to the summary view using the "Back to Summary" button.
 - **Highly Configurable**: All major settings (trade region, summary time, wallet alerts, and all notification types) are configurable on a per-character basis via the bot's menu.
@@ -117,7 +118,7 @@ All interaction with the bot is handled through a clean, inline button-based men
     -   **📈 View Sales**: Displays a detailed, paginated history of all sales, including profit and fee calculations.
     -   **🛒 View Buys**: Displays a detailed, paginated history of all buy transactions.
     -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
-    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, wallet balance alerts, and notification preferences (sales, buys, daily summary).
+    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, wallet balance alerts, notification preferences, and view public character info.
     -   **➕ Add Character**: Starts the process of adding a new character.
     -   **🗑️ Remove Character**: Starts the process of removing a character and all of their associated data.
 3.  **Character Selection**: If you have multiple characters, the bot will present you with a new inline menu to choose which character you want to interact with after you select an action.
