@@ -1829,20 +1829,25 @@ async def master_wallet_transaction_poll(application: Application):
                             # Low Balance Alert
                             if wallet_balance is not None and character.wallet_balance_threshold > 0:
                                 state_key = f"low_balance_alert_sent_at_{character.id}"
-                            last_alert_str = get_bot_state(state_key)
-                            alert_sent_recently = False
-                            if last_alert_str:
-                                last_alert_time = datetime.fromisoformat(last_alert_str)
-                                if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
-                                    alert_sent_recently = True
-                            if wallet_balance < character.wallet_balance_threshold and not alert_sent_recently:
-                                alert_message = (f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\n"
-                                                 f"Your wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n"
-                                                 f"**Current Balance:** `{wallet_balance:,.2f}` ISK")
-                                await send_telegram_message(context, alert_message, chat_id=character.telegram_user_id)
-                                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
-                            elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
-                                set_bot_state(state_key, '')
+                                last_alert_str = get_bot_state(state_key)
+                                alert_sent_recently = False
+                                if last_alert_str:
+                                    try:
+                                        last_alert_time = datetime.fromisoformat(last_alert_str)
+                                        if (datetime.now(timezone.utc) - last_alert_time) < timedelta(days=1):
+                                            alert_sent_recently = True
+                                    except ValueError:
+                                        logging.warning(f"Could not parse alert timestamp for {state_key}: '{last_alert_str}'")
+
+                                if wallet_balance < character.wallet_balance_threshold and not alert_sent_recently:
+                                    alert_message = (f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\n"
+                                                     f"Your wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n"
+                                                     f"**Current Balance:** `{wallet_balance:,.2f}` ISK")
+                                    await send_telegram_message(context, alert_message, chat_id=character.telegram_user_id)
+                                    set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+                                elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
+                                    # Reset the state if balance is now okay and an alert was previously sent.
+                                    set_bot_state(state_key, '')
 
                         # Buy Notifications
                         if buys and character.enable_buy_notifications:
