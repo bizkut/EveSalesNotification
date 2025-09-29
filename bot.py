@@ -151,9 +151,17 @@ def setup_database():
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
                     broker_fee REAL DEFAULT 3.0,
                     sales_tax REAL DEFAULT 7.5,
-                    citadel_broker_fee REAL DEFAULT 3.0
+                    citadel_broker_fee REAL DEFAULT 3.0,
+                    needs_update_notification BOOLEAN DEFAULT FALSE
                 )
             """)
+
+            # Migration: Add needs_update_notification column if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'needs_update_notification'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'needs_update_notification' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN needs_update_notification BOOLEAN DEFAULT FALSE;")
+                logging.info("Migration for 'needs_update_notification' complete.")
 
             # Migration: Add new fee columns if they don't exist
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'broker_fee'")
@@ -696,6 +704,21 @@ def update_character_notification_setting(character_id: int, setting: str, value
     finally:
         database.release_db_connection(conn)
     logging.info(f"Updated {column_name} for character {character_id} to {value}.")
+
+
+def reset_update_notification_flag(character_id: int):
+    """Resets the needs_update_notification flag for a character to FALSE."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE characters SET needs_update_notification = FALSE WHERE character_id = %s",
+                (character_id,)
+            )
+            conn.commit()
+        logging.info(f"Reset update notification flag for character {character_id}.")
+    finally:
+        database.release_db_connection(conn)
 
 
 def get_historical_transactions_from_db(character_id: int) -> list:
@@ -2212,22 +2235,29 @@ def seed_data_for_character(character: Character) -> bool:
 
 async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
     """
-    Periodically checks the database for new characters, seeds their historical
-    data, and adds them to the live monitoring list upon success.
+    Periodically checks the database for new or updated characters,
+    seeds their historical data, and adds/updates them in the live monitoring list.
     """
-    logging.debug("Running job to check for new characters.")
+    logging.debug("Running job to check for new and updated characters.")
     conn = database.get_db_connection()
-    db_char_ids = set()
+    db_chars_info = {}
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT character_id FROM characters")
-            db_char_ids = {row[0] for row in cursor.fetchall()}
+            # Fetch all characters and their update status
+            cursor.execute("SELECT character_id, needs_update_notification FROM characters")
+            for row in cursor.fetchall():
+                db_chars_info[row[0]] = {'needs_update': row[1]}
     finally:
         database.release_db_connection(conn)
 
-    monitored_char_ids = {c.id for c in CHARACTERS}
-    new_char_ids = db_char_ids - monitored_char_ids
+    if not db_chars_info:
+        return # No characters in DB, nothing to do.
 
+    monitored_char_ids = {c.id for c in CHARACTERS}
+    db_char_ids = set(db_chars_info.keys())
+
+    # --- 1. Handle New Characters ---
+    new_char_ids = db_char_ids - monitored_char_ids
     if new_char_ids:
         logging.info(f"Detected {len(new_char_ids)} new characters in the database.")
         for char_id in new_char_ids:
@@ -2237,7 +2267,6 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             # Attempt to seed the historical data for the new character.
-            # This is a blocking, synchronous function.
             seed_successful = seed_data_for_character(character)
 
             if seed_successful:
@@ -2314,6 +2343,35 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                     f"I will automatically retry in a few minutes. Monitoring will begin once the import succeeds.",
                     chat_id=character.telegram_user_id
                 )
+
+    # --- 2. Handle Updated Characters ---
+    updated_char_ids = {char_id for char_id, info in db_chars_info.items() if info['needs_update'] and char_id in monitored_char_ids}
+    if updated_char_ids:
+        logging.info(f"Detected {len(updated_char_ids)} updated characters in the database.")
+        for char_id in updated_char_ids:
+            # Get the fresh character data from the database
+            updated_character = get_character_by_id(char_id)
+            if not updated_character:
+                logging.error(f"Could not find details for updated character ID {char_id} in the database.")
+                continue
+
+            # Find and replace the old character object in the global CHARACTERS list
+            for i, old_char in enumerate(CHARACTERS):
+                if old_char.id == char_id:
+                    CHARACTERS[i] = updated_character
+                    logging.info(f"Reloaded updated character data for {updated_character.name} in memory.")
+                    break
+
+            # Send a notification to the user
+            update_message = f"✅ Successfully updated the permissions for character **{updated_character.name}**. The bot is now using the new credentials."
+            await send_telegram_message(
+                context,
+                update_message,
+                chat_id=updated_character.telegram_user_id
+            )
+
+            # Reset the flag in the database
+            reset_update_notification_flag(char_id)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
