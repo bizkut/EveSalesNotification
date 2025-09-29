@@ -14,9 +14,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    command: # Enable logical replication for ElectricSQL
+    command: # Enable logical replication for ElectricSQL and suppress benign startup errors
       - -c
       - wal_level=logical
+      - -c
+      - log_min_messages=FATAL
 
   electric:
     image: electricsql/electric:latest
