@@ -611,7 +611,7 @@ def get_characters_for_user(telegram_user_id):
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_summary, notification_batch_threshold, created_at,
                     broker_fee, sales_tax, citadel_broker_fee
-                FROM characters WHERE telegram_user_id = %s
+                FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
             for row in rows:
@@ -4268,9 +4268,8 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         # Notify the user
         success_message = (
-            f"✅ **{char_name}** has been scheduled for deletion.\n\n"
-            f"For the next hour, I will continue to monitor this character *silently* (no new notifications will be sent), but all new data will be saved. After one hour, all data for this character will be permanently deleted.\n\n"
-            f"To cancel this process, simply add the character again within the hour."
+            f"✅ Character **{char_name}** has been removed.\n\n"
+            f"If this was a mistake, you can recover the character and all their data by adding them again within the next hour."
         )
         keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
