@@ -2484,28 +2484,24 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                 logging.error(f"Could not find details for newly detected character ID {char_id} in the database.")
                 continue
 
-            # Step 1: Initial Notification
-            sync_start_message = f"⏳ **{character.name}** has been added. Now syncing historical data... this may take a minute. I will send another message when complete."
+            # Step 1: Delete the original "Add Character" prompt.
             prompt_state_key = f"add_character_prompt_{character.telegram_user_id}"
             prompt_message_info = get_bot_state(prompt_state_key)
-            chat_id, message_id = None, None
-
             if prompt_message_info:
                 try:
-                    chat_id_str, message_id_str = prompt_message_info.split(':')
-                    chat_id = int(chat_id_str)
-                    message_id = int(message_id_str)
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id, message_id=message_id,
-                        text=sync_start_message, parse_mode='Markdown'
-                    )
+                    prompt_chat_id, prompt_message_id = map(int, prompt_message_info.split(':'))
+                    await context.bot.delete_message(chat_id=prompt_chat_id, message_id=prompt_message_id)
+                    logging.info(f"Deleted 'Add Character' prompt message {prompt_message_id} for user {character.telegram_user_id}.")
                 except (ValueError, BadRequest) as e:
-                    logging.warning(f"Failed to edit 'Add Character' prompt, sending new message instead. Error: {e}")
-                    sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
-                    chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
-            else:
-                sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
-                chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
+                    logging.warning(f"Failed to delete 'Add Character' prompt, it may have been manually deleted. Error: {e}")
+                finally:
+                    set_bot_state(prompt_state_key, '') # Clean up state regardless
+
+            # Step 2: Send a new "syncing" message that we can edit later.
+            sync_start_message = f"⏳ **{character.name}** has been added. Now syncing historical data... this may take a minute. I will send another message when complete."
+            syncing_message = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
+            chat_id = syncing_message.chat_id
+            message_id = syncing_message.message_id
 
             # Step 2: Seed Data (run in a separate thread)
             seed_successful = await asyncio.to_thread(seed_data_for_character, character)
