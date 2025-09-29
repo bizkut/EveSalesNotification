@@ -1047,7 +1047,7 @@ def get_market_orders_history(character, return_headers=False, force_revalidate=
 
     all_orders = []
     page = 1
-    url = f"https://esi.evetech.net/v1/characters/{character.id}/orders/history/"
+    url = f"https://esi.evetech.net/v2/characters/{character.id}/orders/history/"
     first_page_headers = None
 
     while True:
@@ -1117,7 +1117,7 @@ def get_market_history(type_id, region_id, force_revalidate=False):
 def get_character_online_status(character: Character):
     """Fetches a character's online status from ESI."""
     if not character: return None
-    url = f"https://esi.evetech.net/v2/characters/{character.id}/online/"
+    url = f"https://esi.evetech.net/v3/characters/{character.id}/online/"
     return make_esi_request(url, character=character, force_revalidate=True)
 
 def get_character_public_info(character_id: int):
