@@ -900,8 +900,13 @@ def delete_character(character_id: int):
             cursor.execute("DELETE FROM esi_cache WHERE cache_key LIKE %s", (esi_cache_pattern,))
             logging.info(f"Deleted esi_cache entries for character {character_id}.")
 
-            # Clean up bot_state entries
-            cursor.execute("DELETE FROM bot_state WHERE key LIKE %s", (f"%_{character_id}",))
+            # Clean up bot_state entries for this character
+            keys_to_delete = [
+                f"history_backfilled_{character_id}",
+                f"low_balance_alert_sent_at_{character_id}",
+                f"chart_cache_dirty_{character_id}"
+            ]
+            cursor.execute("DELETE FROM bot_state WHERE key = ANY(%s)", (keys_to_delete,))
             logging.info(f"Deleted bot_state entries for character {character_id}.")
 
             # Finally, delete the character from the main table
