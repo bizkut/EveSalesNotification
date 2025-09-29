@@ -1730,7 +1730,7 @@ async def master_wallet_transaction_poll(application: Application):
                         full_journal = get_full_wallet_journal_from_db(character.id)
                         tx_id_to_journal_map = {
                             entry['context_id']: entry for entry in full_journal
-                            if entry.get('context_id_type') == 'market_transaction_id'
+                            if entry.get('ref_type') == 'market_transaction'
                         }
                         fee_journal_by_timestamp = defaultdict(list)
                         tax_ref_types = {'transaction_tax', 'market_provider_tax'}
@@ -3895,7 +3895,7 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
     # Create a lookup for market transaction journal entries by their context_id (which is the transaction_id)
     tx_id_to_journal_map = {
         entry['context_id']: entry for entry in full_journal
-        if entry.get('context_id_type') == 'market_transaction_id'
+        if entry.get('ref_type') == 'market_transaction'
     }
 
     # Group all fee-related journal entries by their exact timestamp for quick lookup
