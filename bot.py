@@ -299,6 +299,15 @@ def setup_database():
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chart_cache (
+                    chart_key TEXT PRIMARY KEY,
+                    character_id INTEGER NOT NULL,
+                    chart_data BYTEA NOT NULL,
+                    generated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -1103,6 +1112,42 @@ def get_alliance_info(alliance_id: int):
     return make_esi_request(url)
 
 
+def get_cached_chart(chart_key: str):
+    """Retrieves a cached chart from the database."""
+    conn = database.get_db_connection()
+    chart_data = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT chart_data FROM chart_cache WHERE chart_key = %s", (chart_key,))
+            row = cursor.fetchone()
+            if row:
+                chart_data = row[0]
+    finally:
+        database.release_db_connection(conn)
+    return chart_data
+
+
+def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes):
+    """Saves or updates a chart in the database cache."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            binary_data = psycopg2.Binary(chart_data)
+            cursor.execute(
+                """
+                INSERT INTO chart_cache (chart_key, character_id, chart_data, generated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chart_key) DO UPDATE SET
+                    chart_data = EXCLUDED.chart_data,
+                    generated_at = EXCLUDED.generated_at;
+                """,
+                (chart_key, character_id, binary_data, datetime.now(timezone.utc))
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+
 def get_image_from_cache(url: str):
     """Retrieves a cached image (data and etag) from the database."""
     conn = database.get_db_connection()
@@ -1491,6 +1536,10 @@ async def master_wallet_transaction_poll(application: Application):
 
                     if not new_transaction_ids:
                         continue
+
+                    # Mark the character's chart cache as dirty since new data has arrived.
+                    set_bot_state(f"chart_cache_dirty_{character.id}", "true")
+                    logging.info(f"Set chart cache dirty flag for character {character.name} ({character.id}).")
 
                     new_transactions = [tx for tx in recent_transactions if tx['transaction_id'] in new_transaction_ids]
                     logging.info(f"Detected {len(new_transactions)} new transactions for {character.name}.")
@@ -2698,25 +2747,41 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    chart_key = f"chart_{character_id}_{chart_type}_{year}"
+    is_dirty = get_bot_state(f"chart_cache_dirty_{character_id}") == "true"
     chart_buffer = None
-    try:
-        if chart_type == 'hourly':
-            chart_buffer = await asyncio.to_thread(generate_hourly_chart, character_id)
-        elif chart_type == 'daily':
-            chart_buffer = await asyncio.to_thread(generate_daily_chart, character_id)
-        elif chart_type == 'monthly':
-            chart_buffer = await asyncio.to_thread(generate_monthly_chart, character_id, year)
-    except Exception as e:
-        logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.edit_message_text(
-            text=f"An error occurred while generating the chart for {character.name}.",
-            chat_id=chat_id,
-            message_id=generating_message_id,
-            reply_markup=reply_markup
-        )
-        return
+
+    if not is_dirty:
+        cached_chart_data = get_cached_chart(chart_key)
+        if cached_chart_data:
+            logging.info(f"Using cached chart for key: {chart_key}")
+            chart_buffer = io.BytesIO(bytes(cached_chart_data))
+
+    if chart_buffer is None:
+        logging.info(f"Generating new chart for key: {chart_key} (Dirty: {is_dirty})")
+        try:
+            if chart_type == 'hourly':
+                chart_buffer = await asyncio.to_thread(generate_hourly_chart, character_id)
+            elif chart_type == 'daily':
+                chart_buffer = await asyncio.to_thread(generate_daily_chart, character_id)
+            elif chart_type == 'monthly':
+                chart_buffer = await asyncio.to_thread(generate_monthly_chart, character_id, year)
+
+            if chart_buffer:
+                save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
+                set_bot_state(f"chart_cache_dirty_{character_id}", "false")
+                chart_buffer.seek(0)
+        except Exception as e:
+            logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
+            keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.edit_message_text(
+                text=f"An error occurred while generating the chart for {character.name}.",
+                chat_id=chat_id,
+                message_id=generating_message_id,
+                reply_markup=reply_markup
+            )
+            return
 
     # Delete the "Generating..." message first
     await context.bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
