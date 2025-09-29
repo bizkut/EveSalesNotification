@@ -3818,15 +3818,6 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # --- Page Summary & Disclaimer ---
     summary_footer = ""
-    if not is_buy and paginated_tx:
-        summary_footer = (
-            f"\n\n---\n"
-            f"*Page Totals:*\n"
-            f"  - Total Sales Value: `{page_sales_value:,.2f}` ISK\n"
-            f"  - Total Fees (from Journal): `{page_fees:,.2f}` ISK\n\n"
-            f"*Note: Fees are aggregated by date and may not correspond exactly to the sales on this page. "
-            f"Use the `/summary` command for a complete financial overview.*"
-        )
 
     # --- Keyboard ---
     keyboard = []
