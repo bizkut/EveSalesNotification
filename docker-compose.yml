@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:16-alpine # Upgraded for ElectricSQL compatibility
     container_name: eve-market-db
     restart: unless-stopped
     environment:
@@ -12,10 +12,26 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U evebot -d eve_market_bot"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    command: # Enable logical replication for ElectricSQL
+      - -c
+      - wal_level=logical
+
+  electric:
+    image: electricsql/electric:latest
+    container_name: eve-market-electric
+    restart: unless-stopped
+    ports:
+      - "5133:5133" # Electric's Postgres-proxy port
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
+      - ELECTRIC_INSECURE=true # For development only
+    depends_on:
+      db:
+        condition: service_healthy
 
   bot:
     build: .
@@ -37,6 +53,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      electric:
+        condition: service_started
 
   webapp:
     build: .
@@ -57,6 +75,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      electric:
+        condition: service_started
 
   cloudflared:
     image: cloudflare/cloudflared:latest
