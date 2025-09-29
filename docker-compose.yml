@@ -2,17 +2,37 @@ version: '3.8'
 
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:16-alpine # Upgraded for ElectricSQL compatibility
     container_name: eve-market-db
     restart: unless-stopped
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U evebot -d eve_market_bot"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: # Enable logical replication for ElectricSQL
+      - -c
+      - wal_level=logical
+
+  electric:
+    image: electricsql/electric:latest
+    container_name: eve-market-electric
+    restart: unless-stopped
+    ports:
+      - "5133:5133" # Electric's Postgres-proxy port
+    env_file:
+      - .env
+    environment:
+      - ELECTRIC_INSECURE=true # For development only
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "electric-sql", "proxy-status", "--proxy-port", "5133"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -22,20 +42,12 @@ services:
     container_name: eve-market-bot
     restart: unless-stopped
     command: ["python", "bot.py"]
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - ESI_CLIENT_ID=${ESI_CLIENT_ID}
-      - ESI_SECRET_KEY=${ESI_SECRET_KEY}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - WEBAPP_URL=${WEBAPP_URL}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     depends_on:
-      db:
+      electric:
         condition: service_healthy
 
   webapp:
@@ -43,19 +55,12 @@ services:
     container_name: eve-market-webapp
     restart: unless-stopped
     command: ["gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "${LOG_LEVEL}", "webapp:app"]
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - ESI_CLIENT_ID=${ESI_CLIENT_ID}
-      - ESI_SECRET_KEY=${ESI_SECRET_KEY}
-      - CALLBACK_URL=${CALLBACK_URL}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     depends_on:
-      db:
+      electric:
         condition: service_healthy
 
   cloudflared:
@@ -64,8 +69,8 @@ services:
     restart: unless-stopped
     depends_on:
       - webapp
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    env_file:
+      - .env
     command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
 
 volumes:

@@ -9,6 +9,7 @@ venv/
 
 # Config
 config.py
+.env
 
 # IDE
 .idea/
