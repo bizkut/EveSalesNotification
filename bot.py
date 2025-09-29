@@ -280,6 +280,27 @@ def setup_database():
                 PRIMARY KEY (ref_id, character_id)
             )
             """)
+
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_journal (
+                id BIGINT NOT NULL,
+                character_id INTEGER NOT NULL,
+                amount DOUBLE PRECISION,
+                balance DOUBLE PRECISION,
+                context_id BIGINT,
+                context_id_type TEXT,
+                date TIMESTAMP WITH TIME ZONE NOT NULL,
+                description TEXT NOT NULL,
+                first_party_id INTEGER,
+                reason TEXT,
+                ref_type TEXT NOT NULL,
+                second_party_id INTEGER,
+                tax DOUBLE PRECISION,
+                tax_receiver_id INTEGER,
+                PRIMARY KEY (id, character_id)
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_wallet_journal_char_date ON wallet_journal (character_id, date DESC);")
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS historical_transactions (
                 transaction_id BIGINT NOT NULL,
@@ -749,6 +770,44 @@ def get_historical_transactions_from_db(character_id: int) -> list:
     finally:
         database.release_db_connection(conn)
     return transactions
+
+
+def get_full_wallet_journal_from_db(character_id: int):
+    """
+    Retrieves all wallet journal entries for a given character from the local database,
+    parsing the date into a datetime object for easier processing.
+    Note: This table is not currently populated by any polling mechanism.
+    It would need to be filled by a backfill and continuous polling of the
+    /characters/{character_id}/wallet/journal ESI endpoint.
+    """
+    conn = database.get_db_connection()
+    processed_entries = []
+    try:
+        with conn.cursor() as cursor:
+            # This assumes a 'wallet_journal' table exists with a similar structure to the ESI response.
+            # The current schema in setup_database() does not create this table.
+            # This function is added based on the assumption it will be used in a future implementation.
+            # If the table doesn't exist, this will raise a psycopg2.errors.UndefinedTable.
+            cursor.execute(
+                'SELECT * FROM wallet_journal WHERE character_id = %s ORDER BY date ASC',
+                (character_id,)
+            )
+            journal_entries = cursor.fetchall()
+            # Fetch column names from cursor.description
+            colnames = [desc[0] for desc in cursor.description]
+            for row in journal_entries:
+                entry = dict(zip(colnames, row))
+                # Convert date string to datetime object for easier comparison
+                entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+                processed_entries.append(entry)
+    except psycopg2.errors.UndefinedTable:
+        logging.warning("Attempted to query 'wallet_journal' table, but it does not exist. Returning empty list.")
+        # In a real scenario, you might want to handle this more gracefully.
+        # For now, we return an empty list as if there were no entries.
+        return []
+    finally:
+        database.release_db_connection(conn)
+    return processed_entries
 
 def delete_character(character_id: int):
     """Deletes a character and all of their associated data from the database."""
@@ -2146,6 +2205,51 @@ def add_historical_transactions_to_db(character_id: int, transactions: list):
         database.release_db_connection(conn)
 
 
+def add_wallet_journal_entries_to_db(character_id: int, journal_entries: list):
+    """Adds a list of wallet journal entries to the wallet_journal table."""
+    if not journal_entries:
+        return
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = []
+            for entry in journal_entries:
+                # ESI response can have missing optional keys, so we use .get()
+                data_tuple = (
+                    entry['id'],
+                    character_id,
+                    entry.get('amount'),
+                    entry.get('balance'),
+                    entry.get('context_id'),
+                    entry.get('context_id_type'),
+                    entry['date'],
+                    entry['description'],
+                    entry.get('first_party_id'),
+                    entry.get('reason'),
+                    entry['ref_type'],
+                    entry.get('second_party_id'),
+                    entry.get('tax'),
+                    entry.get('tax_receiver_id')
+                )
+                data_to_insert.append(data_tuple)
+
+            cursor.executemany(
+                """
+                INSERT INTO wallet_journal (
+                    id, character_id, amount, balance, context_id, context_id_type,
+                    date, description, first_party_id, reason, ref_type,
+                    second_party_id, tax, tax_receiver_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id, character_id) DO NOTHING
+                """,
+                data_to_insert
+            )
+            conn.commit()
+            logging.info(f"Inserted {len(data_to_insert)} records into wallet_journal for char {character_id}.")
+    finally:
+        database.release_db_connection(conn)
+
+
 def backfill_all_character_history(character: Character) -> bool:
     """
     Performs a one-time backfill of all transaction history from
@@ -2182,24 +2286,16 @@ def backfill_all_character_history(character: Character) -> bool:
         logging.error(f"Failed to fetch wallet journal during history backfill for {character.name}.")
         return False
 
-    # Process fee/tax entries
-    fee_ref_types = {"brokers_fee", "transaction_tax", "market_provider_tax"}
-    for entry in all_journal_entries:
-        if entry.get('ref_type') in fee_ref_types:
-            # Amounts for fees/taxes are negative in the journal
-            fee_amount = abs(entry.get('amount', 0))
-            if fee_amount > 0:
-                add_trading_fee(
-                    character_id=character.id,
-                    fee_amount=fee_amount,
-                    reason=entry['ref_type'].replace('_', ' ').title(),
-                    date=datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
-                )
+    # Add all journal entries to the new table
+    add_wallet_journal_entries_to_db(character.id, all_journal_entries)
 
-    # Mark all journal entries as processed
+    # The old logic of pre-calculating and storing fees in `trading_fees` is now deprecated.
+    # We will calculate fees on the fly from the `wallet_journal` table.
+    # However, we still need to mark the journal entries as "processed" in the historical_journal
+    # table to prevent the live polling loop from re-processing them.
     journal_ref_ids = [j['id'] for j in all_journal_entries]
     add_processed_journal_refs(character.id, journal_ref_ids)
-    logging.info(f"Seeded {len(journal_ref_ids)} journal entries and processed historical fees for {character.name}.")
+    logging.info(f"Stored {len(journal_ref_ids)} journal entries and marked them as processed for {character.name}.")
 
 
     # --- Backfill Order History (for cancelled/expired notifications) ---
@@ -2952,13 +3048,12 @@ async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_
     await _generate_and_send_summary(Update(update.update_id, message=query.message), context, character)
 
 
-async def _select_character_for_historical_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool):
-    """Asks the user to select a character to view their historical transactions."""
+async def _select_character_for_historical_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asks the user to select a character to view their historical sales."""
     user_id = update.effective_user.id
     user_characters = get_characters_for_user(user_id)
     chat_id = update.effective_chat.id
     message_id = update.effective_message.message_id
-    action = "buys" if is_buy else "sales"
 
     if not user_characters:
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="You have no characters added.")
@@ -2966,16 +3061,40 @@ async def _select_character_for_historical_transactions(update: Update, context:
         return
 
     if len(user_characters) == 1:
-        await _display_historical_transactions(update, context, character_id=user_characters[0].id, is_buy=is_buy, page=0)
+        await _display_historical_sales(update, context, character_id=user_characters[0].id, page=0)
     else:
-        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"history_list_{char.id}_{str(is_buy).lower()}_0")] for char in user_characters]
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"history_list_sale_{char.id}_0")] for char in user_characters]
         keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        message_text = f"Please select a character to view their historical {action}:"
+        message_text = "Please select a character to view their historical sales:"
         if update.callback_query:
             await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
         else:
-            # This path is not typically hit with the new UI flow, but is here for robustness
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
+
+
+async def _select_character_for_historical_buys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asks the user to select a character to view their historical buys."""
+    user_id = update.effective_user.id
+    user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
+
+    if not user_characters:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="You have no characters added.")
+        await start_command(update, context)
+        return
+
+    if len(user_characters) == 1:
+        await _display_historical_buys(update, context, character_id=user_characters[0].id, page=0)
+    else:
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"history_list_buy_{char.id}_0")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character to view their historical buys:"
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
             await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
@@ -2984,7 +3103,7 @@ async def sales_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     Displays historical sales. Prompts for character selection
     if the user has multiple characters.
     """
-    await _select_character_for_historical_transactions(update, context, is_buy=False)
+    await _select_character_for_historical_sales(update, context)
 
 
 async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2992,7 +3111,7 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     Displays historical buys. Prompts for character selection
     if the user has multiple characters.
     """
-    await _select_character_for_historical_transactions(update, context, is_buy=True)
+    await _select_character_for_historical_buys(update, context)
 
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3512,6 +3631,18 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         message_lines.append(line)
 
+    # --- Page Summary & Disclaimer ---
+    summary_footer = ""
+    if not is_buy and paginated_tx:
+        summary_footer = (
+            f"\n\n---\n"
+            f"*Page Totals:*\n"
+            f"  - Total Sales Value: `{page_sales_value:,.2f}` ISK\n"
+            f"  - Total Fees (from Journal): `{page_fees:,.2f}` ISK\n\n"
+            f"*Note: Fees are aggregated by date and may not correspond exactly to the sales on this page. "
+            f"Use the `/summary` command for a complete financial overview.*"
+        )
+
     # --- Keyboard ---
     keyboard = []
     nav_row = []
@@ -3532,14 +3663,13 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # --- Send Message ---
-    full_message = header + "\n\n".join(message_lines)
+    full_message = header + "\n\n".join(message_lines) + summary_footer
     await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
 
 
-async def _display_historical_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, is_buy: bool, page: int = 0):
+async def _display_historical_buys(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, page: int = 0):
     """
-    Fetches and displays a paginated list of historical transactions (buys or sales),
-    including on-the-fly profit and fee calculations for sales.
+    Fetches and displays a paginated list of historical buy transactions.
     """
     query = update.callback_query
     character = get_character_by_id(character_id)
@@ -3547,92 +3677,35 @@ async def _display_historical_transactions(update: Update, context: ContextTypes
         await query.edit_message_text(text="Error: Could not find character.")
         return
 
-    action = "buys" if is_buy else "sales"
-    await query.edit_message_text(text=f"⏳ Fetching historical {action} for {character.name}...")
+    await query.edit_message_text(text=f"⏳ Fetching historical buys for {character.name}...")
 
-    # --- Data Fetching & Processing ---
+    # --- Data Fetching & Filtering ---
     all_transactions = get_historical_transactions_from_db(character.id)
+    buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
 
-    # --- Profit & Fee Calculation (for Sales only) ---
-    if not is_buy:
-        # Simulate inventory and calculate COGS and fees for each sale in-memory
-        inventory = defaultdict(list) # {type_id: [lot1, lot2, ...]} where lot is {'quantity': X, 'price': Y}
-        # Process all transactions chronologically to build up state
-        sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
-        sale_profit_data = {} # Caches calculated profit data for each sale transaction_id
-
-        for tx in sorted_transactions:
-            type_id = tx['type_id']
-            if tx.get('is_buy'):
-                inventory[type_id].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-            else: # It's a sale, calculate its profit and fees
-                cogs = 0
-                remaining_to_sell = tx['quantity']
-                lots_to_consume_from = inventory.get(type_id, [])
-                cogs_calculable = True
-
-                if not lots_to_consume_from:
-                    cogs_calculable = False
-                else:
-                    lots_consumed_count = 0
-                    for lot in lots_to_consume_from:
-                        if remaining_to_sell <= 0: break
-                        quantity_from_lot = min(remaining_to_sell, lot['quantity'])
-                        cogs += quantity_from_lot * lot['price']
-                        remaining_to_sell -= quantity_from_lot
-                        lot['quantity'] -= quantity_from_lot
-                        if lot['quantity'] == 0:
-                            lots_consumed_count += 1
-                    # Remove fully consumed lots
-                    inventory[type_id] = lots_to_consume_from[lots_consumed_count:]
-                    if remaining_to_sell > 0:
-                        cogs_calculable = False
-
-                # Calculate fees based on character settings
-                sale_value = tx['quantity'] * tx['unit_price']
-                broker_fee = sale_value * (character.broker_fee / 100.0)
-                sales_tax = sale_value * (character.sales_tax / 100.0)
-                total_fees = broker_fee + sales_tax
-
-                profit = None
-                if cogs_calculable:
-                    profit = sale_value - cogs - total_fees
-
-                sale_profit_data[tx['transaction_id']] = {'cogs': cogs if cogs_calculable else None, 'fees': total_fees, 'profit': profit}
-
-        # Annotate the original transaction objects with the calculated data
-        for tx in all_transactions:
-            if tx['transaction_id'] in sale_profit_data:
-                tx.update(sale_profit_data[tx['transaction_id']])
-
-
-    # Filter for the transactions we want to display (sales or buys)
-    filtered_tx = [tx for tx in all_transactions if tx.get('is_buy') == is_buy]
-    if not filtered_tx:
-        # Build a back button that returns to the correct menu
+    if not buy_transactions:
         user_characters = get_characters_for_user(query.from_user.id)
-        back_callback = "sales" if not is_buy else "buys"
-        if len(user_characters) <= 1: back_callback = "start_command"
+        back_callback = "buys" if len(user_characters) > 1 else "start_command"
         keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            text=f"🧾 *Historical {action.capitalize()} for {character.name}*\n\nNo historical {action} found.",
+            text=f"🧾 *Historical Buys for {character.name}*\n\nNo historical buys found.",
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
         return
 
-    # Sort the filtered transactions by date, newest first, for display
-    filtered_tx.sort(key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)
+    # Sort by date, newest first for display
+    buy_transactions.sort(key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)
 
     # --- Pagination ---
-    items_per_page = 5 # Fewer items per page to show more detail
-    total_items = len(filtered_tx)
+    items_per_page = 5
+    total_items = len(buy_transactions)
     total_pages = (total_items + items_per_page - 1) // items_per_page
     page = max(0, min(page, total_pages - 1))
     start_index = page * items_per_page
     end_index = start_index + items_per_page
-    paginated_tx = filtered_tx[start_index:end_index]
+    paginated_tx = buy_transactions[start_index:end_index]
 
     # --- Name Resolution ---
     type_ids = [tx['type_id'] for tx in paginated_tx]
@@ -3640,7 +3713,7 @@ async def _display_historical_transactions(update: Update, context: ContextTypes
     id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
 
     # --- Message Formatting ---
-    header = f"🧾 *Historical {action.capitalize()} for {character.name}*\n"
+    header = f"🧾 *Historical Buys for {character.name}*\n"
     message_lines = []
     for tx in paginated_tx:
         item_name = id_to_name.get(tx['type_id'], f"Type ID {tx['type_id']}")
@@ -3652,43 +3725,183 @@ async def _display_historical_transactions(update: Update, context: ContextTypes
             f"*{item_name}*\n"
             f"  *Date:* `{date_str}`\n"
             f"  *Qty:* `{tx['quantity']:,}` @ `{tx['unit_price']:,.2f}`\n"
+            f"  *Total Cost:* `{total_value:,.2f}` ISK\n"
+            f"  *Location:* `{location_name}`"
         )
-        if is_buy:
-            line += f"  *Cost:* `{total_value:,.2f}` ISK"
-        else: # It's a sale, add profit info
-            line += f"  *Sale Value:* `{total_value:,.2f}` ISK\n"
-            fees = tx.get('fees', 0)
-            cogs = tx.get('cogs')
-            profit = tx.get('profit')
-            line += f"  *Fees (Tax+Broker):* `{fees:,.2f}` ISK\n"
-            if cogs is not None:
-                line += f"  *Cost of Goods (FIFO):* `{cogs:,.2f}` ISK\n"
-                line += f"  *Net Profit:* `{profit:,.2f}` ISK"
-            else:
-                line += f"  *Net Profit:* `N/A (Missing Purchase History)`"
-
-        line += f"\n  *Location:* `{location_name}`"
         message_lines.append(line)
 
     # --- Keyboard ---
     keyboard = []
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"history_list_{character_id}_{str(is_buy).lower()}_{page - 1}"))
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"history_list_buy_{character_id}_{page - 1}"))
     nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
     if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"history_list_{character_id}_{str(is_buy).lower()}_{page + 1}"))
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"history_list_buy_{character_id}_{page + 1}"))
 
     if nav_row: keyboard.append(nav_row)
 
     user_characters = get_characters_for_user(query.from_user.id)
-    back_callback = "sales" if not is_buy else "buys"
-    if len(user_characters) <= 1: back_callback = "start_command"
+    back_callback = "buys" if len(user_characters) > 1 else "start_command"
     keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # --- Send Message ---
     full_message = header + "\n".join(message_lines)
+    await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
+
+
+async def _display_historical_sales(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, page: int = 0):
+    """
+    Fetches and displays a paginated list of historical sales transactions,
+    with detailed profit and loss analysis using FIFO for COGS and
+    wallet journal entries for accurate tax and fee calculations.
+    """
+    query = update.callback_query
+    character = get_character_by_id(character_id)
+    if not character:
+        await query.edit_message_text(text="Error: Could not find character.")
+        return
+
+    await query.edit_message_text(text=f"⏳ Calculating historical sales for {character.name}...")
+
+    # --- Data Fetching ---
+    all_transactions = get_historical_transactions_from_db(character.id)
+    full_journal = get_full_wallet_journal_from_db(character.id) # Fetches with parsed dates
+
+    # --- COGS Calculation (In-Memory FIFO Simulation) ---
+    inventory = defaultdict(list)
+    # Sort all transactions chronologically to build up inventory state correctly
+    sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
+    sale_cogs_data = {} # {transaction_id: cogs_value}
+
+    for tx in sorted_transactions:
+        type_id = tx['type_id']
+        if tx.get('is_buy'):
+            inventory[type_id].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+        else: # It's a sale, calculate its COGS
+            cogs = 0
+            remaining_to_sell = tx['quantity']
+            lots_to_consume_from = inventory.get(type_id, [])
+            cogs_calculable = True
+            if not lots_to_consume_from:
+                cogs_calculable = False
+            else:
+                lots_consumed_count = 0
+                for lot in lots_to_consume_from:
+                    if remaining_to_sell <= 0: break
+                    quantity_from_lot = min(remaining_to_sell, lot['quantity'])
+                    cogs += quantity_from_lot * lot['price']
+                    remaining_to_sell -= quantity_from_lot
+                    lot['quantity'] -= quantity_from_lot
+                    if lot['quantity'] == 0:
+                        lots_consumed_count += 1
+                inventory[type_id] = lots_to_consume_from[lots_consumed_count:] # Remove consumed lots
+                if remaining_to_sell > 0:
+                    cogs_calculable = False
+            sale_cogs_data[tx['transaction_id']] = cogs if cogs_calculable else None
+
+    # --- Data Filtering and Annotation ---
+    sales_transactions = [tx for tx in all_transactions if not tx.get('is_buy')]
+    journal_by_context_id = defaultdict(list)
+    for entry in full_journal:
+        if entry.get('context_id'):
+            journal_by_context_id[entry['context_id']].append(entry)
+
+    tax_ref_types = {'transaction_tax', 'market_provider_tax'}
+    for sale in sales_transactions:
+        sale['cogs'] = sale_cogs_data.get(sale['transaction_id'])
+        sale_value = sale['quantity'] * sale['unit_price']
+        # Find related taxes from the journal
+        related_journal_entries = journal_by_context_id.get(sale['transaction_id'], [])
+        taxes = sum(abs(e['amount']) for e in related_journal_entries if e['ref_type'] in tax_ref_types)
+        sale['taxes'] = taxes
+        if sale['cogs'] is not None:
+            sale['net_profit'] = sale_value - sale['cogs'] - taxes
+        else:
+            sale['net_profit'] = None
+
+    if not sales_transactions:
+        user_characters = get_characters_for_user(query.from_user.id)
+        back_callback = "sales" if len(user_characters) > 1 else "start_command"
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=f"🧾 *Historical Sales for {character.name}*\n\nNo historical sales found.",
+            parse_mode='Markdown', reply_markup=reply_markup
+        )
+        return
+
+    sales_transactions.sort(key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)
+
+    # --- Pagination ---
+    items_per_page = 5
+    total_items = len(sales_transactions)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages - 1))
+    start_index = page * items_per_page
+    end_index = start_index + items_per_page
+    paginated_tx = sales_transactions[start_index:end_index]
+
+    # --- Page-Specific Broker Fee Calculation ---
+    page_broker_fees = 0
+    if paginated_tx:
+        start_date = datetime.fromisoformat(paginated_tx[-1]['date'].replace('Z', '+00:00'))
+        end_date = datetime.fromisoformat(paginated_tx[0]['date'].replace('Z', '+00:00'))
+        page_broker_fees = sum(
+            abs(entry['amount']) for entry in full_journal
+            if entry['ref_type'] == 'brokers_fee' and start_date <= entry['date'] <= end_date
+        )
+
+    # --- Name Resolution ---
+    type_ids = [tx['type_id'] for tx in paginated_tx]
+    location_ids = [tx['location_id'] for tx in paginated_tx]
+    id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
+
+    # --- Message Formatting ---
+    header = f"🧾 *Historical Sales for {character.name}*\n"
+    message_lines = []
+    for tx in paginated_tx:
+        item_name = id_to_name.get(tx['type_id'], f"Type ID {tx['type_id']}")
+        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+        sale_value = tx['quantity'] * tx['unit_price']
+        line = (
+            f"*{item_name}*\n"
+            f"  *Date:* `{date_str}`\n"
+            f"  *Qty:* `{tx['quantity']:,}` @ `{tx['unit_price']:,.2f}`\n"
+            f"  *Sale Value:* `{sale_value:,.2f}` ISK\n"
+        )
+        if tx.get('cogs') is not None:
+            line += f"  *Cost (FIFO):* `{tx['cogs']:,.2f}` ISK\n"
+            line += f"  *Taxes (Journal):* `{tx['taxes']:,.2f}` ISK\n"
+            line += f"  *Net Profit:* `{tx['net_profit']:,.2f}` ISK"
+        else:
+            line += f"  *Net Profit:* `N/A (Missing Purchase History)`"
+        message_lines.append(line)
+
+    # --- Page Summary & Footer ---
+    footer = (
+        f"\n---\n*Broker Fees for this page's period:* `{page_broker_fees:,.2f}` ISK\n"
+        f"_(Note: Net Profit includes transaction taxes but not broker fees.)_"
+    )
+
+    # --- Keyboard ---
+    keyboard = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"history_list_sale_{character_id}_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"history_list_sale_{character_id}_{page + 1}"))
+
+    if nav_row: keyboard.append(nav_row)
+    user_characters = get_characters_for_user(query.from_user.id)
+    back_callback = "sales" if len(user_characters) > 1 else "start_command"
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # --- Send Message ---
+    full_message = header + "\n".join(message_lines) + footer
     await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
 
 
@@ -3770,13 +3983,25 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             char_to_query = get_character_by_id(int(char_id_str))
             await _generate_and_send_summary(update, context, char_to_query)
 
-    # --- Historical Transaction List (Sales & Buys) ---
-    elif data.startswith("history_list_"):
-        _, _, char_id_str, is_buy_str, page_str = data.split('_')
-        character_id = int(char_id_str)
-        is_buy = is_buy_str == 'true'
-        page = int(page_str)
-        await _display_historical_transactions(update, context, character_id, is_buy, page)
+    # --- Historical Transaction Lists (Sales & Buys) ---
+    elif data.startswith("history_list_sale_"):
+        try:
+            _, _, _, char_id_str, page_str = data.split('_')
+            character_id = int(char_id_str)
+            page = int(page_str)
+            await _display_historical_sales(update, context, character_id, page)
+        except (ValueError, IndexError) as e:
+            logging.error(f"Could not parse history_list_sale callback data: {data}. Error: {e}")
+            await query.edit_message_text(text="Error: Invalid callback data.")
+    elif data.startswith("history_list_buy_"):
+        try:
+            _, _, _, char_id_str, page_str = data.split('_')
+            character_id = int(char_id_str)
+            page = int(page_str)
+            await _display_historical_buys(update, context, character_id, page)
+        except (ValueError, IndexError) as e:
+            logging.error(f"Could not parse history_list_buy callback data: {data}. Error: {e}")
+            await query.edit_message_text(text="Error: Invalid callback data.")
 
     # --- Character Selection for Settings Menus ---
     elif data.startswith("character_info_"):
