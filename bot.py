@@ -53,9 +53,6 @@ class Character:
     enable_daily_summary: bool
     notification_batch_threshold: int
     created_at: datetime
-    broker_fee: float
-    sales_tax: float
-    citadel_broker_fee: float
 
 CHARACTERS: list[Character] = []
 
@@ -72,8 +69,7 @@ def load_characters_from_db():
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at,
-                    broker_fee, sales_tax, citadel_broker_fee
+                    enable_daily_summary, notification_batch_threshold, created_at
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -91,8 +87,7 @@ def load_characters_from_db():
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             region_id, wallet_balance_threshold,
             enable_sales, enable_buys,
-            enable_summary, batch_threshold, created_at,
-            broker_fee, sales_tax, citadel_broker_fee
+            enable_summary, batch_threshold, created_at
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -109,10 +104,7 @@ def load_characters_from_db():
             enable_buy_notifications=bool(enable_buys),
             enable_daily_summary=bool(enable_summary),
             notification_batch_threshold=batch_threshold,
-            created_at=created_at,
-            broker_fee=float(broker_fee),
-            sales_tax=float(sales_tax),
-            citadel_broker_fee=float(citadel_broker_fee)
+            created_at=created_at
         )
         CHARACTERS.append(character)
         logging.info(f"Loaded character: {character.name} ({character.id})")
@@ -149,9 +141,6 @@ def setup_database():
                     enable_daily_summary BOOLEAN DEFAULT TRUE,
                     notification_batch_threshold INTEGER DEFAULT 3,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
-                    broker_fee REAL DEFAULT 3.0,
-                    sales_tax REAL DEFAULT 7.5,
-                    citadel_broker_fee REAL DEFAULT 3.0,
                     needs_update_notification BOOLEAN DEFAULT FALSE,
                     deletion_scheduled_at TIMESTAMP WITH TIME ZONE
                 )
@@ -170,25 +159,6 @@ def setup_database():
                 logging.info("Applying migration: Adding 'needs_update_notification' column to characters table...")
                 cursor.execute("ALTER TABLE characters ADD COLUMN needs_update_notification BOOLEAN DEFAULT FALSE;")
                 logging.info("Migration for 'needs_update_notification' complete.")
-
-            # Migration: Add new fee columns if they don't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'broker_fee'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'broker_fee' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN broker_fee REAL DEFAULT 3.0;")
-                logging.info("Migration for 'broker_fee' complete.")
-
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'sales_tax'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'sales_tax' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN sales_tax REAL DEFAULT 7.5;")
-                logging.info("Migration for 'sales_tax' complete.")
-
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'citadel_broker_fee'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'citadel_broker_fee' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN citadel_broker_fee REAL DEFAULT 3.0;")
-                logging.info("Migration for 'citadel_broker_fee' complete.")
 
 
             cursor.execute("""
@@ -589,8 +559,7 @@ def get_characters_for_user(telegram_user_id):
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at,
-                    broker_fee, sales_tax, citadel_broker_fee
+                    enable_daily_summary, notification_batch_threshold, created_at
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -599,8 +568,7 @@ def get_characters_for_user(telegram_user_id):
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold, created_at,
-                    broker_fee, sales_tax, citadel_broker_fee
+                    enable_summary, batch_threshold, created_at
                 ) = row
 
                 user_characters.append(Character(
@@ -613,10 +581,7 @@ def get_characters_for_user(telegram_user_id):
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
                     notification_batch_threshold=batch_threshold,
-                    created_at=created_at,
-                    broker_fee=float(broker_fee),
-                    sales_tax=float(sales_tax),
-                    citadel_broker_fee=float(citadel_broker_fee)
+                    created_at=created_at
                 ))
     finally:
         database.release_db_connection(conn)
@@ -634,8 +599,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at,
-                    broker_fee, sales_tax, citadel_broker_fee
+                    enable_daily_summary, notification_batch_threshold, created_at
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -645,8 +609,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold, created_at,
-                    broker_fee, sales_tax, citadel_broker_fee
+                    enable_summary, batch_threshold, created_at
                 ) = row
 
                 character = Character(
@@ -659,10 +622,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
                     notification_batch_threshold=batch_threshold,
-                    created_at=created_at,
-                    broker_fee=float(broker_fee),
-                    sales_tax=float(sales_tax),
-                    citadel_broker_fee=float(citadel_broker_fee)
+                    created_at=created_at
                 )
     finally:
         database.release_db_connection(conn)
@@ -672,7 +632,7 @@ def get_character_by_id(character_id: int) -> Character | None:
 def update_character_setting(character_id: int, setting: str, value: any):
     """Updates a specific setting for a character in the database."""
     allowed_settings = [
-        "region_id", "wallet_balance_threshold", "broker_fee", "sales_tax", "citadel_broker_fee"
+        "region_id", "wallet_balance_threshold"
     ]
     if setting not in allowed_settings:
         logging.error(f"Attempted to update an invalid setting: {setting}")
@@ -1766,19 +1726,34 @@ async def master_wallet_transaction_poll(application: Application):
                     # Process Sales for FIFO accounting and prepare details for potential notification
                     sales_details = []
                     if sales:
+                        # For live notifications, we need the most recent journal data to find fees.
+                        full_journal = get_full_wallet_journal_from_db(character.id)
+                        tx_id_to_journal_map = {
+                            entry['context_id']: entry for entry in full_journal
+                            if entry.get('context_id_type') == 'market_transaction_id'
+                        }
+                        fee_journal_by_timestamp = defaultdict(list)
+                        tax_ref_types = {'transaction_tax', 'market_provider_tax'}
+                        for entry in full_journal:
+                            if entry['ref_type'] in tax_ref_types:
+                                fee_journal_by_timestamp[entry['date']].append(entry)
+
                         for type_id, tx_group in sales.items():
                             total_quantity = sum(t['quantity'] for t in tx_group)
                             total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-
-                            # Calculate COGS using FIFO
                             cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
 
-                            # Calculate fees based on character settings
-                            broker_fee = total_value * (character.broker_fee / 100.0)
-                            sales_tax = total_value * (character.sales_tax / 100.0)
-                            total_fees = broker_fee + sales_tax
+                            # Use the new journal-based fee calculation for each transaction group
+                            total_fees = 0
+                            for tx in tx_group:
+                                main_journal_entry = tx_id_to_journal_map.get(tx['transaction_id'])
+                                if main_journal_entry:
+                                    precise_timestamp = main_journal_entry['date']
+                                    related_fees = fee_journal_by_timestamp.get(precise_timestamp, [])
+                                    total_fees += sum(abs(fee['amount']) for fee in related_fees)
+                                else:
+                                    logging.warning(f"Live Notification: Could not find journal entry for sale tx_id {tx['transaction_id']}")
 
-                            # Calculate net profit
                             net_profit = None
                             if cogs is not None:
                                 net_profit = total_value - cogs - total_fees
@@ -3291,9 +3266,6 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
         [InlineKeyboardButton("ℹ️ Character Info", callback_data=f"character_info_{character.id}")],
         [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
         [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
-        [InlineKeyboardButton(f"Broker's Fee: {character.broker_fee:.2f}%", callback_data=f"set_broker_fee_{character.id}")],
-        [InlineKeyboardButton(f"Sales Tax: {character.sales_tax:.2f}%", callback_data=f"set_sales_tax_{character.id}")],
-        [InlineKeyboardButton(f"Citadel Broker's Fee: {character.citadel_broker_fee:.2f}%", callback_data=f"set_citadel_broker_fee_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3555,29 +3527,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             load_characters_from_db()
         except ValueError:
             await update.message.reply_text("❌ Invalid input. Please enter a valid number. Try again or type `cancel`.")
-            return # Keep waiting
-
-    elif action_type in ['set_broker_fee_value', 'set_sales_tax_value', 'set_citadel_broker_fee_value']:
-        try:
-            # Remove '%' if user includes it, then convert to float
-            new_value = float(text.strip().replace('%', ''))
-            if not (0 <= new_value <= 100):
-                await update.message.reply_text("❌ Invalid input. Please enter a percentage value between 0 and 100. Try again or type `cancel`.")
-                return
-
-            setting_key_map = {
-                'set_broker_fee_value': 'broker_fee',
-                'set_sales_tax_value': 'sales_tax',
-                'set_citadel_broker_fee_value': 'citadel_broker_fee'
-            }
-            setting_key = setting_key_map[action_type]
-            setting_name = setting_key.replace('_', ' ').replace(' fee', "'s Fee").title()
-
-            update_character_setting(character_id, setting_key, new_value)
-            await update.message.reply_text(f"✅ {setting_name} updated to {new_value:.2f}%.")
-            load_characters_from_db()
-        except ValueError:
-            await update.message.reply_text("❌ Invalid input. Please enter a valid percentage (e.g., `3.5`). Try again or type `cancel`.")
             return # Keep waiting
 
     # Clear the state and show the settings menu again
@@ -4197,21 +4146,6 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         char_id = int(data.split('_')[-1])
         context.user_data['next_action'] = ('set_wallet_value', char_id)
         await query.message.reply_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
-
-    elif data.startswith("set_broker_fee_"):
-        char_id = int(data.split('_')[-1])
-        context.user_data['next_action'] = ('set_broker_fee_value', char_id)
-        await query.message.reply_text("Please enter your character's Broker's Fee percentage (e.g., `3.0`).\n\nType `cancel` to go back.")
-
-    elif data.startswith("set_sales_tax_"):
-        char_id = int(data.split('_')[-1])
-        context.user_data['next_action'] = ('set_sales_tax_value', char_id)
-        await query.message.reply_text("Please enter your character's Sales Tax percentage (e.g., `7.5`).\n\nType `cancel` to go back.")
-
-    elif data.startswith("set_citadel_broker_fee_"):
-        char_id = int(data.split('_')[-1])
-        context.user_data['next_action'] = ('set_citadel_broker_fee_value', char_id)
-        await query.message.reply_text("Please enter your Citadel Broker's Fee percentage for buy orders (or the same as your normal broker's fee if not applicable).\n\nType `cancel` to go back.")
 
     # --- Character Removal Flow ---
     elif data.startswith("remove_select_"):
