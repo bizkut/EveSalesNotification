@@ -1525,6 +1525,39 @@ async def send_paginated_message(context: ContextTypes.DEFAULT_TYPE, header: str
         await send_telegram_message(context, message, chat_id)
         await asyncio.sleep(0.5)
 
+async def check_and_handle_pending_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character) -> bool:
+    """
+    Checks if a character is pending deletion. If so, sends an informative message and returns True.
+    Otherwise, returns False, allowing the original command to proceed.
+    """
+    # No character object means we can't check, so proceed.
+    if not character:
+        return False
+
+    deletion_time = get_character_deletion_status(character.id)
+    if deletion_time:
+        query = update.callback_query
+        time_left = deletion_time - datetime.now(timezone.utc)
+        minutes_left = max(1, int(time_left.total_seconds() / 60))
+
+        message = (
+            f"⚠️ **Action Disabled** ⚠️\n\n"
+            f"Character **{character.name}** is scheduled for permanent deletion in approximately **{minutes_left} minutes**.\n\n"
+            f"All commands for this character are blocked during this time. To cancel the deletion, please use the 'Add Character' option from the main menu."
+        )
+        keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if query:
+            # Edit the message that triggered the callback
+            await query.edit_message_text(text=message, parse_mode='Markdown', reply_markup=reply_markup)
+        else:
+            # Reply to a direct command
+            await update.message.reply_text(text=message, parse_mode='Markdown', reply_markup=reply_markup)
+        return True
+    return False
+
+
 def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
     """
     Calculates the Cost of Goods Sold (COGS) for a sale using FIFO and updates the database.
@@ -1789,9 +1822,12 @@ async def master_wallet_transaction_poll(application: Application):
 
                     # --- Conditional Notifications ---
                     if character.notifications_enabled:
-                        # Low Balance Alert
-                        if wallet_balance is not None and character.wallet_balance_threshold > 0:
-                            state_key = f"low_balance_alert_sent_at_{character.id}"
+                        if get_character_deletion_status(character.id):
+                            logging.info(f"Skipping notifications for character {character.name} ({character.id}) because they are pending deletion.")
+                        else:
+                            # Low Balance Alert
+                            if wallet_balance is not None and character.wallet_balance_threshold > 0:
+                                state_key = f"low_balance_alert_sent_at_{character.id}"
                             last_alert_str = get_bot_state(state_key)
                             alert_sent_recently = False
                             if last_alert_str:
@@ -1966,33 +2002,36 @@ async def master_order_history_poll(application: Application):
                                 logging.error(f"Could not parse timestamp for order {order['order_id']}: {e}. Treating as expired.")
                                 expired_orders.append(order) # Fallback
 
-                    if cancelled_orders:
-                        item_ids = [o['type_id'] for o in cancelled_orders]
-                        id_to_name = get_names_from_ids(item_ids)
-                        for order in cancelled_orders:
-                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
-                            if (order_type == "Buy" and not character.enable_buy_notifications) or \
-                               (order_type == "Sell" and not character.enable_sales_notifications):
-                                continue
+                    if get_character_deletion_status(character.id):
+                        logging.info(f"Skipping order history notifications for {character.name} because they are pending deletion.")
+                    else:
+                        if cancelled_orders:
+                            item_ids = [o['type_id'] for o in cancelled_orders]
+                            id_to_name = get_names_from_ids(item_ids)
+                            for order in cancelled_orders:
+                                order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                                if (order_type == "Buy" and not character.enable_buy_notifications) or \
+                                   (order_type == "Sell" and not character.enable_sales_notifications):
+                                    continue
 
-                            message = (f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\n"
-                                       f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled.")
-                            await send_telegram_message(context, message, chat_id=character.telegram_user_id)
-                            await asyncio.sleep(1)
+                                message = (f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\n"
+                                           f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled.")
+                                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                                await asyncio.sleep(1)
 
-                    if expired_orders:
-                        item_ids = [o['type_id'] for o in expired_orders]
-                        id_to_name = get_names_from_ids(item_ids)
-                        for order in expired_orders:
-                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
-                            if (order_type == "Buy" and not character.enable_buy_notifications) or \
-                               (order_type == "Sell" and not character.enable_sales_notifications):
-                                continue
+                        if expired_orders:
+                            item_ids = [o['type_id'] for o in expired_orders]
+                            id_to_name = get_names_from_ids(item_ids)
+                            for order in expired_orders:
+                                order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                                if (order_type == "Buy" and not character.enable_buy_notifications) or \
+                                   (order_type == "Sell" and not character.enable_sales_notifications):
+                                    continue
 
-                            message = (f"ℹ️ *{order_type} Order Expired ({character.name})* ℹ️\n"
-                                       f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired.")
-                            await send_telegram_message(context, message, chat_id=character.telegram_user_id)
-                            await asyncio.sleep(1)
+                                message = (f"ℹ️ *{order_type} Order Expired ({character.name})* ℹ️\n"
+                                           f"Your order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired.")
+                                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                                await asyncio.sleep(1)
 
                     add_processed_orders(character.id, [o['order_id'] for o in new_orders])
 
@@ -2169,6 +2208,8 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
 
 async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
     """Handles the interactive flow of generating and sending a summary message."""
+    if await check_and_handle_pending_deletion(update, context, character):
+        return
     target_chat_id = update.effective_chat.id
     query = update.callback_query
     message_id = None
@@ -2244,6 +2285,9 @@ async def master_daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logging.info(f"Found {len(characters_to_summarize)} characters to summarize.")
     for character in characters_to_summarize:
+        if get_character_deletion_status(character.id):
+            logging.info(f"Skipping daily summary for {character.name} because they are pending deletion.")
+            continue
         try:
             await run_daily_summary_for_character(character, context)
             # Add a small delay to avoid rate-limiting issues
@@ -2655,6 +2699,11 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
     total_balance = 0
     errors = False
     for char in characters:
+        # Check deletion status first
+        if get_character_deletion_status(char.id):
+            message_lines.append(f"• `{char.name}`: `(Pending Deletion)`")
+            continue  # Skip to the next character
+
         balance = get_wallet_balance(char)
         if balance is not None:
             message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
@@ -3261,6 +3310,8 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
 
 async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
     """Displays the general settings menu for a specific character using an InlineKeyboardMarkup."""
+    if await check_and_handle_pending_deletion(update, context, character):
+        return
     character = get_character_by_id(character.id) # Re-fetch for latest data
     if not character:
         await context.bot.send_message(update.effective_chat.id, "Error: Could not find this character.")
@@ -3667,6 +3718,8 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     """Fetches and displays a paginated list of open orders."""
     query = update.callback_query
     character = get_character_by_id(character_id)
+    if await check_and_handle_pending_deletion(update, context, character):
+        return
     if not character:
         await query.edit_message_text(text="Error: Could not find character.")
         return
@@ -3797,6 +3850,8 @@ async def _display_historical_buys(update: Update, context: ContextTypes.DEFAULT
     """
     query = update.callback_query
     character = get_character_by_id(character_id)
+    if await check_and_handle_pending_deletion(update, context, character):
+        return
     if not character:
         await query.edit_message_text(text="Error: Could not find character.")
         return
@@ -3883,6 +3938,8 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
     """
     query = update.callback_query
     character = get_character_by_id(character_id)
+    if await check_and_handle_pending_deletion(update, context, character):
+        return
     if not character:
         await query.edit_message_text(text="Error: Could not find character.")
         return
