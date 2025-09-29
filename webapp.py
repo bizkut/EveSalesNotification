@@ -40,7 +40,8 @@ def add_character_to_db(character_id, character_name, refresh_token, telegram_us
                 ON CONFLICT (character_id) DO UPDATE SET
                     character_name = EXCLUDED.character_name,
                     refresh_token = EXCLUDED.refresh_token,
-                    telegram_user_id = EXCLUDED.telegram_user_id
+                    telegram_user_id = EXCLUDED.telegram_user_id,
+                    needs_update_notification = TRUE
                 """,
                 (character_id, character_name, refresh_token, telegram_user_id)
             )
