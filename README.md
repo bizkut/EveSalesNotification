@@ -9,6 +9,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 ## Features
 
 - **Multi-User & Character Support**: Any user can add multiple characters by interacting with the bot in a private message. All data is stored securely in a database.
+- **Seamless Character Updates**: Re-authorizing an existing character (e.g., to update API scopes) is handled gracefully. The bot sends a confirmation and immediately starts using the new permissions.
 - **Private & Secure**: Notifications and command responses are sent directly to the user who owns the character.
 - **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds using efficient ETag-based polling.
 - **Dual Notification System**: Differentiates between non-immediate (limit) orders and immediate (market) orders, with separate notification toggles for each buy/sell category. Immediate order notifications are off by default.
