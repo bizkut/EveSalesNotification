@@ -14,12 +14,11 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Dual Notification System**: Differentiates between non-immediate (limit) orders and immediate (market) orders, with separate notification toggles for each buy/sell category. Immediate order notifications are off by default.
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data**:
-  - **Real-Time Profit Tracking**: Sales notifications include FIFO-based net profit calculations, accounting for all user-configured fees and taxes.
+  - **Real-Time Profit Tracking**: Sales notifications include FIFO-based net profit calculations. Profit shown in live notifications is an *estimate* based on user-set fees, while all historical reports and summaries use the exact fees and taxes from your wallet journal for 100% accuracy.
   - **Live Market Price Context**: Sales are compared against the current best buy order in your main trade hub.
   - **Accurate Trade Location**: Correctly identifies the true location of remote buys/sales by cross-referencing with order history.
   - **Wallet Balance**: All notifications include your current wallet balance.
-- **Manual Fee Configuration**: Accurately track profit by manually setting your character's specific Broker's Fee, Sales Tax, and even a separate Citadel Broker's Fee for advanced trade setups. The bot no longer relies on the wallet journal, giving you full control.
-- **Order Modification Fee Tracking**: The bot now monitors your open orders for price changes and automatically logs the broker's fees incurred, ensuring that every ISK of your trading costs is accounted for.
+- **Accurate Journal-Based Accounting**: All financial reports and summaries use the `/wallet/journal` ESI endpoint as the source of truth for all broker's fees and transaction taxes. This ensures that profit/loss calculations are 100% accurate. User-configured fees are now only used to provide real-time estimates in sale notifications.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot also displays your character's current order capacity (e.g., "152 / 305 orders").
