@@ -140,7 +140,8 @@ def login():
         "esi-markets.read_character_orders.v1",
         "esi-universe.read_structures.v1",
         "esi-markets.structure_markets.v1",
-        "esi-skills.read_skills.v1"
+        "esi-skills.read_skills.v1",
+        "esi-location.read_online.v1"
     ]
     scope_string = " ".join(scopes)
 

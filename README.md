@@ -65,6 +65,7 @@ Alternatively, you can use your own reverse proxy (like Nginx) to expose the `we
     -   `esi-universe.read_structures.v1`
     -   `esi-markets.structure_markets.v1`
     -   `esi-skills.read_skills.v1`
+    -   `esi-location.read_online.v1`
 5.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
 ### Step 3: Configure the Environment
