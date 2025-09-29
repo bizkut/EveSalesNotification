@@ -75,6 +75,7 @@ def load_characters_from_db():
                     enable_daily_summary, notification_batch_threshold, created_at,
                     broker_fee, sales_tax, citadel_broker_fee
                 FROM characters
+                WHERE deletion_scheduled_at IS NULL
             """)
             rows = cursor.fetchall()
     finally:
@@ -152,9 +153,17 @@ def setup_database():
                     broker_fee REAL DEFAULT 3.0,
                     sales_tax REAL DEFAULT 7.5,
                     citadel_broker_fee REAL DEFAULT 3.0,
-                    needs_update_notification BOOLEAN DEFAULT FALSE
+                    needs_update_notification BOOLEAN DEFAULT FALSE,
+                    deletion_scheduled_at TIMESTAMP WITH TIME ZONE
                 )
             """)
+
+            # Migration: Add deletion_scheduled_at column if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'deletion_scheduled_at'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'deletion_scheduled_at' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN deletion_scheduled_at TIMESTAMP WITH TIME ZONE;")
+                logging.info("Migration for 'deletion_scheduled_at' complete.")
 
             # Migration: Add needs_update_notification column if it doesn't exist
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'needs_update_notification'")
@@ -740,6 +749,61 @@ def reset_update_notification_flag(character_id: int):
         logging.info(f"Reset update notification flag for character {character_id}.")
     finally:
         database.release_db_connection(conn)
+
+
+def schedule_character_deletion(character_id: int):
+    """Schedules a character for deletion by setting the deletion_scheduled_at timestamp."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            deletion_time = datetime.now(timezone.utc) + timedelta(hours=1)
+            cursor.execute(
+                "UPDATE characters SET deletion_scheduled_at = %s WHERE character_id = %s",
+                (deletion_time, character_id)
+            )
+            conn.commit()
+        logging.info(f"Scheduled character {character_id} for deletion at {deletion_time}.")
+    except Exception as e:
+        logging.error(f"Error scheduling character deletion for {character_id}: {e}", exc_info=True)
+        conn.rollback()
+    finally:
+        database.release_db_connection(conn)
+
+
+def cancel_character_deletion(character_id: int):
+    """Cancels a scheduled character deletion by setting deletion_scheduled_at to NULL."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE characters SET deletion_scheduled_at = NULL WHERE character_id = %s",
+                (character_id,)
+            )
+            conn.commit()
+        logging.info(f"Cancelled scheduled deletion for character {character_id}.")
+    except Exception as e:
+        logging.error(f"Error cancelling character deletion for {character_id}: {e}", exc_info=True)
+        conn.rollback()
+    finally:
+        database.release_db_connection(conn)
+
+
+def get_character_deletion_status(character_id: int):
+    """Checks if a character is scheduled for deletion and returns the timestamp if so."""
+    conn = database.get_db_connection()
+    deletion_time = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT deletion_scheduled_at FROM characters WHERE character_id = %s",
+                (character_id,)
+            )
+            result = cursor.fetchone()
+            if result:
+                deletion_time = result[0]
+    finally:
+        database.release_db_connection(conn)
+    return deletion_time
 
 
 def get_historical_transactions_from_db(character_id: int) -> list:
@@ -2361,80 +2425,97 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
     db_char_ids = set(db_chars_info.keys())
 
     # --- 1. Handle New Characters ---
+    # This includes both genuinely new characters and those being re-added within the grace period.
     new_char_ids = db_char_ids - monitored_char_ids
     if new_char_ids:
-        logging.info(f"Detected {len(new_char_ids)} new characters in the database.")
+        logging.info(f"Detected {len(new_char_ids)} new or re-added characters in the database.")
         for char_id in new_char_ids:
-            character = get_character_by_id(char_id)
-            if not character:
-                logging.error(f"Could not find details for newly detected character ID {char_id} in the database.")
-                continue
-
-            # --- Step 1: Initial Notification ---
-            sync_start_message = f"⏳ **{character.name}** has been added. Now syncing historical data... this may take a minute. I will send another message when complete."
-            prompt_state_key = f"add_character_prompt_{character.telegram_user_id}"
-            prompt_message_info = get_bot_state(prompt_state_key)
-            chat_id, message_id = None, None
-
-            if prompt_message_info:
-                try:
-                    chat_id_str, message_id_str = prompt_message_info.split(':')
-                    chat_id = int(chat_id_str)
-                    message_id = int(message_id_str)
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id,
-                        text=sync_start_message,
-                        parse_mode='Markdown'
+            # Check if the character was scheduled for deletion
+            deletion_status = get_character_deletion_status(char_id)
+            if deletion_status:
+                # --- Handle Re-addition within Grace Period ---
+                logging.info(f"Character {char_id} is being re-added within the grace period. Cancelling deletion.")
+                cancel_character_deletion(char_id)
+                character = get_character_by_id(char_id)
+                if character:
+                    CHARACTERS.append(character) # Add them back to the live list
+                    await send_telegram_message(
+                        context,
+                        f"✅ Deletion cancelled for **{character.name}**. Welcome back! I will resume monitoring now.",
+                        chat_id=character.telegram_user_id
                     )
-                except (ValueError, BadRequest) as e:
-                    logging.warning(f"Failed to edit 'Add Character' prompt, sending new message instead. Error: {e}")
-                    sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
-                    chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
+                else:
+                    logging.error(f"Failed to get character details for re-added character {char_id}")
             else:
-                sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
-                chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
+                # --- Handle Genuinely New Character ---
+                character = get_character_by_id(char_id)
+                if not character:
+                    logging.error(f"Could not find details for newly detected character ID {char_id} in the database.")
+                    continue
 
-            # --- Step 2: Seed Data (run in a separate thread) ---
-            seed_successful = await asyncio.to_thread(seed_data_for_character, character)
+                # Step 1: Initial Notification
+                sync_start_message = f"⏳ **{character.name}** has been added. Now syncing historical data... this may take a minute. I will send another message when complete."
+                prompt_state_key = f"add_character_prompt_{character.telegram_user_id}"
+                prompt_message_info = get_bot_state(prompt_state_key)
+                chat_id, message_id = None, None
 
-            # --- Step 3: Final Notification ---
-            if seed_successful:
-                CHARACTERS.append(character)
-                logging.info(f"Added new character {character.name} to the polling list after successful data seed.")
-                keyboard = [
-                    [InlineKeyboardButton("💰 View Balances", callback_data="balance"), InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")],
-                    [InlineKeyboardButton("📈 View Sales", callback_data="sales"), InlineKeyboardButton("🛒 View Buys", callback_data="buys")],
-                    [InlineKeyboardButton("📊 Request Summary", callback_data="summary"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                    [InlineKeyboardButton("➕ Add Character", callback_data="add_character"), InlineKeyboardButton("🗑️ Remove", callback_data="remove")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                success_message = f"✅ Sync complete for **{character.name}**! I will now start monitoring their market activity."
-
-                if chat_id and message_id:
+                if prompt_message_info:
                     try:
-                        await context.bot.edit_message_text(
-                            chat_id=chat_id, message_id=message_id, text=success_message,
-                            reply_markup=reply_markup, parse_mode='Markdown'
-                        )
-                    except BadRequest as e:
-                        logging.warning(f"Failed to edit 'syncing...' message, sending new success message. Error: {e}")
-                        await send_telegram_message(context, success_message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
-                set_bot_state(prompt_state_key, '') # Clean up state
-            else:
-                logging.error(f"Failed to seed historical data for {character.name}. They will not be monitored yet.")
-                error_message = f"⚠️ Failed to import historical data for **{character.name}** due to a temporary ESI API issue. I will automatically retry in a few minutes. Monitoring will begin once the import succeeds."
-                if chat_id and message_id:
-                    try:
+                        chat_id_str, message_id_str = prompt_message_info.split(':')
+                        chat_id = int(chat_id_str)
+                        message_id = int(message_id_str)
                         await context.bot.edit_message_text(
                             chat_id=chat_id, message_id=message_id,
-                            text=error_message, parse_mode='Markdown'
+                            text=sync_start_message, parse_mode='Markdown'
                         )
-                    except BadRequest as e:
-                        logging.warning(f"Failed to edit 'syncing...' message to error, sending new error message. Error: {e}")
-                        await send_telegram_message(context, error_message, chat_id=character.telegram_user_id)
+                    except (ValueError, BadRequest) as e:
+                        logging.warning(f"Failed to edit 'Add Character' prompt, sending new message instead. Error: {e}")
+                        sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
+                        chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
                 else:
-                    await send_telegram_message(context, error_message, chat_id=character.telegram_user_id)
+                    sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
+                    chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
+
+                # Step 2: Seed Data (run in a separate thread)
+                seed_successful = await asyncio.to_thread(seed_data_for_character, character)
+
+                # Step 3: Final Notification
+                if seed_successful:
+                    CHARACTERS.append(character)
+                    logging.info(f"Added new character {character.name} to the polling list after successful data seed.")
+                    keyboard = [
+                        [InlineKeyboardButton("💰 View Balances", callback_data="balance"), InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")],
+                        [InlineKeyboardButton("📈 View Sales", callback_data="sales"), InlineKeyboardButton("🛒 View Buys", callback_data="buys")],
+                        [InlineKeyboardButton("📊 Request Summary", callback_data="summary"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                        [InlineKeyboardButton("➕ Add Character", callback_data="add_character"), InlineKeyboardButton("🗑️ Remove", callback_data="remove")]
+                    ]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    success_message = f"✅ Sync complete for **{character.name}**! I will now start monitoring their market activity."
+
+                    if chat_id and message_id:
+                        try:
+                            await context.bot.edit_message_text(
+                                chat_id=chat_id, message_id=message_id, text=success_message,
+                                reply_markup=reply_markup, parse_mode='Markdown'
+                            )
+                        except BadRequest as e:
+                            logging.warning(f"Failed to edit 'syncing...' message, sending new success message. Error: {e}")
+                            await send_telegram_message(context, success_message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
+                    set_bot_state(prompt_state_key, '') # Clean up state
+                else:
+                    logging.error(f"Failed to seed historical data for {character.name}. They will not be monitored yet.")
+                    error_message = f"⚠️ Failed to import historical data for **{character.name}** due to a temporary ESI API issue. I will automatically retry in a few minutes. Monitoring will begin once the import succeeds."
+                    if chat_id and message_id:
+                        try:
+                            await context.bot.edit_message_text(
+                                chat_id=chat_id, message_id=message_id,
+                                text=error_message, parse_mode='Markdown'
+                            )
+                        except BadRequest as e:
+                            logging.warning(f"Failed to edit 'syncing...' message to error, sending new error message. Error: {e}")
+                            await send_telegram_message(context, error_message, chat_id=character.telegram_user_id)
+                    else:
+                        await send_telegram_message(context, error_message, chat_id=character.telegram_user_id)
 
     # --- 2. Handle Updated Characters ---
     updated_char_ids = {char_id for char_id, info in db_chars_info.items() if info['needs_update'] and char_id in monitored_char_ids}
@@ -3500,6 +3581,44 @@ async def post_init(application: Application):
     application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
     logging.info("Scheduled job to check for new characters every 10 seconds.")
 
+    # Schedule the job to purge characters marked for deletion
+    application.job_queue.run_repeating(purge_deleted_characters_job, interval=300, first=300) # Every 5 minutes
+    logging.info("Scheduled job to purge deleted characters every 5 minutes.")
+
+
+async def purge_deleted_characters_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Periodically checks for and permanently deletes characters whose deletion grace period has expired.
+    """
+    logging.info("Running job to purge characters marked for deletion.")
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Find all characters whose deletion time is in the past
+            cursor.execute(
+                "SELECT character_id, character_name, telegram_user_id FROM characters WHERE deletion_scheduled_at IS NOT NULL AND deletion_scheduled_at <= %s",
+                (datetime.now(timezone.utc),)
+            )
+            characters_to_purge = cursor.fetchall()
+
+            if not characters_to_purge:
+                logging.info("No characters found to purge.")
+                return
+
+            for char_id, char_name, telegram_user_id in characters_to_purge:
+                logging.warning(f"Purging character {char_name} ({char_id})...")
+                delete_character(char_id) # This function handles the actual deletion
+
+                # Notify the user that the data has been permanently deleted
+                purge_message = f"🗑️ The one-hour grace period for **{char_name}** has expired, and all associated data has been permanently deleted."
+                await send_telegram_message(context, purge_message, chat_id=telegram_user_id)
+                logging.warning(f"Purge complete for character {char_name} ({char_id}).")
+
+    except Exception as e:
+        logging.error(f"Error in purge_deleted_characters_job: {e}", exc_info=True)
+    finally:
+        database.release_db_connection(conn)
+
 
 def main() -> None:
     """Run the bot."""
@@ -4071,18 +4190,23 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("remove_confirm_"):
         char_id = int(data.split('_')[-1])
         character = get_character_by_id(char_id)
-        char_name = character.name if character else f"ID {char_id}"
+        if not character:
+            await query.edit_message_text(text="Error: Character not found or already deleted.")
+            return
 
-        # First, show a message that the process is starting
-        await query.edit_message_text(f"⏳ Removing character **{char_name}** and deleting all associated data...", parse_mode='Markdown')
+        char_name = character.name
 
-        # Perform the deletion
-        delete_character(char_id)
-        load_characters_from_db() # Refresh the global list
+        # Schedule the character for deletion
+        schedule_character_deletion(char_id)
+        load_characters_from_db()  # Refresh the global list to remove the character from polling
 
-        # Finally, show the success message with a back button
-        success_message = f"✅ Character **{char_name}** has been successfully removed."
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="start_command")]]
+        # Notify the user
+        success_message = (
+            f"✅ Character **{char_name}** has been scheduled for deletion.\n\n"
+            f"All associated data will be permanently deleted in approximately one hour. "
+            f"If you wish to cancel this, simply add the character again within the hour."
+        )
+        keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
