@@ -822,11 +822,19 @@ def delete_character(character_id: int):
                 "purchase_lots",
                 "processed_orders",
                 "historical_transactions",
-                "trading_fees"
+                "trading_fees",
+                "historical_journal",
+                "wallet_journal",
+                "chart_cache"
             ]
             for table in tables_to_delete_from:
                 cursor.execute(f"DELETE FROM {table} WHERE character_id = %s", (character_id,))
                 logging.info(f"Deleted records from {table} for character {character_id}.")
+
+            # Clean up ESI cache entries
+            esi_cache_pattern = f"%:{character_id}:%"
+            cursor.execute("DELETE FROM esi_cache WHERE cache_key LIKE %s", (esi_cache_pattern,))
+            logging.info(f"Deleted esi_cache entries for character {character_id}.")
 
             # Clean up bot_state entries
             cursor.execute("DELETE FROM bot_state WHERE key LIKE %s", (f"%_{character_id}",))
