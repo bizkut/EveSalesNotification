@@ -463,25 +463,6 @@ def update_tracked_market_orders(character_id, orders):
         database.release_db_connection(conn)
 
 
-def add_trading_fee(character_id: int, fee_amount: float, reason: str, date: datetime = None):
-    """Adds a record of a trading fee to the database."""
-    if date is None:
-        date = datetime.now(timezone.utc)
-    conn = database.get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO trading_fees (character_id, fee_amount, reason, date)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (character_id, fee_amount, reason, date)
-            )
-            conn.commit()
-        logging.info(f"Recorded trading fee for char {character_id}: {fee_amount:,.2f} ISK ({reason}).")
-    finally:
-        database.release_db_connection(conn)
-
 def remove_tracked_market_orders(character_id, order_ids):
     """Removes a list of market orders for a character from the database."""
     if not order_ids:
@@ -1677,21 +1658,10 @@ async def master_wallet_journal_poll(application: Application):
                     new_journal_entries = [j for j in recent_journal_entries if j['id'] in new_journal_ref_ids]
                     logging.info(f"Detected {len(new_journal_entries)} new journal entries for {character.name}.")
 
-                    # Process the new entries
-                    fee_ref_types = {"brokers_fee", "transaction_tax", "market_provider_tax"}
-                    for entry in new_journal_entries:
-                        if entry.get('ref_type') in fee_ref_types:
-                            # Amounts for fees/taxes are negative in the journal
-                            fee_amount = abs(entry.get('amount', 0))
-                            if fee_amount > 0:
-                                add_trading_fee(
-                                    character_id=character.id,
-                                    fee_amount=fee_amount,
-                                    reason=entry['ref_type'].replace('_', ' ').title(),
-                                    date=datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
-                                )
+                    # Store the full new journal entries in the database for later use.
+                    add_wallet_journal_entries_to_db(character.id, new_journal_entries)
 
-                    # Mark these journal entries as processed
+                    # Mark these journal entries as processed to prevent re-reading
                     add_processed_journal_refs(character.id, list(new_journal_ref_ids))
 
                 except Exception as e:
@@ -2086,23 +2056,6 @@ def calculate_fifo_profit_for_summary(sales_transactions, character_id):
     return total_sales_value - total_cogs
 
 
-def get_trading_fees_from_db(character_id: int) -> list:
-    """Retrieves all recorded trading fees for a character from the local database."""
-    conn = database.get_db_connection()
-    fees = []
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT fee_amount, date FROM trading_fees WHERE character_id = %s",
-                (character_id,)
-            )
-            # Convert decimal fee_amount to float
-            fees = [{"fee_amount": float(row[0]), "date": row[1]} for row in cursor.fetchall()]
-    finally:
-        database.release_db_connection(conn)
-    return fees
-
-
 def _calculate_summary_data(character: Character) -> dict:
     """Fetches all necessary data from the local DB and calculates summary statistics."""
     logging.info(f"Calculating summary data for {character.name} from local database...")
@@ -2112,37 +2065,38 @@ def _calculate_summary_data(character: Character) -> dict:
 
     # --- Fetch data from local database ---
     all_transactions = get_historical_transactions_from_db(character.id)
-    all_trading_fees = get_trading_fees_from_db(character.id)
+    full_journal = get_full_wallet_journal_from_db(character.id)
+    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
 
     # --- 24-Hour Summary ---
-    total_sales_24h = 0
     sales_past_24_hours = [
         tx for tx in all_transactions if not tx.get('is_buy') and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago
     ]
-    if sales_past_24_hours:
-        total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
+    total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
 
     # Sum all fees from the journal for the last 24h
-    total_fees_24h = sum(f['fee_amount'] for f in all_trading_fees if f['date'] > one_day_ago)
+    total_fees_24h = sum(
+        abs(entry['amount']) for entry in full_journal
+        if entry['ref_type'] in fee_ref_types and entry['date'] > one_day_ago
+    )
 
     # Calculate profit for the last 24h
     gross_profit_24h = calculate_fifo_profit_for_summary(sales_past_24_hours, character.id)
     profit_24h = gross_profit_24h - total_fees_24h
 
     # --- Monthly Summary ---
-    total_sales_month = 0
     sales_this_month = [
         tx for tx in all_transactions if not tx.get('is_buy') and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == now.month and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == now.year
     ]
-    if sales_this_month:
-        total_sales_month = sum(s['quantity'] * s['unit_price'] for s in sales_this_month)
+    total_sales_month = sum(s['quantity'] * s['unit_price'] for s in sales_this_month)
 
     # Sum all fees from the journal for the current month
     total_fees_month = sum(
-        f['fee_amount'] for f in all_trading_fees if f['date'].month == now.month and f['date'].year == now.year
+        abs(entry['amount']) for entry in full_journal
+        if entry['ref_type'] in fee_ref_types and entry['date'].month == now.month and entry['date'].year == now.year
     )
 
     gross_revenue_month = total_sales_month - total_fees_month
@@ -3988,18 +3942,39 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
 
     # --- Data Filtering and Annotation ---
     sales_transactions = [tx for tx in all_transactions if not tx.get('is_buy')]
-    journal_by_context_id = defaultdict(list)
-    for entry in full_journal:
-        if entry.get('context_id'):
-            journal_by_context_id[entry['context_id']].append(entry)
 
+    # Create a lookup for market transaction journal entries by their context_id (which is the transaction_id)
+    tx_id_to_journal_map = {
+        entry['context_id']: entry for entry in full_journal
+        if entry.get('context_id_type') == 'market_transaction_id'
+    }
+
+    # Group all fee-related journal entries by their exact timestamp for quick lookup
+    fee_journal_by_timestamp = defaultdict(list)
     tax_ref_types = {'transaction_tax', 'market_provider_tax'}
+    for entry in full_journal:
+        if entry['ref_type'] in tax_ref_types:
+            # Use the parsed datetime object directly as the key
+            fee_journal_by_timestamp[entry['date']].append(entry)
+
+
     for sale in sales_transactions:
         sale['cogs'] = sale_cogs_data.get(sale['transaction_id'])
         sale_value = sale['quantity'] * sale['unit_price']
-        # Find related taxes from the journal
-        related_journal_entries = journal_by_context_id.get(sale['transaction_id'], [])
-        taxes = sum(abs(e['amount']) for e in related_journal_entries if e['ref_type'] in tax_ref_types)
+
+        # Find the main market transaction entry in the journal to get the precise timestamp
+        main_journal_entry = tx_id_to_journal_map.get(sale['transaction_id'])
+        taxes = 0
+        if main_journal_entry:
+            # The date from the journal is the source of truth for matching fees
+            precise_timestamp = main_journal_entry['date']
+            # Find all tax/fee entries that occurred at the exact same second
+            related_fees = fee_journal_by_timestamp.get(precise_timestamp, [])
+            taxes = sum(abs(fee['amount']) for fee in related_fees)
+        else:
+            logging.warning(f"Could not find matching journal entry for sale transaction_id {sale['transaction_id']}")
+
+
         sale['taxes'] = taxes
         if sale['cogs'] is not None:
             sale['net_profit'] = sale_value - sale['cogs'] - taxes
