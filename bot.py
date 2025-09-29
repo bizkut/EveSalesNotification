@@ -3965,7 +3965,18 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
             sale_cogs_data[tx['transaction_id']] = cogs if cogs_calculable else None
 
     # --- Data Filtering and Annotation ---
-    sales_transactions = [tx for tx in all_transactions if not tx.get('is_buy')]
+    # Identify sales from the journal, as this is the source of truth for completed sales.
+    sale_journal_entries = [
+        entry for entry in full_journal
+        if entry.get('ref_type') == 'market_transaction' and entry.get('amount', 0) > 0
+    ]
+    sale_transaction_ids = {entry['context_id'] for entry in sale_journal_entries}
+
+    # Filter all transactions to get only the ones that correspond to a sale journal entry.
+    sales_transactions = [
+        tx for tx in all_transactions
+        if tx['transaction_id'] in sale_transaction_ids
+    ]
 
     # Create a lookup for market transaction journal entries by their context_id (which is the transaction_id)
     tx_id_to_journal_map = {
