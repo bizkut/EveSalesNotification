@@ -2306,6 +2306,34 @@ def add_wallet_journal_entries_to_db(character_id: int, journal_entries: list):
         database.release_db_connection(conn)
 
 
+def backfill_character_journal_history(character: Character) -> bool:
+    """
+    Performs a one-time backfill of a character's wallet journal history.
+    This is separate to handle cases where characters were added before this
+    feature was implemented. Returns True on success, False on failure.
+    """
+    state_key = f"journal_history_backfilled_{character.id}"
+    if get_bot_state(state_key):
+        logging.info(f"Journal history already backfilled for {character.name}. Skipping.")
+        return True
+
+    logging.warning(f"Starting wallet journal backfill for {character.name}...")
+    all_journal_entries = get_wallet_journal(character, fetch_all=True)
+    if all_journal_entries is None:
+        logging.error(f"Failed to fetch wallet journal during history backfill for {character.name}.")
+        return False
+
+    add_wallet_journal_entries_to_db(character.id, all_journal_entries)
+
+    journal_ref_ids = [j['id'] for j in all_journal_entries]
+    add_processed_journal_refs(character.id, journal_ref_ids)
+    logging.info(f"Stored {len(journal_ref_ids)} journal entries and marked them as processed for {character.name}.")
+
+    set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+    logging.warning(f"Wallet journal backfill for {character.name} is complete.")
+    return True
+
+
 def backfill_all_character_history(character: Character) -> bool:
     """
     Performs a one-time backfill of all transaction history from
@@ -2336,22 +2364,9 @@ def backfill_all_character_history(character: Character) -> bool:
 
 
     # --- Backfill Wallet Journal for Fees/Taxes ---
-    logging.info(f"Fetching all wallet journal entries for {character.name}...")
-    all_journal_entries = get_wallet_journal(character, fetch_all=True)
-    if all_journal_entries is None:
-        logging.error(f"Failed to fetch wallet journal during history backfill for {character.name}.")
+    if not backfill_character_journal_history(character):
+        # The sub-function will log the specific error
         return False
-
-    # Add all journal entries to the new table
-    add_wallet_journal_entries_to_db(character.id, all_journal_entries)
-
-    # The old logic of pre-calculating and storing fees in `trading_fees` is now deprecated.
-    # We will calculate fees on the fly from the `wallet_journal` table.
-    # However, we still need to mark the journal entries as "processed" in the historical_journal
-    # table to prevent the live polling loop from re-processing them.
-    journal_ref_ids = [j['id'] for j in all_journal_entries]
-    add_processed_journal_refs(character.id, journal_ref_ids)
-    logging.info(f"Stored {len(journal_ref_ids)} journal entries and marked them as processed for {character.name}.")
 
 
     # --- Backfill Order History (for cancelled/expired notifications) ---
@@ -3850,6 +3865,18 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
     if not character:
         await query.edit_message_text(text="Error: Could not find character.")
         return
+
+    await query.edit_message_text(text=f"⏳ Checking data for {character.name}...")
+
+    # --- Data Integrity Check & Backfill ---
+    journal_state_key = f"journal_history_backfilled_{character.id}"
+    if not get_bot_state(journal_state_key):
+        await query.edit_message_text(text=f"⏳ Performing a one-time sync of wallet journal history for {character.name}. This may take a moment...")
+        # Run the backfill in a thread to avoid blocking the bot
+        backfill_success = await asyncio.to_thread(backfill_character_journal_history, character)
+        if not backfill_success:
+            await query.edit_message_text(text=f"❌ Failed to sync journal history for {character.name}. Please try again later.")
+            return
 
     await query.edit_message_text(text=f"⏳ Calculating historical sales for {character.name}...")
 
