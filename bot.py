@@ -3880,9 +3880,57 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
 
     await query.edit_message_text(text=f"⏳ Calculating historical sales for {character.name}...")
 
-    # --- Data Fetching ---
+    # --- Data Fetching & On-Demand Refresh ---
+    # First, load what we already have in the database.
     all_transactions = get_historical_transactions_from_db(character.id)
-    full_journal = get_full_wallet_journal_from_db(character.id) # Fetches with parsed dates
+    full_journal = get_full_wallet_journal_from_db(character.id) # This returns entries with datetime objects
+
+    # Now, perform a quick, on-demand refresh of both transactions and journal
+    # to prevent race conditions.
+    try:
+        # 1. Refresh Transactions
+        logging.info(f"Performing on-demand transaction refresh for {character.name}...")
+        recent_transactions_from_esi = await asyncio.to_thread(get_wallet_transactions, character)
+        if recent_transactions_from_esi:
+            existing_tx_ids = {tx['transaction_id'] for tx in all_transactions}
+            new_transactions = [
+                tx for tx in recent_transactions_from_esi
+                if tx['transaction_id'] not in existing_tx_ids
+            ]
+            if new_transactions:
+                logging.info(f"On-demand refresh found {len(new_transactions)} new transactions for {character.name}.")
+                # Save the raw new transactions to the DB
+                await asyncio.to_thread(add_historical_transactions_to_db, character.id, new_transactions)
+                # Extend the in-memory list for immediate use. The date is still a string, which is fine
+                # because the COGS calculation parses it on the fly.
+                all_transactions.extend(new_transactions)
+
+        # 2. Refresh Journal
+        logging.info(f"Performing on-demand journal refresh for {character.name}...")
+        recent_journal_entries_from_esi = await asyncio.to_thread(get_wallet_journal, character)
+        if recent_journal_entries_from_esi:
+            existing_journal_ids = {entry['id'] for entry in full_journal}
+            new_journal_entries = [
+                entry for entry in recent_journal_entries_from_esi
+                if entry['id'] not in existing_journal_ids
+            ]
+
+            if new_journal_entries:
+                logging.info(f"On-demand refresh found {len(new_journal_entries)} new journal entries for {character.name}.")
+                # Save the raw new journal entries to the DB
+                await asyncio.to_thread(add_wallet_journal_entries_to_db, character.id, new_journal_entries)
+
+                # Before merging, parse the date strings to datetime objects to match the existing list's type
+                for entry in new_journal_entries:
+                    entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+
+                # Extend the in-memory list and re-sort to ensure chronological order
+                full_journal.extend(new_journal_entries)
+                full_journal.sort(key=lambda x: x['date'], reverse=True)
+
+    except Exception as e:
+        logging.error(f"On-demand data refresh failed for {character.name}: {e}", exc_info=True)
+        # Don't block the user, just log the error and proceed with potentially stale data.
 
     # --- COGS Calculation (In-Memory FIFO Simulation) ---
     inventory = defaultdict(list)
