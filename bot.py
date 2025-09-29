@@ -2347,7 +2347,7 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
         database.release_db_connection(conn)
 
     if not db_chars_info:
-        return # No characters in DB, nothing to do.
+        return  # No characters in DB, nothing to do.
 
     monitored_char_ids = {c.id for c in CHARACTERS}
     db_char_ids = set(db_chars_info.keys())
@@ -2362,83 +2362,71 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                 logging.error(f"Could not find details for newly detected character ID {char_id} in the database.")
                 continue
 
-            # Attempt to seed the historical data for the new character.
-            seed_successful = seed_data_for_character(character)
+            # --- Step 1: Initial Notification ---
+            sync_start_message = f"⏳ **{character.name}** has been added. Now syncing historical data... this may take a minute. I will send another message when complete."
+            prompt_state_key = f"add_character_prompt_{character.telegram_user_id}"
+            prompt_message_info = get_bot_state(prompt_state_key)
+            chat_id, message_id = None, None
 
+            if prompt_message_info:
+                try:
+                    chat_id_str, message_id_str = prompt_message_info.split(':')
+                    chat_id = int(chat_id_str)
+                    message_id = int(message_id_str)
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=sync_start_message,
+                        parse_mode='Markdown'
+                    )
+                except (ValueError, BadRequest) as e:
+                    logging.warning(f"Failed to edit 'Add Character' prompt, sending new message instead. Error: {e}")
+                    sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
+                    chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
+            else:
+                sent_msg = await context.bot.send_message(chat_id=character.telegram_user_id, text=sync_start_message, parse_mode='Markdown')
+                chat_id, message_id = sent_msg.chat_id, sent_msg.message_id
+
+            # --- Step 2: Seed Data (run in a separate thread) ---
+            seed_successful = await asyncio.to_thread(seed_data_for_character, character)
+
+            # --- Step 3: Final Notification ---
             if seed_successful:
-                # Add the character to the global list to be picked up by the master polls
                 CHARACTERS.append(character)
                 logging.info(f"Added new character {character.name} to the polling list after successful data seed.")
-
-                # Create the main menu keyboard to send with the success message
                 keyboard = [
-                    [
-                        InlineKeyboardButton("💰 View Balances", callback_data="balance"),
-                        InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
-                    ],
-                    [
-                        InlineKeyboardButton("📈 View Sales", callback_data="sales"),
-                        InlineKeyboardButton("🛒 View Buys", callback_data="buys")
-                    ],
-                    [
-                        InlineKeyboardButton("📊 Request Summary", callback_data="summary"),
-                        InlineKeyboardButton("⚙️ Settings", callback_data="settings")
-                    ],
-                    [
-                        InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
-                        InlineKeyboardButton("🗑️ Remove", callback_data="remove")
-                    ]
+                    [InlineKeyboardButton("💰 View Balances", callback_data="balance"), InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")],
+                    [InlineKeyboardButton("📈 View Sales", callback_data="sales"), InlineKeyboardButton("🛒 View Buys", callback_data="buys")],
+                    [InlineKeyboardButton("📊 Request Summary", callback_data="summary"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+                    [InlineKeyboardButton("➕ Add Character", callback_data="add_character"), InlineKeyboardButton("🗑️ Remove", callback_data="remove")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
+                success_message = f"✅ Sync complete for **{character.name}**! I will now start monitoring their market activity."
 
-                success_message = f"✅ Successfully added and synced **{character.name}**! I will now start monitoring their market activity."
-
-                # Check if we have a prompt message to edit, for a cleaner UX
-                prompt_state_key = f"add_character_prompt_{character.telegram_user_id}"
-                prompt_message_info = get_bot_state(prompt_state_key)
-
-                if prompt_message_info:
+                if chat_id and message_id:
                     try:
-                        chat_id_str, message_id_str = prompt_message_info.split(':')
-                        chat_id = int(chat_id_str)
-                        message_id = int(message_id_str)
-
                         await context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=success_message,
-                            reply_markup=reply_markup,
-                            parse_mode='Markdown'
+                            chat_id=chat_id, message_id=message_id, text=success_message,
+                            reply_markup=reply_markup, parse_mode='Markdown'
                         )
-                        # Clean up the state so we don't try to edit it again
-                        set_bot_state(prompt_state_key, '')
-                    except (ValueError, BadRequest) as e:
-                        logging.warning(f"Failed to edit 'Add Character' prompt (it may be too old), sending new message instead. Error: {e}")
-                        # Fallback to sending a new message if editing fails
-                        await send_telegram_message(
-                            context,
-                            success_message,
-                            chat_id=character.telegram_user_id,
-                            reply_markup=reply_markup
-                        )
-                else:
-                    # Fallback for cases where the prompt message ID wasn't stored
-                    await send_telegram_message(
-                        context,
-                        success_message,
-                        chat_id=character.telegram_user_id,
-                        reply_markup=reply_markup
-                    )
+                    except BadRequest as e:
+                        logging.warning(f"Failed to edit 'syncing...' message, sending new success message. Error: {e}")
+                        await send_telegram_message(context, success_message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
+                set_bot_state(prompt_state_key, '') # Clean up state
             else:
-                # If seeding fails, do NOT add them to the monitoring list.
-                # Inform the user and the bot will automatically try again on the next cycle.
                 logging.error(f"Failed to seed historical data for {character.name}. They will not be monitored yet.")
-                await send_telegram_message(
-                    context,
-                    f"⚠️ Failed to import historical data for **{character.name}** due to a temporary ESI API issue. "
-                    f"I will automatically retry in a few minutes. Monitoring will begin once the import succeeds.",
-                    chat_id=character.telegram_user_id
-                )
+                error_message = f"⚠️ Failed to import historical data for **{character.name}** due to a temporary ESI API issue. I will automatically retry in a few minutes. Monitoring will begin once the import succeeds."
+                if chat_id and message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id, message_id=message_id,
+                            text=error_message, parse_mode='Markdown'
+                        )
+                    except BadRequest as e:
+                        logging.warning(f"Failed to edit 'syncing...' message to error, sending new error message. Error: {e}")
+                        await send_telegram_message(context, error_message, chat_id=character.telegram_user_id)
+                else:
+                    await send_telegram_message(context, error_message, chat_id=character.telegram_user_id)
 
     # --- 2. Handle Updated Characters ---
     updated_char_ids = {char_id for char_id, info in db_chars_info.items() if info['needs_update'] and char_id in monitored_char_ids}
