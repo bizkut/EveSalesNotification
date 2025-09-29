@@ -266,6 +266,13 @@ def setup_database():
 
             # New tables for persistent historical data
             cursor.execute("""
+            CREATE TABLE IF NOT EXISTS historical_journal (
+                ref_id BIGINT NOT NULL,
+                character_id INTEGER NOT NULL,
+                PRIMARY KEY (ref_id, character_id)
+            )
+            """)
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS historical_transactions (
                 transaction_id BIGINT NOT NULL,
                 character_id INTEGER NOT NULL,
@@ -324,6 +331,24 @@ def add_processed_orders(character_id, order_ids):
             conn.commit()
     finally:
         database.release_db_connection(conn)
+
+
+def add_processed_journal_refs(character_id, ref_ids):
+    """Adds a list of journal ref IDs for a character to the database."""
+    if not ref_ids:
+        return
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [(ref_id, character_id) for ref_id in ref_ids]
+            cursor.executemany(
+                "INSERT INTO historical_journal (ref_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                data_to_insert
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
 
 def get_bot_state(key):
     """Retrieves a value from the bot_state key-value store."""
@@ -880,6 +905,51 @@ def get_character_details_from_token(access_token):
         logging.error(f"Error getting character details: {e}")
         return None, None
 
+def get_wallet_journal(character, fetch_all=False, return_headers=False):
+    """
+    Fetches wallet journal from ESI.
+    If fetch_all is True, retrieves all pages. Otherwise, fetches only the first page.
+    Returns the list of journal entries, or None on failure. Optionally returns headers.
+    """
+    if not character:
+        return (None, None) if return_headers else None
+
+    all_entries, page = [], 1
+    url = f"https://esi.evetech.net/v6/characters/{character.id}/wallet/journal/"
+    first_page_headers = None
+
+    while True:
+        params = {"datasource": "tranquility", "page": page}
+        revalidate_this_page = (not fetch_all) or (page == 1)
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+
+        if data is None: # Explicitly check for API failure
+            logging.error(f"Failed to fetch page {page} of wallet journal for {character.name}.")
+            return (None, None) if return_headers else None
+
+        if page == 1:
+            first_page_headers = headers
+
+        if not data: # Empty list means no more pages
+            break
+
+        all_entries.extend(data)
+
+        if not fetch_all:
+            break
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1)
+
+    if return_headers:
+        return all_entries, first_page_headers
+    return all_entries
+
+
 def get_wallet_transactions(character, fetch_all=False, return_headers=False):
     """
     Fetches wallet transactions from ESI.
@@ -1296,6 +1366,81 @@ def get_ids_from_db(table_name: str, id_column: str, character_id: int, ids_to_c
     return existing_ids
 
 
+async def master_wallet_journal_poll(application: Application):
+    """
+    A single, continuous polling loop that checks for new wallet journal entries
+    for all monitored characters to perform accurate accounting for fees and taxes.
+    """
+    context = ContextTypes.DEFAULT_TYPE(application=application)
+    while True:
+        logging.info("Starting master wallet journal polling cycle.")
+        characters_to_poll = list(CHARACTERS)
+
+        if not characters_to_poll:
+            logging.debug("No characters to poll for wallet journal. Sleeping.")
+        else:
+            for character in characters_to_poll:
+                if character.id not in [c.id for c in CHARACTERS]:
+                    logging.warning(f"Skipping journal poll for character {character.name} ({character.id}) because they have been removed.")
+                    continue
+
+                # Grace period check
+                history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+                if not history_backfilled_at_str:
+                    logging.info(f"Skipping journal poll for {character.name} because historical data has not been backfilled yet.")
+                    continue
+                try:
+                    history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+                    if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+                        logging.info(f"Skipping journal poll for {character.name} (within 1-hour grace period after historical sync).")
+                        continue
+                except ValueError:
+                    pass # Legacy value, grace period is over.
+
+                logging.debug(f"Polling wallet journal for {character.name}")
+                try:
+                    # Fetch the most recent page of journal entries
+                    recent_journal_entries = get_wallet_journal(character)
+                    if not recent_journal_entries:
+                        continue
+
+                    # Find which entries are new
+                    journal_ref_ids_from_esi = [j['id'] for j in recent_journal_entries]
+                    existing_journal_ref_ids = get_ids_from_db('historical_journal', 'ref_id', character.id, journal_ref_ids_from_esi)
+                    new_journal_ref_ids = set(journal_ref_ids_from_esi) - existing_journal_ref_ids
+
+                    if not new_journal_ref_ids:
+                        continue
+
+                    new_journal_entries = [j for j in recent_journal_entries if j['id'] in new_journal_ref_ids]
+                    logging.info(f"Detected {len(new_journal_entries)} new journal entries for {character.name}.")
+
+                    # Process the new entries
+                    fee_ref_types = {"brokers_fee", "transaction_tax", "market_provider_tax"}
+                    for entry in new_journal_entries:
+                        if entry.get('ref_type') in fee_ref_types:
+                            # Amounts for fees/taxes are negative in the journal
+                            fee_amount = abs(entry.get('amount', 0))
+                            if fee_amount > 0:
+                                add_trading_fee(
+                                    character_id=character.id,
+                                    fee_amount=fee_amount,
+                                    reason=entry['ref_type'].replace('_', ' ').title(),
+                                    date=datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+                                )
+
+                    # Mark these journal entries as processed
+                    add_processed_journal_refs(character.id, list(new_journal_ref_ids))
+
+                except Exception as e:
+                    logging.error(f"Error processing wallet journal for {character.name}: {e}", exc_info=True)
+                finally:
+                    await asyncio.sleep(1) # Stagger requests
+
+        logging.info("Master wallet journal polling cycle complete. Sleeping for 60 seconds.")
+        await asyncio.sleep(60)
+
+
 async def master_wallet_transaction_poll(application: Application):
     """
     A single, continuous polling loop that checks for new wallet transactions
@@ -1378,28 +1523,8 @@ async def master_wallet_transaction_poll(application: Application):
                                 # Add to FIFO lots for profit tracking
                                 add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
 
-                                # Calculate and record the broker's fee for this buy transaction
-                                total_cost = tx['quantity'] * tx['unit_price']
-
-                                # Determine which broker fee to use
-                                # This is a simplification; a more robust solution would check the structure type.
-                                # For now, we rely on the user setting different fees as an indicator.
-                                broker_fee_percent = character.broker_fee
-                                scc_surcharge = 0
-                                if character.citadel_broker_fee != character.broker_fee:
-                                    broker_fee_percent = character.citadel_broker_fee
-                                    scc_surcharge = 0.005 # 0.5%
-
-                                fee_from_percent = total_cost * (broker_fee_percent / 100.0)
-                                broker_fee = max(100, fee_from_percent) # Minimum 100 ISK fee
-                                total_fee = broker_fee + (total_cost * scc_surcharge)
-
-                                add_trading_fee(
-                                    character_id=character.id,
-                                    fee_amount=total_fee,
-                                    reason="Buy Order Broker's Fee",
-                                    date=datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
-                                )
+                                # The broker's fee for buy orders is now handled by the journal poll.
+                                # We still record the purchase lot for FIFO, but no longer calculate fees here.
 
 
                     # Process Sales for FIFO accounting and prepare details for potential notification
@@ -1648,129 +1773,6 @@ async def master_order_history_poll(application: Application):
         await asyncio.sleep(60)
 
 
-async def master_open_order_update_poll(application: Application):
-    """
-    A continuous polling loop that checks for changes in open market orders,
-    such as price updates, and records the associated broker's fees.
-    """
-    context = ContextTypes.DEFAULT_TYPE(application=application)
-    while True:
-        logging.info("Starting master open order update polling cycle.")
-        characters_to_poll = list(CHARACTERS)
-
-        if not characters_to_poll:
-            logging.debug("No characters to poll for open order updates. Sleeping.")
-        else:
-            for character in characters_to_poll:
-                # Grace period check
-                history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
-                if not history_backfilled_at_str:
-                    logging.info(f"Skipping open order poll for {character.name} because historical data has not been backfilled yet.")
-                    continue
-                try:
-                    history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
-                    if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
-                        logging.info(f"Skipping open order poll for {character.name} (within 1-hour grace period).")
-                        continue
-                except ValueError:
-                    pass # Legacy value, grace period is over.
-
-                logging.debug(f"Polling open orders for {character.name}")
-                try:
-                    # 1. Fetch current orders from ESI and DB
-                    esi_orders_list = get_market_orders(character, force_revalidate=True)
-                    if esi_orders_list is None:
-                        logging.error(f"Failed to fetch open orders for {character.name}. Skipping.")
-                        continue
-
-                    tracked_orders = get_tracked_market_orders(character.id)
-                    esi_orders = {o['order_id']: o for o in esi_orders_list}
-
-                    # 2. Identify new, modified, and removed orders
-                    tracked_order_ids = set(tracked_orders.keys())
-                    esi_order_ids = set(esi_orders.keys())
-
-                    new_order_ids = esi_order_ids - tracked_order_ids
-                    removed_order_ids = tracked_order_ids - esi_order_ids
-                    existing_order_ids = esi_order_ids.intersection(tracked_order_ids)
-
-                    # 3. Process new orders - log initial broker's fee
-                    if new_order_ids:
-                        logging.info(f"Detected {len(new_order_ids)} new open orders for {character.name}.")
-                        for order_id in new_order_ids:
-                            order = esi_orders[order_id]
-                            order_value = order['price'] * order['volume_total']
-
-                            fee_percent = character.broker_fee
-                            scc_surcharge = 0
-                            # Use citadel fee for buy orders if it's different
-                            if order['is_buy_order'] and character.citadel_broker_fee != character.broker_fee:
-                                fee_percent = character.citadel_broker_fee
-                                scc_surcharge = 0.005
-
-                            fee_from_percent = order_value * (fee_percent / 100.0)
-                            broker_fee = max(100, fee_from_percent)
-                            total_fee = broker_fee + (order_value * scc_surcharge)
-
-                            add_trading_fee(
-                                character_id=character.id,
-                                fee_amount=total_fee,
-                                reason=f"New {'Buy' if order['is_buy_order'] else 'Sell'} Order",
-                                date=datetime.fromisoformat(order['issued'].replace('Z', '+00:00'))
-                            )
-
-                    # 4. Process existing orders for price changes
-                    for order_id in existing_order_ids:
-                        esi_order = esi_orders[order_id]
-                        tracked_order = tracked_orders[order_id]
-
-                        # Check if the price has been modified
-                        if esi_order['price'] != tracked_order['price']:
-                            logging.info(f"Detected price change for order {order_id} for {character.name}.")
-
-                            # A price modification is like creating a new order. Fee is on the new total value.
-                            new_order_value = esi_order['price'] * esi_order['volume_total']
-
-                            fee_percent = character.broker_fee
-                            scc_surcharge = 0
-                            if esi_order['is_buy_order'] and character.citadel_broker_fee != character.broker_fee:
-                                fee_percent = character.citadel_broker_fee
-                                scc_surcharge = 0.005
-
-                            fee_from_percent = new_order_value * (fee_percent / 100.0)
-                            broker_fee = max(100, fee_from_percent)
-                            total_fee = broker_fee + (new_order_value * scc_surcharge)
-
-                            add_trading_fee(
-                                character_id=character.id,
-                                fee_amount=total_fee,
-                                reason=f"Modified {'Buy' if esi_order['is_buy_order'] else 'Sell'} Order Price",
-                                date=datetime.now(timezone.utc) # Modification time isn't in ESI, use current time
-                            )
-
-                    # 5. Update the database with the latest state from ESI
-                    if esi_orders_list:
-                        orders_to_update = [
-                            {
-                                'order_id': o['order_id'],
-                                'volume_remain': o['volume_remain'],
-                                'price': o['price']
-                            } for o in esi_orders_list
-                        ]
-                        update_tracked_market_orders(character.id, orders_to_update)
-
-                    # 6. Remove orders that are no longer active
-                    if removed_order_ids:
-                        logging.info(f"Removing {len(removed_order_ids)} filled/cancelled orders from tracking for {character.name}.")
-                        remove_tracked_market_orders(character.id, list(removed_order_ids))
-
-                except Exception as e:
-                    logging.error(f"Error processing open orders for {character.name}: {e}", exc_info=True)
-                finally:
-                    await asyncio.sleep(1) # Stagger requests
-
-        logging.info("Master open order update polling cycle complete. Sleeping for 300 seconds.")
-        await asyncio.sleep(300) # Check every 5 minutes
 
 
 def calculate_fifo_profit_for_summary(sales_transactions, character_id):
@@ -1844,15 +1846,8 @@ def _calculate_summary_data(character: Character) -> dict:
     if sales_past_24_hours:
         total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
 
-    # Calculate sales-related fees for the last 24h
-    sales_broker_fees_24h = total_sales_24h * (character.broker_fee / 100.0)
-    sales_tax_24h = total_sales_24h * (character.sales_tax / 100.0)
-
-    # Get other trading fees (buy orders, modifications) from the last 24h
-    other_fees_24h = sum(
-        f['fee_amount'] for f in all_trading_fees if f['date'] > one_day_ago
-    )
-    total_fees_24h = sales_broker_fees_24h + sales_tax_24h + other_fees_24h
+    # Sum all fees from the journal for the last 24h
+    total_fees_24h = sum(f['fee_amount'] for f in all_trading_fees if f['date'] > one_day_ago)
 
     # Calculate profit for the last 24h
     gross_profit_24h = calculate_fifo_profit_for_summary(sales_past_24_hours, character.id)
@@ -1868,15 +1863,10 @@ def _calculate_summary_data(character: Character) -> dict:
     if sales_this_month:
         total_sales_month = sum(s['quantity'] * s['unit_price'] for s in sales_this_month)
 
-    # Calculate sales-related fees for the current month
-    sales_broker_fees_month = total_sales_month * (character.broker_fee / 100.0)
-    sales_tax_month = total_sales_month * (character.sales_tax / 100.0)
-
-    # Get other trading fees for the current month
-    other_fees_month = sum(
+    # Sum all fees from the journal for the current month
+    total_fees_month = sum(
         f['fee_amount'] for f in all_trading_fees if f['date'].month == now.month and f['date'].year == now.year
     )
-    total_fees_month = sales_broker_fees_month + sales_tax_month + other_fees_month
 
     gross_revenue_month = total_sales_month - total_fees_month
     wallet_balance = get_wallet_balance(character)
@@ -2087,6 +2077,33 @@ def backfill_all_character_history(character: Character) -> bool:
         for tx in buy_transactions:
             add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
         logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for FIFO tracking for {character.name}.")
+
+
+    # --- Backfill Wallet Journal for Fees/Taxes ---
+    logging.info(f"Fetching all wallet journal entries for {character.name}...")
+    all_journal_entries = get_wallet_journal(character, fetch_all=True)
+    if all_journal_entries is None:
+        logging.error(f"Failed to fetch wallet journal during history backfill for {character.name}.")
+        return False
+
+    # Process fee/tax entries
+    fee_ref_types = {"brokers_fee", "transaction_tax", "market_provider_tax"}
+    for entry in all_journal_entries:
+        if entry.get('ref_type') in fee_ref_types:
+            # Amounts for fees/taxes are negative in the journal
+            fee_amount = abs(entry.get('amount', 0))
+            if fee_amount > 0:
+                add_trading_fee(
+                    character_id=character.id,
+                    fee_amount=fee_amount,
+                    reason=entry['ref_type'].replace('_', ' ').title(),
+                    date=datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+                )
+
+    # Mark all journal entries as processed
+    journal_ref_ids = [j['id'] for j in all_journal_entries]
+    add_processed_journal_refs(character.id, journal_ref_ids)
+    logging.info(f"Seeded {len(journal_ref_ids)} journal entries and processed historical fees for {character.name}.")
 
 
     # --- Backfill Order History (for cancelled/expired notifications) ---
@@ -2477,11 +2494,8 @@ def generate_hourly_chart(character_id: int):
 
         sales = sum(s['quantity'] * s['unit_price'] for s in hour_sales_tx)
 
-        # Calculate fees based on sales and other trading fees
-        sales_broker_fees = sales * (character.broker_fee / 100.0)
-        sales_tax = sales * (character.sales_tax / 100.0)
-        other_fees = sum(f['fee_amount'] for f in hour_trading_fees)
-        fees = sales_broker_fees + sales_tax + other_fees
+        # Sum all fees from the journal for this hour
+        fees = sum(f['fee_amount'] for f in hour_trading_fees)
 
         gross_profit = calculate_fifo_profit_for_summary(hour_sales_tx, character_id)
         profit = gross_profit - fees
@@ -2557,10 +2571,8 @@ def generate_daily_chart(character_id: int):
 
         sales = sum(s['quantity'] * s['unit_price'] for s in day_sales_tx)
 
-        sales_broker_fees = sales * (character.broker_fee / 100.0)
-        sales_tax = sales * (character.sales_tax / 100.0)
-        other_fees = sum(f['fee_amount'] for f in day_trading_fees)
-        fees = sales_broker_fees + sales_tax + other_fees
+        # Sum all fees from the journal for this day
+        fees = sum(f['fee_amount'] for f in day_trading_fees)
 
         gross_profit = calculate_fifo_profit_for_summary(day_sales_tx, character_id)
         profit = gross_profit - fees
@@ -2631,10 +2643,8 @@ def generate_monthly_chart(character_id: int, year: int):
 
         sales = sum(s['quantity'] * s['unit_price'] for s in month_sales_tx)
 
-        sales_broker_fees = sales * (character.broker_fee / 100.0)
-        sales_tax = sales * (character.sales_tax / 100.0)
-        other_fees = sum(f['fee_amount'] for f in month_trading_fees)
-        fees = sales_broker_fees + sales_tax + other_fees
+        # Sum all fees from the journal for this month
+        fees = sum(f['fee_amount'] for f in month_trading_fees)
 
         gross_profit = calculate_fifo_profit_for_summary(month_sales_tx, character_id)
         profit = gross_profit - fees
@@ -3205,10 +3215,10 @@ async def post_init(application: Application):
     logging.info("Bot commands have been set in the Telegram menu.")
 
     # Start the master polling loops as background tasks
+    asyncio.create_task(master_wallet_journal_poll(application))
     asyncio.create_task(master_wallet_transaction_poll(application))
     asyncio.create_task(master_order_history_poll(application))
-    asyncio.create_task(master_open_order_update_poll(application))
-    logging.info("Master polling loops for transactions, order history, and open order updates have been started.")
+    logging.info("Master polling loops for journal, transactions, and order history have been started.")
 
     # Schedule the job to check for new characters
     application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
