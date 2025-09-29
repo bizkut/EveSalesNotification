@@ -1096,6 +1096,12 @@ def get_market_history(type_id, region_id, force_revalidate=False):
     history_data = make_esi_request(url, params=params, force_revalidate=force_revalidate)
     return history_data[-1] if history_data else None
 
+def get_character_online_status(character: Character):
+    """Fetches a character's online status from ESI."""
+    if not character: return None
+    url = f"https://esi.evetech.net/v2/characters/{character.id}/online/"
+    return make_esi_request(url, character=character, force_revalidate=True)
+
 def get_character_public_info(character_id: int):
     """Fetches public character information from ESI."""
     url = f"https://esi.evetech.net/v5/characters/{character_id}/"
@@ -3090,20 +3096,27 @@ async def _show_character_info(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text(f"⏳ Fetching public info for {character.name}...")
 
     # --- ESI Calls ---
-    public_info = await asyncio.to_thread(get_character_public_info, character.id)
+    # Concurrently fetch all required info
+    tasks = {
+        "public": asyncio.to_thread(get_character_public_info, character.id),
+        "online": asyncio.to_thread(get_character_online_status, character)
+    }
+    results = await asyncio.gather(*tasks.values())
+    public_info, online_status = results
 
     if not public_info:
         await query.edit_message_text(f"❌ Could not fetch public info for {character.name}.")
         return
 
     # Concurrently fetch corporation and alliance info
-    tasks = [asyncio.to_thread(get_corporation_info, public_info['corporation_id'])]
+    corp_tasks = [asyncio.to_thread(get_corporation_info, public_info['corporation_id'])]
     if 'alliance_id' in public_info:
-        tasks.append(asyncio.to_thread(get_alliance_info, public_info['alliance_id']))
+        corp_tasks.append(asyncio.to_thread(get_alliance_info, public_info['alliance_id']))
 
-    results = await asyncio.gather(*tasks)
-    corp_info = results[0]
-    alliance_info = results[1] if 'alliance_id' in public_info else None
+    corp_results = await asyncio.gather(*corp_tasks)
+    corp_info = corp_results[0]
+    alliance_info = corp_results[1] if 'alliance_id' in public_info else None
+
 
     # --- Formatting ---
     char_name = public_info.get('name', character.name)
@@ -3125,6 +3138,13 @@ async def _show_character_info(update: Update, context: ContextTypes.DEFAULT_TYP
     if alliance_info:
         alliance_name = alliance_info.get('name', 'Unknown Alliance')
         caption_lines.append(f"Alliance: {alliance_name}")
+
+    if online_status:
+        status_text = "🟢 Online" if online_status.get('online') else "🔴 Offline"
+        login_count = online_status.get('logins', 'N/A')
+        caption_lines.append(f"Status: {status_text}")
+        caption_lines.append(f"Total Logins: {login_count:,}")
+
 
     caption = "\n".join(caption_lines)
 
