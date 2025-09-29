@@ -5,10 +5,8 @@ services:
     image: postgres:16-alpine # Upgraded for ElectricSQL compatibility
     container_name: eve-market-db
     restart: unless-stopped
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -26,6 +24,8 @@ services:
     restart: unless-stopped
     ports:
       - "5133:5133" # Electric's Postgres-proxy port
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable
       - ELECTRIC_INSECURE=true # For development only
@@ -38,18 +38,10 @@ services:
     container_name: eve-market-bot
     restart: unless-stopped
     command: ["python", "bot.py"]
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - ESI_CLIENT_ID=${ESI_CLIENT_ID}
-      - ESI_SECRET_KEY=${ESI_SECRET_KEY}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - WEBAPP_URL=${WEBAPP_URL}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -61,17 +53,10 @@ services:
     container_name: eve-market-webapp
     restart: unless-stopped
     command: ["gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "${LOG_LEVEL}", "webapp:app"]
+    env_file:
+      - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - ESI_CLIENT_ID=${ESI_CLIENT_ID}
-      - ESI_SECRET_KEY=${ESI_SECRET_KEY}
-      - CALLBACK_URL=${CALLBACK_URL}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - POSTGRES_HOST=${POSTGRES_HOST}
-      - POSTGRES_PORT=${POSTGRES_PORT}
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -84,8 +69,8 @@ services:
     restart: unless-stopped
     depends_on:
       - webapp
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    env_file:
+      - .env
     command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
 
 volumes:
