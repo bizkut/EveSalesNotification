@@ -12,15 +12,11 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Seamless Character Updates**: Re-authorizing an existing character (e.g., to update API scopes) is handled gracefully. The bot sends a confirmation and immediately starts using the new permissions.
 - **Private & Secure**: Notifications and command responses are sent directly to the user who owns the character.
 - **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds using efficient ETag-based polling.
-- **Dual Notification System**: Differentiates between non-immediate (limit) orders and immediate (market) orders, with separate notification toggles for each buy/sell category. Immediate order notifications are off by default.
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data**:
-  - **Accurate Profit Tracking (FIFO & Journal-Based)**:
-    -   **Live Notifications**: Sales notifications provide an immediate *estimated* net profit, calculated using the broker/sales tax percentages you configure in the bot's settings.
-    -   **Historical Reports**: All historical views (`/sales`, `/summary`, charts) use your character's actual wallet journal data for 100% accurate tax and broker fee calculations, providing a true financial record.
-  - **Live Market Price Context**: Sales are compared against the current best buy order in your main trade hub.
-  - **Accurate Trade Location**: Correctly identifies the true location of remote buys/sales by cross-referencing with order history.
-  - **Wallet Balance**: All notifications include your current wallet balance.
+  - **Accurate Profit Tracking (FIFO & Journal-Based)**: The bot uses the First-In, First-Out (FIFO) method to calculate the Cost of Goods Sold (COGS) for all sales. It then uses your character's actual wallet journal data for 100% accurate tax and broker fee calculations, providing a true financial record in all views (live notifications, historical reports, and charts).
+  - **Live Market Price Context**: Sales are compared against the current best buy order in your character's configured main trade hub.
+  - **Wallet Balance**: All notifications include your character's current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot also displays your character's current order capacity (e.g., "152 / 305 orders").
@@ -46,22 +42,11 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 
 Follow these steps to deploy your own instance of the bot.
 
-### Step 1: Get a Public URL
-
-The bot's web component needs to be accessible from the internet for the EVE Online authentication to work. The easiest way to achieve this is by using the included Cloudflare Tunnel service.
-
-1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel.
-2.  In your tunnel's dashboard, configure a **Public Hostname** (e.g., `eve-bot.yourdomain.com`).
-3.  Set the service type to **HTTP** and the URL to `webapp:5000`.
-4.  Note down your public hostname and the **tunnel token**. You will need these for the next steps.
-
-Alternatively, you can use your own reverse proxy (like Nginx) to expose the `webapp` service on port 5000.
-
-### Step 2: Create an EVE Online Application
+### Step 1: Create an EVE Online Application
 
 1.  Go to the [EVE Online Developers Portal](https://developers.eveonline.com/applications) and log in.
 2.  Create a new application.
-3.  For the **Callback URL**, enter your public-facing URL from Step 1, followed by `/callback`. For example: `https://eve-bot.yourdomain.com/callback`.
+3.  For the **Callback URL**, you will need a public-facing URL. We will generate this in the next step, but for now, you can use a placeholder like `https://example.com/callback`. You will need to come back and update this later.
 4.  Under the "Scopes" section, add the following required scopes:
     -   `esi-wallet.read_character_wallet.v1`
     -   `esi-markets.read_character_orders.v1`
@@ -71,43 +56,40 @@ Alternatively, you can use your own reverse proxy (like Nginx) to expose the `we
     -   `esi-location.read_online.v1`
 5.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
-### Step 3: Configure the Environment
+### Step 2: Configure and Run the Bot
 
-All configuration is handled through a `.env` file.
+All configuration is handled through a `.env` file. The bot uses the included Cloudflare Tunnel service to easily and securely expose the web app to the internet, which is required for EVE's authentication flow.
 
 1.  Create your environment file by copying the example:
     ```bash
     cp .env.example .env
     ```
 2.  Open `.env` with a text editor and fill in the required values:
-    -   `ESI_CLIENT_ID` & `ESI_SECRET_KEY`: From your EVE application in Step 2.
-    -   `CALLBACK_URL`: The **exact same** callback URL you used in Step 2.
+    -   `ESI_CLIENT_ID` & `ESI_SECRET_KEY`: From your EVE application in Step 1.
     -   `TELEGRAM_BOT_TOKEN`: The token for your bot from BotFather on Telegram.
-    -   `WEBAPP_URL`: The public base URL for the webapp component (e.g., `https://eve-bot.yourdomain.com`).
     -   `POSTGRES_PASSWORD`: Choose a secure password for the database.
-    -   `TUNNEL_TOKEN`: Your Cloudflare tunnel token from Step 1 (if you are using the tunnel).
+    -   `TUNNEL_TOKEN`: **Leave this blank for now.**
 
-### Step 4: Run the Bot
+3.  Start the bot for the first time to generate your tunnel credentials:
+    ```bash
+    docker-compose up --build -d
+    ```
+4.  The `cloudflared` service will authenticate and create a tunnel. View its logs to get your public URL:
+    ```bash
+    docker-compose logs cloudflared
+    ```
+    Look for a line similar to `INF | url=https://something-random.trycloudflare.com`. This is your public URL.
 
-With the configuration complete, you can now build and run the bot using Docker Compose.
+5.  Now, update your configuration with the public URL:
+    -   **Update EVE Application**: Go back to the EVE Developer Portal and update your application's **Callback URL** to `https://your-public-url.trycloudflare.com/callback`.
+    -   **Update `.env` file**: Fill in the `WEBAPP_URL` with your public URL (`https://your-public-url.trycloudflare.com`).
 
-```bash
-docker-compose up --build -d
-```
+6.  Restart the bot to apply the final configuration:
+    ```bash
+    docker-compose restart
+    ```
 
-The bot and its companion web app will now start.
-
-### Step 3: (Optional) Configure Cloudflare Tunnel
-
-This bot includes an integrated [Cloudflare Tunnel](https://www.cloudflare.com/products/tunnel/) service to easily and securely expose the web app to the internet.
-
-1.  Follow the [Cloudflare guide](https://developers.cloudflare.com/zerotrust/get-started/create-tunnel/) to create a new tunnel. Note down the **tunnel name** and the **tunnel token**.
-2.  In your tunnel's dashboard, configure the **Public Hostname**. Set the hostname you want (e.g., `eve.gametrader.my`) to point to the internal `webapp` service at `http://webapp:5000`.
-3.  Create a `.env` file by copying the example: `cp .env.example .env`
-4.  Open the new `.env` file and paste your **tunnel name** and **token** into the corresponding variables.
-5.  Finally, ensure your `CALLBACK_URL` and `WEBAPP_URL` in `config.py` use your public `https` hostname (e.g., `https://eve.gametrader.my`).
-
-If you choose not to use the tunnel, you can safely ignore the `.env` file and will need to set up your own reverse proxy.
+Your bot is now fully configured and running.
 
 ---
 
@@ -133,35 +115,36 @@ All interaction with the bot is handled through a clean, inline button-based men
 
 **Market Sale Notification:**
 ```
-✅ Market Sale! ✅
+✅ *Market Sale (Character Name)* ✅
 
 **Item:** `Tritanium`
 **Quantity:** `1,000` @ `10.00 ISK`
-**Jita Best Buy:** `9.95 ISK` (+0.50%)
+**The Forge Best Buy:** `9.95 ISK` (+0.50%)
 **Total Fees:** `1,050.00 ISK`
 **Net Profit:** `950.00 ISK`
 
 **Location:** `Jita 4-4 - Caldari Navy Assembly Plant`
-**Wallet Balance:** `1,234,567,890.12 ISK`
+**Wallet:** `1,234,567,890.12 ISK`
 ```
 
 **Daily Summary:**
 ```
-📊 Daily Market Summary (2025-09-26)
+📊 *Daily Market Summary (Character Name)*
+_2025-09-26 18:00 UTC_
 
-**Wallet Balance:** `1,234,567,890.12 ISK`
+*Wallet Balance:* `1,234,567,890.12 ISK`
 
-**Past 24 Hours:**
+*Past 24 Hours:*
   - Total Sales Value: `15,000,000.00 ISK`
   - Total Fees (Broker + Tax): `750,000.00 ISK`
   - **Profit (FIFO):** `3,500,000.00 ISK`
 
 ---
 
-🗓️ Current Month Summary (September 2025):
+🗓️ *Current Month Summary (September 2025):*
   - Total Sales Value: `120,000,000.00 ISK`
   - Total Fees (Broker + Tax): `6,000,000.00 ISK`
-  - **Gross Revenue (Sales - Fees):** `114,000,000.00 ISK`
+  - *Gross Revenue (Sales - Fees):* `114,000,000.00 ISK`
 ```
 
 ---
