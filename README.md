@@ -30,6 +30,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Highly Configurable**: All major settings (fees, taxes, wallet alerts, notification types, etc.) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
 - **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's entire transaction history to ensure profit calculations are accurate from day one. To prevent a flood of old alerts, a 1-hour grace period begins after the initial historical data sync is complete. During this time, no new notifications (sales, buys, cancellations, or expirations) will be sent. This ensures that only market activity occurring after the sync and grace period will trigger an alert.
+- **Graceful Deletion with 1-Hour Grace Period**: To prevent accidental data loss and API abuse, character deletion is now a two-step process. When you remove a character, they are "soft-deleted" and scheduled for permanent deletion in one hour. If you re-add the character within this grace period, the deletion is cancelled, and monitoring resumes instantly without needing to re-fetch all historical data. If you do nothing, all data is permanently wiped after the hour is up.
 
 ---
 
@@ -123,7 +124,7 @@ All interaction with the bot is handled through a clean, inline button-based men
     -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
     -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, wallet balance alerts, notification preferences, and view public character info.
     -   **➕ Add Character**: Starts the process of adding a new character.
-    -   **🗑️ Remove Character**: Starts the process of removing a character and all of their associated data.
+    -   **🗑️ Remove Character**: Schedules a character and all their associated data for permanent deletion after a one-hour grace period. This action can be cancelled by re-adding the character within the hour.
 3.  **Character Selection**: If you have multiple characters, the bot will present you with a new inline menu to choose which character you want to interact with after you select an action.
 
 ---
