@@ -786,6 +786,24 @@ def get_esi_cache_from_db(cache_key):
     return cached_item
 
 
+def get_last_known_wallet_balance(character: Character) -> float | None:
+    """
+    Retrieves the most recent wallet balance for a character from the local DB cache.
+    This function does NOT make an ESI call.
+    """
+    if not character:
+        return None
+    url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
+    # Construct the cache key exactly as make_esi_request would for this endpoint
+    cache_key = f"{url}:{character.id}:None:"
+    cached_response = get_esi_cache_from_db(cache_key)
+    if cached_response and 'data' in cached_response:
+        # The balance is stored directly as the JSON response
+        return float(cached_response['data'])
+    logging.warning(f"No cached wallet balance found for character {character.name} ({character.id}).")
+    return None
+
+
 def save_esi_cache_to_db(cache_key, data, etag, expires_dt, headers):
     """Saves an ESI response to the database cache."""
     conn = database.get_db_connection()
@@ -1924,7 +1942,7 @@ def _calculate_summary_data(character: Character) -> dict:
     )
 
     gross_revenue_month = total_sales_month - total_fees_month
-    wallet_balance = get_wallet_balance(character)
+    wallet_balance = get_last_known_wallet_balance(character)
 
     # --- Available Years for Charts ---
     available_years = []
