@@ -860,8 +860,10 @@ def get_full_wallet_journal_from_db(character_id: int):
             colnames = [desc[0] for desc in cursor.description]
             for row in journal_entries:
                 entry = dict(zip(colnames, row))
-                # Convert date string to datetime object for easier comparison
-                entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+                # The 'date' column is already a datetime object from the DB.
+                # If for some reason it's a string, we parse it.
+                if isinstance(entry['date'], str):
+                    entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
                 processed_entries.append(entry)
     except psycopg2.errors.UndefinedTable:
         logging.warning("Attempted to query 'wallet_journal' table, but it does not exist. Returning empty list.")
