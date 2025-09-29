@@ -3614,6 +3614,10 @@ async def purge_deleted_characters_job(context: ContextTypes.DEFAULT_TYPE) -> No
                 logging.warning(f"Purging character {char_name} ({char_id})...")
                 delete_character(char_id) # This function handles the actual deletion
 
+                # Remove the character from the global list to stop polling
+                global CHARACTERS
+                CHARACTERS = [c for c in CHARACTERS if c.id != char_id]
+
                 # Notify the user that the data has been permanently deleted
                 purge_message = f"🗑️ The one-hour grace period for **{char_name}** has expired, and all associated data has been permanently deleted."
                 await send_telegram_message(context, purge_message, chat_id=telegram_user_id)
@@ -4203,13 +4207,13 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         # Schedule the character for deletion
         schedule_character_deletion(char_id)
-        load_characters_from_db()  # Refresh the global list to remove the character from polling
+        # load_characters_from_db() # DO NOT refresh the list, so monitoring continues for the grace period.
 
         # Notify the user
         success_message = (
-            f"✅ Character **{char_name}** has been scheduled for deletion.\n\n"
-            f"All associated data will be permanently deleted in approximately one hour. "
-            f"If you wish to cancel this, simply add the character again within the hour."
+            f"✅ **{char_name}** has been scheduled for deletion.\n\n"
+            f"For the next hour, I will continue to monitor this character *silently* (no new notifications will be sent), but all new data will be saved. After one hour, all data for this character will be permanently deleted.\n\n"
+            f"To cancel this process, simply add the character again within the hour."
         )
         keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
