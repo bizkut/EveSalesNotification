@@ -18,6 +18,7 @@ matplotlib.use('Agg')  # Use a non-interactive backend
 import matplotlib.pyplot as plt
 import calendar
 from PIL import Image
+import psycopg2
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -281,6 +282,15 @@ def setup_database():
             )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_hist_trans_char_date ON historical_transactions (character_id, date DESC);")
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS image_cache (
+                    url TEXT PRIMARY KEY,
+                    etag TEXT,
+                    data BYTEA NOT NULL,
+                    last_fetched TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
 
             conn.commit()
     finally:
@@ -1021,6 +1031,78 @@ def get_alliance_info(alliance_id: int):
     """Fetches public alliance information from ESI."""
     url = f"https://esi.evetech.net/v4/alliances/{alliance_id}/"
     return make_esi_request(url)
+
+
+def get_image_from_cache(url: str):
+    """Retrieves a cached image (data and etag) from the database."""
+    conn = database.get_db_connection()
+    cached_image = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT etag, data FROM image_cache WHERE url = %s", (url,))
+            row = cursor.fetchone()
+            if row:
+                cached_image = {'etag': row[0], 'data': row[1]}
+    finally:
+        database.release_db_connection(conn)
+    return cached_image
+
+
+def save_image_to_cache(url: str, etag: str, data: bytes):
+    """Saves or updates an image in the database cache."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Use psycopg2's binary adapter for the bytea data
+            binary_data = psycopg2.Binary(data)
+            cursor.execute(
+                """
+                INSERT INTO image_cache (url, etag, data, last_fetched)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (url) DO UPDATE SET
+                    etag = EXCLUDED.etag,
+                    data = EXCLUDED.data,
+                    last_fetched = EXCLUDED.last_fetched;
+                """,
+                (url, etag, binary_data, datetime.now(timezone.utc))
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+
+def get_cached_image(url: str) -> bytes | None:
+    """
+    Fetches an image, using a database cache to handle ETags.
+    Returns the image data as bytes, or None on failure.
+    """
+    cached = get_image_from_cache(url)
+    headers = {}
+    if cached and cached.get('etag'):
+        headers['If-None-Match'] = cached['etag']
+
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 304:  # Not Modified
+            logging.debug(f"Returning cached image for {url} (304 Not Modified).")
+            return bytes(cached['data']) # Return the stored binary data
+
+        res.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+
+        new_etag = res.headers.get('ETag')
+        image_data = res.content
+        if new_etag:
+            save_image_to_cache(url, new_etag, image_data)
+
+        return image_data
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to download image from {url}: {e}")
+        # If the request fails, still try to return the cached version if it exists
+        if cached:
+            logging.warning(f"Returning stale cached image for {url} due to request failure.")
+            return bytes(cached['data'])
+        return None
 
 
 def get_names_from_ids(id_list, character: Character = None):
@@ -2885,20 +2967,20 @@ def _create_character_info_image(character_id, corporation_id, alliance_id=None)
         corp_logo_url = f"https://images.evetech.net/corporations/{corporation_id}/logo?size=128"
         alliance_logo_url = f"https://images.evetech.net/alliances/{alliance_id}/logo?size=128" if alliance_id else None
 
-        # Download images
-        portrait_res = requests.get(portrait_url, timeout=10)
-        portrait_res.raise_for_status()
-        portrait_img = Image.open(io.BytesIO(portrait_res.content)).convert("RGBA")
+        # Download images using the new caching function
+        portrait_data = get_cached_image(portrait_url)
+        if not portrait_data:
+            logging.error(f"Failed to get portrait for character {character_id}. Aborting image creation.")
+            return None
+        portrait_img = Image.open(io.BytesIO(portrait_data)).convert("RGBA")
 
-        corp_logo_res = requests.get(corp_logo_url, timeout=10)
-        corp_logo_res.raise_for_status()
-        corp_logo_img = Image.open(io.BytesIO(corp_logo_res.content)).convert("RGBA")
+        corp_logo_data = get_cached_image(corp_logo_url)
+        corp_logo_img = Image.open(io.BytesIO(corp_logo_data)).convert("RGBA") if corp_logo_data else None
 
         alliance_logo_img = None
         if alliance_logo_url:
-            alliance_logo_res = requests.get(alliance_logo_url, timeout=10)
-            alliance_logo_res.raise_for_status()
-            alliance_logo_img = Image.open(io.BytesIO(alliance_logo_res.content)).convert("RGBA")
+            alliance_logo_data = get_cached_image(alliance_logo_url)
+            alliance_logo_img = Image.open(io.BytesIO(alliance_logo_data)).convert("RGBA") if alliance_logo_data else None
 
         # Create composite image
         width = 256
@@ -2909,7 +2991,7 @@ def _create_character_info_image(character_id, corporation_id, alliance_id=None)
         composite.paste(portrait_img, (0, 0), portrait_img)
 
         # Paste logos
-        if alliance_logo_img: # Both corp and alliance exist
+        if alliance_logo_img and corp_logo_img:
             composite.paste(corp_logo_img, (0, 256 + 10), corp_logo_img)
             composite.paste(alliance_logo_img, (128, 256 + 10), alliance_logo_img)
         elif corp_logo_img: # Only corp exists
@@ -2922,9 +3004,6 @@ def _create_character_info_image(character_id, corporation_id, alliance_id=None)
         buf.seek(0)
         return buf
 
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to download images for character info card: {e}")
-        return None
     except Exception as e:
         logging.error(f"Failed to create character info image: {e}", exc_info=True)
         return None
