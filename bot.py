@@ -2407,34 +2407,37 @@ async def master_undercut_poll(application: Application):
                         if type_id not in market_data_cache[region_id]:
                             regional_market_orders = await asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True)
                             if regional_market_orders:
-                                buy_prices = [o['price'] for o in regional_market_orders if o.get('is_buy_order')]
-                                sell_prices = [o['price'] for o in regional_market_orders if not o.get('is_buy_order')]
+                                buy_orders = [o for o in regional_market_orders if o.get('is_buy_order')]
+                                sell_orders = [o for o in regional_market_orders if not o.get('is_buy_order')]
+                                best_buy = max(buy_orders, key=lambda x: x['price']) if buy_orders else None
+                                best_sell = min(sell_orders, key=lambda x: x['price']) if sell_orders else None
                                 market_data_cache[region_id][type_id] = {
-                                    'buy': max(buy_prices) if buy_prices else 0,
-                                    'sell': min(sell_prices) if sell_prices else float('inf')
+                                    'buy': best_buy,
+                                    'sell': best_sell
                                 }
 
                 for structure_id, orders in structure_orders_by_id.items():
                     if structure_id not in market_data_cache:
                         all_structure_orders = await asyncio.to_thread(get_structure_market_orders, character, structure_id, force_revalidate=True)
                         if all_structure_orders:
-                            price_map = defaultdict(lambda: {'buy': [], 'sell': []})
+                            order_map = defaultdict(lambda: {'buy': [], 'sell': []})
                             for o in all_structure_orders:
                                 if o.get('is_buy_order'):
-                                    price_map[o['type_id']]['buy'].append(o['price'])
+                                    order_map[o['type_id']]['buy'].append(o)
                                 else:
-                                    price_map[o['type_id']]['sell'].append(o['price'])
+                                    order_map[o['type_id']]['sell'].append(o)
 
                             final_price_map = {}
-                            for type_id, prices in price_map.items():
+                            for type_id, order_groups in order_map.items():
                                 final_price_map[type_id] = {
-                                    'buy': max(prices['buy']) if prices['buy'] else 0,
-                                    'sell': min(prices['sell']) if prices['sell'] else float('inf')
+                                    'buy': max(order_groups['buy'], key=lambda x: x['price']) if order_groups['buy'] else None,
+                                    'sell': min(order_groups['sell'], key=lambda x: x['price']) if order_groups['sell'] else None
                                 }
                             market_data_cache[structure_id] = final_price_map
 
                 for order in open_orders:
                     is_undercut = False
+                    competitor_order = None
                     market_location_id = order['location_id'] if order['location_id'] > 10000000000 else character.region_id
 
                     market_prices_for_loc = market_data_cache.get(market_location_id)
@@ -2442,37 +2445,52 @@ async def master_undercut_poll(application: Application):
                         prices_for_type = market_prices_for_loc.get(order['type_id'])
                         if prices_for_type:
                             if order.get('is_buy_order'):
-                                if prices_for_type['buy'] > order['price']:
+                                best_buy_order = prices_for_type.get('buy')
+                                if best_buy_order and best_buy_order['price'] > order['price']:
                                     is_undercut = True
-                            else:
-                                if prices_for_type['sell'] < order['price']:
+                                    competitor_order = best_buy_order
+                            else: # Sell order
+                                best_sell_order = prices_for_type.get('sell')
+                                if best_sell_order and best_sell_order['price'] < order['price']:
                                     is_undercut = True
+                                    competitor_order = best_sell_order
 
                     new_statuses_to_update.append({'order_id': order['order_id'], 'is_undercut': is_undercut})
 
                     was_undercut = previous_statuses.get(order['order_id'], False)
                     if is_undercut and not was_undercut:
-                        notifications_to_send.append(order)
+                        notifications_to_send.append({'my_order': order, 'competitor': competitor_order})
 
                 if new_statuses_to_update:
                     await asyncio.to_thread(update_undercut_statuses, character.id, new_statuses_to_update)
 
                 if notifications_to_send:
                     logging.info(f"Found {len(notifications_to_send)} new undercuts for {character.name}.")
-                    all_type_ids = [o['type_id'] for o in notifications_to_send]
-                    all_loc_ids = [o['location_id'] for o in notifications_to_send]
+
+                    all_type_ids = [n['my_order']['type_id'] for n in notifications_to_send]
+                    all_loc_ids = [n['my_order']['location_id'] for n in notifications_to_send] + \
+                                  [n['competitor']['location_id'] for n in notifications_to_send if n.get('competitor')]
                     id_to_name = await asyncio.to_thread(get_names_from_ids, list(set(all_type_ids + all_loc_ids)), character)
 
-                    for order in notifications_to_send:
-                        item_name = id_to_name.get(order['type_id'], f"TypeID {order['type_id']}")
-                        location_name = id_to_name.get(order['location_id'], "an unknown location")
-                        order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                    for notif in notifications_to_send:
+                        my_order = notif['my_order']
+                        competitor = notif['competitor']
+
+                        item_name = id_to_name.get(my_order['type_id'], f"TypeID {my_order['type_id']}")
+                        my_location_name = id_to_name.get(my_order['location_id'], "an unknown location")
+                        order_type = "Buy" if my_order.get('is_buy_order') else "Sell"
+
+                        competitor_price_str = f"`{competitor['price']:,.2f}` ISK"
+                        competitor_loc_name = id_to_name.get(competitor['location_id'], "an unknown location")
+                        competitor_loc_str = f"at `{competitor_loc_name}`"
+
                         message = (
                             f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
                             f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
-                            f"  • **Quantity:** `{order['volume_remain']:,}` of `{order['volume_total']:,}`\n"
-                            f"  • **Your Price:** `{order['price']:,.2f}` ISK\n"
-                            f"  • **Location:** `{location_name}`"
+                            f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
+                            f"  • **Competitor's Price:** {competitor_price_str} {competitor_loc_str}\n\n"
+                            f"  • **Your Order Location:** `{my_location_name}`\n"
+                            f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`"
                         )
                         await send_telegram_message(context, message, chat_id=character.telegram_user_id)
                         await asyncio.sleep(1)
