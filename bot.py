@@ -5,7 +5,7 @@ import os
 import database
 import json
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta, time as dt_time
+from datetime import date, datetime, timezone, timedelta, time as dt_time
 from dataclasses import dataclass
 import asyncio
 import telegram
