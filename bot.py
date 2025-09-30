@@ -49,7 +49,7 @@ class Character:
     wallet_balance_threshold: int
     enable_sales_notifications: bool
     enable_buy_notifications: bool
-    enable_daily_summary: bool
+    enable_daily_overview: bool
     enable_undercut_notifications: bool
     enable_contract_notifications: bool
     notification_batch_threshold: int
@@ -70,7 +70,7 @@ def load_characters_from_db():
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, enable_undercut_notifications,
+                    enable_daily_overview, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at
                 FROM characters
             """)
@@ -89,7 +89,7 @@ def load_characters_from_db():
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             wallet_balance_threshold,
             enable_sales, enable_buys,
-            enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
+            enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -103,7 +103,7 @@ def load_characters_from_db():
             wallet_balance_threshold=wallet_balance_threshold,
             enable_sales_notifications=bool(enable_sales),
             enable_buy_notifications=bool(enable_buys),
-            enable_daily_summary=bool(enable_summary),
+            enable_daily_overview=bool(enable_overview),
             enable_undercut_notifications=bool(enable_undercut),
             enable_contract_notifications=bool(enable_contracts),
             notification_batch_threshold=batch_threshold,
@@ -140,7 +140,7 @@ def setup_database():
                     wallet_balance_threshold BIGINT DEFAULT 0,
                     enable_sales_notifications BOOLEAN DEFAULT TRUE,
                     enable_buy_notifications BOOLEAN DEFAULT TRUE,
-                    enable_daily_summary BOOLEAN DEFAULT TRUE,
+                    enable_daily_overview BOOLEAN DEFAULT TRUE,
                     enable_undercut_notifications BOOLEAN DEFAULT TRUE,
                     notification_batch_threshold INTEGER DEFAULT 3,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
@@ -150,6 +150,13 @@ def setup_database():
             """)
 
             # Migration: Add enable_undercut_notifications column if it doesn't exist
+            # Migration: Rename enable_daily_summary to enable_daily_overview
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_daily_summary'")
+            if cursor.fetchone():
+                logging.info("Applying migration: Renaming 'enable_daily_summary' to 'enable_daily_overview'...")
+                cursor.execute("ALTER TABLE characters RENAME COLUMN enable_daily_summary TO enable_daily_overview;")
+                logging.info("Migration for 'enable_daily_overview' complete.")
+
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_undercut_notifications'")
             if not cursor.fetchone():
                 logging.info("Applying migration: Adding 'enable_undercut_notifications' column to characters table...")
@@ -735,7 +742,7 @@ def get_characters_for_user(telegram_user_id):
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, enable_undercut_notifications,
+                    enable_daily_overview, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
@@ -745,7 +752,7 @@ def get_characters_for_user(telegram_user_id):
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
+                    enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at
                 ) = row
 
                 user_characters.append(Character(
@@ -755,7 +762,7 @@ def get_characters_for_user(telegram_user_id):
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
-                    enable_daily_summary=bool(enable_summary),
+                    enable_daily_overview=bool(enable_overview),
                     enable_undercut_notifications=bool(enable_undercut),
                     enable_contract_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
@@ -777,7 +784,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, enable_undercut_notifications,
+                    enable_daily_overview, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at
                 FROM characters WHERE character_id = %s
             """, (character_id,))
@@ -788,7 +795,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
+                    enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at
                 ) = row
 
                 character = Character(
@@ -798,7 +805,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
-                    enable_daily_summary=bool(enable_summary),
+                    enable_daily_overview=bool(enable_overview),
                     enable_undercut_notifications=bool(enable_undercut),
                     enable_contract_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
@@ -838,7 +845,7 @@ def update_character_notification_setting(character_id: int, setting: str, value
     allowed_settings = {
         "sales": "enable_sales_notifications",
         "buys": "enable_buy_notifications",
-        "summary": "enable_daily_summary",
+        "overview": "enable_daily_overview",
         "undercut": "enable_undercut_notifications",
         "contracts": "enable_contract_notifications"
     }
@@ -2480,9 +2487,9 @@ async def master_order_history_poll(application: Application):
         await asyncio.sleep(min_delay)
 
 
-def _calculate_summary_data(character: Character) -> dict:
-    """Fetches all necessary data from the local DB and calculates summary statistics."""
-    logging.info(f"Calculating summary data for {character.name} from local database...")
+def _calculate_overview_data(character: Character) -> dict:
+    """Fetches all necessary data from the local DB and calculates overview statistics."""
+    logging.info(f"Calculating overview data for {character.name} from local database...")
 
     now = datetime.now(timezone.utc)
     one_day_ago = now - timedelta(days=1)
@@ -2492,7 +2499,7 @@ def _calculate_summary_data(character: Character) -> dict:
     full_journal = get_full_wallet_journal_from_db(character.id)
     fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
 
-    # --- 24-Hour Summary ---
+    # --- 24-Hour Overview ---
     sales_past_24_hours = [
         tx for tx in all_transactions if not tx.get('is_buy') and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago
@@ -2531,7 +2538,7 @@ def _calculate_summary_data(character: Character) -> dict:
         elif event['type'] == 'fee':
             profit_24h -= abs(event['data']['amount'])
 
-    # --- Last 30 Days Summary ---
+    # --- Last 30 Days Overview ---
     thirty_days_ago = now - timedelta(days=30)
     sales_last_30_days = [
         tx for tx in all_transactions if not tx.get('is_buy') and
@@ -2591,22 +2598,22 @@ def _calculate_summary_data(character: Character) -> dict:
     }
 
 
-def _format_summary_message(summary_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
-    """Formats the summary data into a message string and keyboard."""
-    now = summary_data['now']
+def _format_overview_message(overview_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
+    """Formats the overview data into a message string and keyboard."""
+    now = overview_data['now']
     message = (
-        f"📊 *Market Summary ({character.name})*\n"
+        f"📊 *Market Overview ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
-        f"*Wallet Balance:* `{summary_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
+        f"*Wallet Balance:* `{overview_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
         f"*Last Day:*\n"
-        f"  - Total Sales Value: `{summary_data['total_sales_24h']:,.2f} ISK`\n"
-        f"  - Total Fees (Broker + Tax): `{summary_data['total_fees_24h']:,.2f} ISK`\n"
-        f"  - **Profit (FIFO):** `{summary_data['profit_24h']:,.2f} ISK`\n\n"
+        f"  - Total Sales Value: `{overview_data['total_sales_24h']:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_24h']:,.2f} ISK`\n"
+        f"  - **Profit (FIFO):** `{overview_data['profit_24h']:,.2f} ISK`\n\n"
         f"---\n\n"
         f"🗓️ *Last 30 Days:*\n"
-        f"  - Total Sales Value: `{summary_data['total_sales_30_days']:,.2f} ISK`\n"
-        f"  - Total Fees (Broker + Tax): `{summary_data['total_fees_30_days']:,.2f} ISK`\n"
-        f"  - **Profit (FIFO):** `{summary_data['profit_30_days']:,.2f} ISK`"
+        f"  - Total Sales Value: `{overview_data['total_sales_30_days']:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_30_days']:,.2f} ISK`\n"
+        f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`"
     )
 
     # --- Chart Buttons ---
@@ -2624,8 +2631,8 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
     return message, reply_markup
 
 
-async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
-    """Handles the interactive flow of generating and sending a summary message."""
+async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
+    """Handles the interactive flow of generating and sending a overview message."""
     if await check_and_handle_pending_deletion(update, context, character):
         return
     target_chat_id = update.effective_chat.id
@@ -2634,21 +2641,21 @@ async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAU
 
     if query:
         # If we came from a button, edit that message.
-        await query.edit_message_text(text=f"⏳ Generating summary for {character.name}...")
+        await query.edit_message_text(text=f"⏳ Generating overview for {character.name}...")
         message_id = query.message.message_id
     else:
-        # Otherwise, send a new message (e.g., for scheduled summaries).
-        sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating summary for {character.name}...")
+        # Otherwise, send a new message (e.g., for scheduled overviews).
+        sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating overview for {character.name}...")
         message_id = sent_message.message_id
 
     try:
         # Run the synchronous data calculation in a thread to avoid blocking
-        summary_data = await asyncio.to_thread(_calculate_summary_data, character)
-        message, reply_markup = _format_summary_message(summary_data, character)
+        overview_data = await asyncio.to_thread(_calculate_overview_data, character)
+        message, reply_markup = _format_overview_message(overview_data, character)
 
         # Add a contextual back button based on how many characters the user has
         user_characters = get_characters_for_user(update.effective_user.id)
-        back_button_callback = "summary" if len(user_characters) > 1 else "start_command"
+        back_button_callback = "overview" if len(user_characters) > 1 else "start_command"
 
         new_keyboard = list(reply_markup.inline_keyboard) # Create a mutable copy
         new_keyboard.append([InlineKeyboardButton("« Back", callback_data=back_button_callback)])
@@ -2664,30 +2671,30 @@ async def _generate_and_send_summary(update: Update, context: ContextTypes.DEFAU
             reply_markup=new_reply_markup
         )
     except Exception as e:
-        logging.error(f"Failed to generate and send summary for {character.name}: {e}", exc_info=True)
+        logging.error(f"Failed to generate and send overview for {character.name}: {e}", exc_info=True)
         await context.bot.edit_message_text(
             chat_id=target_chat_id,
             message_id=message_id,
-            text=f"❌ An error occurred while generating the summary for {character.name}."
+            text=f"❌ An error occurred while generating the overview for {character.name}."
         )
 
 
-async def run_daily_summary_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
-    """Calculates and sends the daily summary for a single character (for scheduled jobs)."""
-    logging.info(f"Running scheduled daily summary for {character.name}...")
+async def run_daily_overview_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
+    """Calculates and sends the daily overview for a single character (for scheduled jobs)."""
+    logging.info(f"Running scheduled daily overview for {character.name}...")
     try:
-        summary_data = _calculate_summary_data(character)
-        message, reply_markup = _format_summary_message(summary_data, character)
+        overview_data = await asyncio.to_thread(_calculate_overview_data, character)
+        message, reply_markup = _format_overview_message(overview_data, character)
 
-        # For scheduled summaries, always add a simple back button to the main menu
+        # For scheduled overviews, always add a simple back button to the main menu
         new_keyboard = list(reply_markup.inline_keyboard)
         new_keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
         new_reply_markup = InlineKeyboardMarkup(new_keyboard)
 
         await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=new_reply_markup)
-        logging.info(f"Daily summary sent for {character.name}.")
+        logging.info(f"Daily overview sent for {character.name}.")
     except Exception as e:
-        logging.error(f"Failed to send daily summary for {character.name}: {e}", exc_info=True)
+        logging.error(f"Failed to send daily overview for {character.name}: {e}", exc_info=True)
 
 
 async def master_orders_poll(application: Application):
@@ -3047,29 +3054,29 @@ async def master_contracts_poll(application: Application):
         await asyncio.sleep(min_delay)
 
 
-async def master_daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def master_daily_overview_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Runs once per day and sends a summary to all characters who have it enabled.
+    Runs once per day and sends a overview to all characters who have it enabled.
     """
-    logging.info("Starting daily summary job for all characters.")
-    characters_to_summarize = [c for c in CHARACTERS if c.enable_daily_summary]
+    logging.info("Starting daily overview job for all characters.")
+    characters_to_overview = [c for c in CHARACTERS if c.enable_daily_overview]
 
-    if not characters_to_summarize:
-        logging.info("No characters have daily summary enabled. Skipping.")
+    if not characters_to_overview:
+        logging.info("No characters have daily overview enabled. Skipping.")
         return
 
-    logging.info(f"Found {len(characters_to_summarize)} characters to summarize.")
-    for character in characters_to_summarize:
+    logging.info(f"Found {len(characters_to_overview)} characters to overview.")
+    for character in characters_to_overview:
         if get_character_deletion_status(character.id):
-            logging.info(f"Skipping daily summary for {character.name} because they are pending deletion.")
+            logging.info(f"Skipping daily overview for {character.name} because they are pending deletion.")
             continue
         try:
-            await run_daily_summary_for_character(character, context)
+            await run_daily_overview_for_character(character, context)
             # Add a small delay to avoid rate-limiting issues
             await asyncio.sleep(1)
         except Exception as e:
-            logging.error(f"Error running daily summary for {character.name}: {e}")
-    logging.info("Finished daily summary job.")
+            logging.error(f"Error running daily overview for {character.name}: {e}")
+    logging.info("Finished daily overview job.")
 
 def add_historical_transactions_to_db(character_id: int, transactions: list):
     """Adds a list of transaction records to the historical_transactions table."""
@@ -3312,7 +3319,7 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                     ],
                     [
                         InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
-                        InlineKeyboardButton("📊 Request Summary", callback_data="summary")
+                        InlineKeyboardButton("📊 Request Overview", callback_data="overview")
                     ],
                     [
                         InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
@@ -3386,7 +3393,7 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("🛒 View Buys", callback_data="buys")
                 ],
                 [
-                    InlineKeyboardButton("📊 Request Summary", callback_data="summary"),
+                    InlineKeyboardButton("📊 Request Overview", callback_data="overview"),
                     InlineKeyboardButton("⚙️ Settings", callback_data="settings")
                 ],
                 [
@@ -3433,7 +3440,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
         [
             InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
-            InlineKeyboardButton("📊 Request Summary", callback_data="summary")
+                        InlineKeyboardButton("📊 Request Overview", callback_data="overview")
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
@@ -3582,9 +3589,9 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
-async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def overview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Manually triggers the daily summary report. Prompts for character
+    Manually triggers the daily overview report. Prompts for character
     selection if the user has multiple characters via an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
@@ -3597,13 +3604,13 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if len(user_characters) == 1:
-        await _generate_and_send_summary(update, context, user_characters[0])
+        await _generate_and_send_overview(update, context, user_characters[0])
     else:
-        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"summary_char_{char.id}")] for char in user_characters]
-        keyboard.append([InlineKeyboardButton("All Characters", callback_data="summary_char_all")])
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"overview_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("All Characters", callback_data="overview_char_all")])
         keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        message_text = "Please select a character (or all) to generate a summary for:"
+        message_text = "Please select a character (or all) to generate an overview for:"
 
         if update.callback_query:
             await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
@@ -4075,7 +4082,7 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         '30days': "Last 30 Days", 'alltime': "All Time"
     }
     caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-    keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
+    keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_back_{character_id}")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if not (chart_type == 'alltime' and is_dirty):
@@ -4161,8 +4168,8 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     context.job_queue.run_once(generate_chart_job, when=1, data=job_data, chat_id=query.message.chat_id)
 
 
-async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Back to Summary' button press by deleting the chart and regenerating the summary."""
+async def back_to_overview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the 'Back to Overview' button press by deleting the chart and regenerating the overview."""
     query = update.callback_query
     await query.answer()
 
@@ -4180,9 +4187,9 @@ async def back_to_summary_handler(update: Update, context: ContextTypes.DEFAULT_
     # Delete the chart message, as we cannot edit a media message into a text message.
     await query.message.delete()
 
-    # Regenerate the summary as a new message.
+    # Regenerate the overview as a new message.
     # We create a new Update object without a callback_query to force sending a new message.
-    await _generate_and_send_summary(Update(update.update_id, message=query.message), context, character)
+    await _generate_and_send_overview(Update(update.update_id, message=query.message), context, character)
 
 
 async def _select_character_for_historical_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4451,7 +4458,7 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton(f"Sales Notifications: {'✅ On' if character.enable_sales_notifications else '❌ Off'}", callback_data=f"toggle_sales_{character.id}")],
         [InlineKeyboardButton(f"Buy Notifications: {'✅ On' if character.enable_buy_notifications else '❌ Off'}", callback_data=f"toggle_buys_{character.id}")],
         [InlineKeyboardButton(f"Contract Notifications: {'✅ On' if character.enable_contract_notifications else '❌ Off'}", callback_data=f"toggle_contracts_{character.id}")],
-        [InlineKeyboardButton(f"Daily Summary: {'✅ On' if character.enable_daily_summary else '❌ Off'}", callback_data=f"toggle_summary_{character.id}")],
+        [InlineKeyboardButton(f"Daily Overview: {'✅ On' if character.enable_daily_overview else '❌ Off'}", callback_data=f"toggle_overview_{character.id}")],
         [InlineKeyboardButton(f"Undercut Notifications: {'✅ On' if character.enable_undercut_notifications else '❌ Off'}", callback_data=f"toggle_undercut_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
@@ -5387,7 +5394,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == "start_command": await start_command(update, context)
     elif data == "balance": await balance_command(update, context)
     elif data == "open_orders": await open_orders_command(update, context)
-    elif data == "summary": await summary_command(update, context)
+    elif data == "overview": await overview_command(update, context)
     elif data == "sales": await sales_command(update, context)
     elif data == "buys": await buys_command(update, context)
     elif data == "settings": await settings_command(update, context)
@@ -5414,21 +5421,21 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         chars_to_query = get_characters_for_user(user_id) if char_id_str == "all" else [get_character_by_id(int(char_id_str))]
         await _show_balance_for_characters(update, context, chars_to_query)
 
-    elif data.startswith("summary_char_"):
+    elif data.startswith("overview_char_"):
         user_id = update.effective_user.id
         char_id_str = data.split('_')[-1]
         if char_id_str == "all":
-            # If "All" is selected, delete the menu and send new messages for each summary.
+            # If "All" is selected, delete the menu and send new messages for each overview.
             await query.message.delete()
             chars_to_query = get_characters_for_user(user_id)
             for char in chars_to_query:
                 # We pass 'None' for the callback_query part of the update to force new messages
-                await _generate_and_send_summary(Update(update.update_id, message=query.message), context, char)
+                await _generate_and_send_overview(Update(update.update_id, message=query.message), context, char)
                 await asyncio.sleep(1) # Be nice to Telegram's API
         else:
             # If a single character is selected, edit the existing message.
             char_to_query = get_character_by_id(int(char_id_str))
-            await _generate_and_send_summary(update, context, char_to_query)
+            await _generate_and_send_overview(update, context, char_to_query)
 
     # --- Historical Transaction Lists (Sales & Buys) ---
     elif data.startswith("history_list_sale_"):
@@ -5475,7 +5482,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         _, setting, char_id_str = data.split('_')
         char_id = int(char_id_str)
         character = get_character_by_id(char_id)
-        current_value = getattr(character, f"enable_{setting}_notifications" if setting != 'summary' else "enable_daily_summary")
+        current_value = getattr(character, f"enable_{setting}_notifications" if setting != 'overview' else "enable_daily_overview")
         update_character_notification_setting(char_id, setting, not current_value)
         load_characters_from_db() # Reload to get fresh data
         await _show_notification_settings(update, context, get_character_by_id(char_id)) # Refresh the menu
@@ -5536,8 +5543,8 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     # --- Charting Callbacks ---
     elif data.startswith("chart_"):
         await chart_callback_handler(update, context)
-    elif data.startswith("summary_back_"):
-        await back_to_summary_handler(update, context)
+    elif data.startswith("overview_back_"):
+        await back_to_overview_handler(update, context)
 
     elif data == "noop":
         return # Do nothing, it's just a label

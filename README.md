@@ -4,7 +4,7 @@
 >
 > Don't want to host the bot yourself? You can use the public instance for free by sending a message to **[@Evegametraderbot](https://t.me/Evegametraderbot)** on Telegram!
 
-This is a comprehensive, multi-user Telegram bot designed to provide EVE Online players with detailed, real-time notifications and daily summaries of their market activities. The bot is fully containerized with Docker for easy deployment and uses a persistent PostgreSQL database to ensure data integrity across restarts.
+This is a comprehensive, multi-user Telegram bot designed to provide EVE Online players with detailed, real-time notifications and daily overviews of their market activities. The bot is fully containerized with Docker for easy deployment and uses a persistent PostgreSQL database to ensure data integrity across restarts.
 
 ## Features
 
@@ -21,9 +21,9 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
   - **Live Undercut Notifications**: Get notified the moment one of your orders is undercut. The bot monitors both regional markets and player-owned structures. To prevent spam, notifications are only sent once when an order's status changes from competitive to undercut. This can be toggled in the settings.
   - **Wallet Balance**: All notifications include your character's current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
-- **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
+- **Comprehensive Daily Overview**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
 - **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot displays your character's current order capacity (e.g., "152 / 305 orders") and provides undercut alerts.
-- **Public Character Info**: View a summary of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
+- **Public Character Info**: View an overview of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram with a single button press. The bot offers several timeframes: "Last Day," "Last 7 Days," "Last 30 Days," and "All Time."
   - **Advanced Visualization**: Charts display profit as a cumulative area graph (showing gains and losses over the period) while sales and fees are shown as non-cumulative bar graphs for easy comparison.
@@ -127,7 +127,7 @@ All interaction with the bot is handled through a clean, inline button-based men
     -   **📈 View Sales**: Displays a detailed, paginated history of all sales, including profit and fee calculations.
     -   **🛒 View Buys**: Displays a detailed, paginated history of all buy transactions.
     -   **📝 View Contracts**: Shows a paginated list of all outstanding contracts.
-    -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
+    -   **📊 Request Overview**: Manually triggers the daily overview report, which includes on-demand performance charts.
     -   **⚙️ Settings**: Configure per-character settings like wallet balance alerts, notification preferences, and view public character info.
     -   **➕ Add Character**: Starts the process of adding a new character.
     -   **🗑️ Remove Character**: Schedules a character and all their associated data for permanent deletion after a one-hour grace period. This action can be cancelled by re-adding the character within the hour.
@@ -161,9 +161,9 @@ All interaction with the bot is handled through a clean, inline button-based men
   `> ❗️ Undercut! Best buy: 9.95`
 ```
 
-**Daily Summary:**
+**Daily Overview:**
 ```
-📊 *Market Summary (Character Name)*
+📊 *Market Overview (Character Name)*
 _2025-09-26 18:00 UTC_
 
 *Wallet Balance:* `1,234,567,890.12 ISK`
