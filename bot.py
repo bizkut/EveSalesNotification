@@ -5300,23 +5300,20 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
     location_ids = [order['location_id'] for order in paginated_orders]
 
-    # Also fetch character's current location for jump calculations
-    char_location_info = await asyncio.to_thread(get_character_location, character)
+    # Fetch character's current location and all undercut statuses for them
+    results = await asyncio.gather(
+        asyncio.to_thread(get_character_location, character),
+        asyncio.to_thread(get_undercut_statuses, character.id)
+    )
+    char_location_info, all_undercut_statuses = results
     character_location_id = char_location_info.get('station_id') or char_location_info.get('structure_id') if char_location_info else None
 
-    # Concurrently fetch names and undercut statuses from the database
-    results = await asyncio.gather(
-        asyncio.to_thread(get_undercut_statuses, character.id),
-        # We need to resolve competitor locations as well, so we gather them first
-        asyncio.to_thread(lambda: [
-            status.get('competitor_location_id')
-            for status in get_undercut_statuses(character.id).values()
-            if status.get('competitor_location_id')
-        ])
-    )
-    all_undercut_statuses, competitor_location_ids = results
-
-    # Now resolve all names needed for the page
+    # Now, gather all the IDs we need to resolve into names
+    competitor_location_ids = [
+        status.get('competitor_location_id')
+        for status in all_undercut_statuses.values()
+        if status.get('competitor_location_id')
+    ]
     ids_to_resolve = list(set(type_ids_on_page + location_ids + competitor_location_ids))
     id_to_name = await asyncio.to_thread(get_names_from_ids, ids_to_resolve, character)
 
