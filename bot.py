@@ -13,9 +13,6 @@ from telegram.error import BadRequest
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 import io
-import matplotlib
-matplotlib.use('Agg')  # Use a non-interactive backend
-import matplotlib.pyplot as plt
 import calendar
 from PIL import Image
 import psycopg2
@@ -3942,6 +3939,9 @@ def generate_hourly_chart(character_id: int):
     Generates a chart with cumulative profit (area) and hourly sales/fees (bars)
     for the last 24 hours, optimized with daily profit summaries.
     """
+    import matplotlib
+    matplotlib.use('Agg')  # Use a non-interactive backend
+    import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
     if not character: return None
 
@@ -4071,6 +4071,9 @@ def generate_last_day_chart(character_id: int):
     """
     Generates a chart for the last 24 hours, processing events chronologically to ensure accuracy.
     """
+    import matplotlib
+    matplotlib.use('Agg')  # Use a non-interactive backend
+    import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
     if not character: return None
 
@@ -4177,6 +4180,9 @@ def generate_last_day_chart(character_id: int):
 
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     """Helper to generate charts with a daily breakdown (last 7/30 days)."""
+    import matplotlib
+    matplotlib.use('Agg')  # Use a non-interactive backend
+    import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
     if not character: return None
 
@@ -4287,6 +4293,9 @@ def generate_last_30_days_chart(character_id: int):
 
 def generate_all_time_chart(character_id: int):
     """Generates a monthly breakdown chart for the character's entire history."""
+    import matplotlib
+    matplotlib.use('Agg')  # Use a non-interactive backend
+    import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
     if not character: return None
 
