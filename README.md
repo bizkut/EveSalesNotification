@@ -26,9 +26,25 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The summary now includes inline buttons to create an hourly (last 24h), daily (current month), and monthly (for all historical years) performance chart. After viewing a chart, you can easily return to the summary view using the "Back to Summary" button.
 - **Highly Configurable**: All major settings (wallet alerts, notification types, etc.) are configurable on a per-character basis via the bot's menu.
-- **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
-- **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's entire transaction history to ensure profit calculations are accurate from day one. To prevent a flood of old alerts, a 1-hour grace period begins after the initial historical data sync is complete. During this time, no new notifications (sales, buys, cancellations, or expirations) will be sent. This ensures that only market activity occurring after the sync and grace period will trigger an alert.
-- **Graceful Deletion with 1-Hour Grace Period**: To prevent accidental data loss and API abuse, character deletion is now a two-step process. When you remove a character, they are "soft-deleted" and scheduled for permanent deletion in one hour. If you re-add the character within this grace period, the deletion is cancelled, and monitoring resumes instantly without needing to re-fetch all historical data. If you do nothing, all data is permanently wiped after the hour is up.
+- **Robust & Persistent**: Employs a sophisticated caching strategy using a PostgreSQL database. Background polling tasks continuously fetch data from ESI, and user-facing commands read from this fast, local cache. This minimizes API calls, prevents duplicate notifications, and ensures the bot remains responsive even during ESI slowdowns.
+- **Intelligent Seeding & Backfill**: On first add, a character's entire transaction history is seeded to ensure profit calculations are accurate from day one. To prevent a flood of old alerts, a 1-hour grace period begins after the initial historical data sync is complete. During this time, no new notifications (sales, buys, cancellations, or expirations) will be sent. This ensures that only market activity occurring after the sync and grace period will trigger an alert.
+- **Graceful Deletion with 1-Hour Grace Period**: To prevent accidental data loss, character deletion is a two-step process. When you remove a character, they are "soft-deleted" and scheduled for permanent deletion in one hour. If you re-add the character within this grace period, the deletion is cancelled, and monitoring resumes instantly without needing to re-fetch all historical data. If you do nothing, all data is permanently wiped after the hour is up.
+
+---
+
+## Architecture
+
+The bot is designed for efficiency and resilience, relying on a combination of background polling tasks and a database cache to provide a responsive user experience while minimizing direct ESI API calls.
+
+-   **Background Polling**: The bot runs several continuous, asynchronous background tasks:
+    -   **`master_orders_poll`**: Fetches a character's current open market orders. This data is used for undercut notifications and to provide a cached view for the "Open Orders" command.
+    -   **`master_wallet_transaction_poll`**: Fetches the latest wallet transactions to identify new sales and buys for notifications and historical logging.
+    -   **`master_wallet_journal_poll`**: Fetches the latest wallet journal entries, which are crucial for accurately calculating taxes and broker's fees.
+    -   **`master_order_history_poll`**: Fetches historical order data to detect and notify users about cancelled or expired orders.
+-   **Database Caching**: All data fetched from the ESI API is stored in a PostgreSQL database.
+    -   **Historical Data**: Wallet transactions and journal entries are stored permanently, creating a complete financial history for each character.
+    -   **Snapshot Data**: Open market orders are stored as a snapshot. The `master_orders_poll` task ensures this table is always a direct reflection of the character's current open orders on the ESI.
+-   **User Commands**: When a user requests data (e.g., "View Sales" or "Open Orders"), the bot reads directly from the fast, local database cache instead of making a new ESI API call. This makes the bot highly responsive and less susceptible to ESI API latency or downtime.
 
 ---
 
