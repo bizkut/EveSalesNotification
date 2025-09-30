@@ -372,6 +372,7 @@ def setup_database():
                     character_id INTEGER NOT NULL,
                     is_undercut BOOLEAN NOT NULL,
                     competitor_price NUMERIC(17, 2),
+                    competitor_location_id BIGINT,
                     PRIMARY KEY (order_id, character_id)
                 )
             """)
@@ -382,6 +383,13 @@ def setup_database():
                 logging.info("Applying migration: Adding 'competitor_price' column to undercut_statuses table...")
                 cursor.execute("ALTER TABLE undercut_statuses ADD COLUMN competitor_price NUMERIC(17, 2);")
                 logging.info("Migration for 'competitor_price' complete.")
+
+            # Migration: Add competitor_location_id column to undercut_statuses if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'undercut_statuses' AND column_name = 'competitor_location_id'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'competitor_location_id' column to undercut_statuses table...")
+                cursor.execute("ALTER TABLE undercut_statuses ADD COLUMN competitor_location_id BIGINT;")
+                logging.info("Migration for 'competitor_location_id' complete.")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chart_cache (
@@ -423,6 +431,15 @@ def setup_database():
                     location_id BIGINT PRIMARY KEY,
                     system_id INTEGER,
                     region_id INTEGER
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS jump_distances (
+                    origin_system_id INTEGER NOT NULL,
+                    destination_system_id INTEGER NOT NULL,
+                    jumps INTEGER NOT NULL,
+                    PRIMARY KEY (origin_system_id, destination_system_id)
                 )
             """)
 
@@ -1201,46 +1218,47 @@ def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes):
 
 def get_undercut_statuses(character_id: int) -> dict[int, dict]:
     """
-    Retrieves the last known undercut status and competitor price for all of a character's orders.
-    Returns a dict mapping order_id to {'is_undercut': bool, 'competitor_price': float|None}.
+    Retrieves the last known undercut status, competitor price, and competitor location for all of a character's orders.
+    Returns a dict mapping order_id to {'is_undercut': bool, 'competitor_price': float|None, 'competitor_location_id': int|None}.
     """
     conn = database.get_db_connection()
     statuses = {}
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT order_id, is_undercut, competitor_price FROM undercut_statuses WHERE character_id = %s",
+                "SELECT order_id, is_undercut, competitor_price, competitor_location_id FROM undercut_statuses WHERE character_id = %s",
                 (character_id,)
             )
             for row in cursor.fetchall():
-                order_id, is_undercut, competitor_price = row
+                order_id, is_undercut, competitor_price, competitor_location_id = row
                 statuses[order_id] = {
                     'is_undercut': is_undercut,
                     # Convert Decimal from DB to float, or keep it as None
-                    'competitor_price': float(competitor_price) if competitor_price is not None else None
+                    'competitor_price': float(competitor_price) if competitor_price is not None else None,
+                    'competitor_location_id': competitor_location_id
                 }
     finally:
         database.release_db_connection(conn)
     return statuses
 
 def update_undercut_statuses(character_id: int, statuses: list[dict]):
-    """Inserts or updates the undercut status and competitor price for a list of orders."""
+    """Inserts or updates the undercut status, competitor price, and location for a list of orders."""
     if not statuses:
         return
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # `statuses` is a list of dicts: [{'order_id': X, 'is_undercut': Y, 'competitor_price': Z}, ...]
-            # The competitor_price can be None.
+            # `statuses` is a list of dicts: [{'order_id': X, 'is_undercut': Y, 'competitor_price': Z, 'competitor_location_id': A}, ...]
             data_to_insert = [
-                (s['order_id'], character_id, s['is_undercut'], s.get('competitor_price')) for s in statuses
+                (s['order_id'], character_id, s['is_undercut'], s.get('competitor_price'), s.get('competitor_location_id')) for s in statuses
             ]
             upsert_query = """
-                INSERT INTO undercut_statuses (order_id, character_id, is_undercut, competitor_price)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO undercut_statuses (order_id, character_id, is_undercut, competitor_price, competitor_location_id)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (order_id, character_id) DO UPDATE
                 SET is_undercut = EXCLUDED.is_undercut,
-                    competitor_price = EXCLUDED.competitor_price;
+                    competitor_price = EXCLUDED.competitor_price,
+                    competitor_location_id = EXCLUDED.competitor_location_id;
             """
             cursor.executemany(upsert_query, data_to_insert)
             conn.commit()
@@ -1288,6 +1306,43 @@ def save_location_to_cache(location_id: int, system_id: int, region_id: int):
             cursor.execute(
                 "INSERT INTO location_cache (location_id, system_id, region_id) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
                 (location_id, system_id, region_id)
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+
+def get_jump_distance_from_db(origin_system_id: int, destination_system_id: int) -> int | None:
+    """Retrieves a cached jump distance from the database."""
+    conn = database.get_db_connection()
+    jumps = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT jumps FROM jump_distances WHERE origin_system_id = %s AND destination_system_id = %s",
+                (origin_system_id, destination_system_id)
+            )
+            row = cursor.fetchone()
+            if row:
+                jumps = row[0]
+    finally:
+        database.release_db_connection(conn)
+    return jumps
+
+
+def save_jump_distance_to_db(origin_system_id: int, destination_system_id: int, jumps: int):
+    """Saves a jump distance to the database cache."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Insert for both directions to optimize lookups
+            cursor.execute(
+                """
+                INSERT INTO jump_distances (origin_system_id, destination_system_id, jumps)
+                VALUES (%s, %s, %s), (%s, %s, %s)
+                ON CONFLICT (origin_system_id, destination_system_id) DO NOTHING
+                """,
+                (origin_system_id, destination_system_id, jumps, destination_system_id, origin_system_id, jumps)
             )
             conn.commit()
     finally:
@@ -1745,6 +1800,13 @@ def get_character_online_status(character: Character):
     url = f"https://esi.evetech.net/v3/characters/{character.id}/online/"
     return make_esi_request(url, character=character, force_revalidate=True)
 
+
+def get_character_location(character: Character):
+    """Fetches a character's current location from ESI."""
+    if not character: return None
+    url = f"https://esi.evetech.net/v2/characters/{character.id}/location/"
+    return make_esi_request(url, character=character, force_revalidate=True)
+
 def get_character_public_info(character_id: int):
     """Fetches public character information from ESI."""
     url = f"https://esi.evetech.net/v5/characters/{character_id}/"
@@ -1785,6 +1847,94 @@ def get_structure_info(character: Character, structure_id: int):
         return None
     url = f"https://esi.evetech.net/v2/universe/structures/{structure_id}/"
     return make_esi_request(url, character=character)
+
+
+def get_route(origin_system_id: int, destination_system_id: int):
+    """Fetches the route between two solar systems from ESI."""
+    url = f"https://esi.evetech.net/v1/route/{origin_system_id}/{destination_system_id}/"
+    return make_esi_request(url)
+
+
+async def _resolve_location_to_system_id(location_id: int, character: Character) -> int | None:
+    """
+    Resolves a location_id (station or structure) to a solar_system_id.
+    Uses the database cache first, then falls back to ESI.
+    """
+    # 1. Check our own location_cache first
+    cached_location = await asyncio.to_thread(get_location_from_cache, location_id)
+    if cached_location and cached_location.get('system_id'):
+        return cached_location['system_id']
+
+    # 2. If not in cache, resolve via ESI
+    system_id = None
+    region_id = None # We'll try to get this to populate the cache fully
+
+    # Resolve for structures (requires auth)
+    if location_id > 10000000000:
+        structure_info = await asyncio.to_thread(get_structure_info, character, location_id)
+        if structure_info:
+            system_id = structure_info.get('solar_system_id')
+    # Resolve for NPC stations (public)
+    else:
+        station_info = await asyncio.to_thread(get_station_info, location_id)
+        if station_info:
+            system_id = station_info.get('system_id')
+
+    # Get region from system to fully populate the cache item
+    if system_id:
+        system_info = await asyncio.to_thread(get_system_info, system_id)
+        if system_info:
+            constellation_id = system_info.get('constellation_id')
+            if constellation_id:
+                constellation_info = await asyncio.to_thread(get_constellation_info, constellation_id)
+                if constellation_info:
+                    region_id = constellation_info.get('region_id')
+
+    # 3. Save to cache if we successfully resolved everything
+    if location_id and system_id and region_id:
+        await asyncio.to_thread(save_location_to_cache, location_id, system_id, region_id)
+
+    return system_id
+
+
+async def get_jump_distance(origin_location_id: int, destination_location_id: int, character: Character) -> int | None:
+    """
+    Calculates the jump distance between two locations (stations or structures).
+    Uses a database cache to store and retrieve system-to-system jump counts.
+    """
+    # Step 1: Resolve both locations to their solar system IDs
+    origin_system_id = await _resolve_location_to_system_id(origin_location_id, character)
+    destination_system_id = await _resolve_location_to_system_id(destination_location_id, character)
+
+    if not origin_system_id or not destination_system_id:
+        logging.warning(f"Could not resolve one or both system IDs for jump calculation: {origin_location_id} -> {destination_location_id}")
+        return None
+
+    if origin_system_id == destination_system_id:
+        return 0
+
+    # Step 2: Check the database cache for the jump distance
+    cached_jumps = await asyncio.to_thread(get_jump_distance_from_db, origin_system_id, destination_system_id)
+    if cached_jumps is not None:
+        logging.debug(f"Found cached jump distance from {origin_system_id} to {destination_system_id}: {cached_jumps} jumps.")
+        return cached_jumps
+
+    # Step 3: If not cached, calculate it via ESI
+    logging.info(f"No cached jump distance found. Calculating route from {origin_system_id} to {destination_system_id} via ESI.")
+    route = await asyncio.to_thread(get_route, origin_system_id, destination_system_id)
+
+    if route is None:
+        logging.error(f"Failed to get route from ESI for {origin_system_id} -> {destination_system_id}")
+        return None
+
+    # ESI returns a list of system IDs in the route. Number of jumps is len - 1.
+    jumps = len(route) - 1
+
+    # Step 4: Save the newly calculated distance to the cache for future use
+    await asyncio.to_thread(save_jump_distance_to_db, origin_system_id, destination_system_id, jumps)
+    logging.info(f"Calculated and cached {jumps} jumps from {origin_system_id} to {destination_system_id}.")
+
+    return jumps
 
 
 def get_cached_chart(chart_key: str):
@@ -2967,13 +3117,16 @@ async def master_orders_poll(application: Application):
                                 competitor_order = best_regional_sell
 
                     competitor_price = None
+                    competitor_location_id = None
                     if is_undercut and competitor_order:
                         competitor_price = competitor_order['price']
+                        competitor_location_id = competitor_order['location_id']
 
                     new_statuses_to_update.append({
                         'order_id': order['order_id'],
                         'is_undercut': is_undercut,
-                        'competitor_price': competitor_price
+                        'competitor_price': competitor_price,
+                        'competitor_location_id': competitor_location_id
                     })
 
                     was_undercut = previous_statuses.get(order['order_id'], {}).get('is_undercut', False)
@@ -3001,13 +3154,20 @@ async def master_orders_poll(application: Application):
 
                         competitor_loc_name = id_to_name.get(competitor['location_id'], "an unknown location")
 
+                        # For notifications, we'll calculate jumps from the order's location, as the character may be offline.
+                        jumps = await get_jump_distance(my_order['location_id'], competitor['location_id'], character)
+
+                        location_line = f"`{competitor_loc_name}`"
+                        if jumps is not None:
+                            location_line += f" ({jumps} jumps)"
+
                         message = (
                             f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
                             f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
                             f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
                             f"  • **Your Location:** `{my_location_name}`\n"
                             f"  • **Best Market Price:** `{competitor['price']:,.2f}` ISK\n"
-                            f"  • **Best Price Location:** `{competitor_loc_name}`\n\n"
+                            f"  • **Best Price Location:** {location_line}\n\n"
                             f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`"
                         )
                         await send_telegram_message(context, message, chat_id=character.telegram_user_id)
@@ -5136,17 +5296,29 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     end_index = start_index + items_per_page
     paginated_orders = filtered_orders[start_index:end_index]
 
-    # --- Data Resolution (Names & Undercut Status) ---
+    # --- Data Resolution (Names, Undercut Status, Character Location) ---
     type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
     location_ids = [order['location_id'] for order in paginated_orders]
-    ids_to_resolve = list(set(type_ids_on_page + location_ids))
+
+    # Also fetch character's current location for jump calculations
+    char_location_info = await asyncio.to_thread(get_character_location, character)
+    character_location_id = char_location_info.get('station_id') or char_location_info.get('structure_id') if char_location_info else None
 
     # Concurrently fetch names and undercut statuses from the database
     results = await asyncio.gather(
-        asyncio.to_thread(get_names_from_ids, ids_to_resolve, character),
-        asyncio.to_thread(get_undercut_statuses, character.id)
+        asyncio.to_thread(get_undercut_statuses, character.id),
+        # We need to resolve competitor locations as well, so we gather them first
+        asyncio.to_thread(lambda: [
+            status.get('competitor_location_id')
+            for status in get_undercut_statuses(character.id).values()
+            if status.get('competitor_location_id')
+        ])
     )
-    id_to_name, all_undercut_statuses = results
+    all_undercut_statuses, competitor_location_ids = results
+
+    # Now resolve all names needed for the page
+    ids_to_resolve = list(set(type_ids_on_page + location_ids + competitor_location_ids))
+    id_to_name = await asyncio.to_thread(get_names_from_ids, ids_to_resolve, character)
 
     message_lines = []
     for order in paginated_orders:
@@ -5166,9 +5338,18 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
         undercut_status = all_undercut_statuses.get(order['order_id'])
         if undercut_status and undercut_status['is_undercut']:
             competitor_price = undercut_status.get('competitor_price', 0.0)
-            if competitor_price:
+            competitor_location_id = undercut_status.get('competitor_location_id')
+
+            if competitor_price and competitor_location_id:
+                competitor_loc_name = id_to_name.get(competitor_location_id, "Unknown Location")
+                jumps_str = ""
+                if character_location_id:
+                    jumps = await get_jump_distance(character_location_id, competitor_location_id, character)
+                    if jumps is not None:
+                        jumps_str = f" ({jumps}j)"
+
                 order_type_str = "buy" if is_buy else "sell"
-                line += f"\n  `> ❗️ Undercut! Best {order_type_str}: {competitor_price:,.2f}`"
+                line += f"\n  `> ❗️ Undercut! Best {order_type_str}: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}`"
 
         message_lines.append(line)
 
