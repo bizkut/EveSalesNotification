@@ -3194,7 +3194,12 @@ async def process_undercuts_for_character(
                     f"  • **Best Price Location:** {location_line}\n\n"
                     f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`"
                 )
-                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                try:
+                    await context.bot.send_message(chat_id=character.telegram_user_id, text=message, parse_mode='Markdown')
+                    logging.info(f"Sent undercut notification to chat_id: {character.telegram_user_id}.")
+                except Exception as e:
+                    logging.error(f"Error sending undercut notification to {character.telegram_user_id}: {e}")
+
                 await asyncio.sleep(1) # Stagger notifications
     except Exception as e:
         logging.error(f"Error processing undercuts for character {character.name}: {e}", exc_info=True)
@@ -4672,10 +4677,7 @@ def get_contracts_from_db(character_id: int) -> list:
 
 
 async def _display_contracts(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, page: int = 0):
-    """
-    Fetches and displays a paginated list of open orders, concurrently fetching all
-    necessary data including real-time regional market prices for comparison.
-    """
+    """Fetches and displays a paginated list of outstanding contracts from the local cache."""
     query = update.callback_query
     character = get_character_by_id(character_id)
     if await check_and_handle_pending_deletion(update, context, character):
@@ -5393,9 +5395,9 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             if competitor_price and competitor_location_id:
                 competitor_loc_name = id_to_name.get(competitor_location_id, "Unknown Location")
                 jumps_str = ""
-                if character_location_id:
-                    jumps = await get_jump_distance(character_location_id, competitor_location_id, character)
-                    if jumps is not None: jumps_str = f" ({jumps}j)"
+                jumps = await get_jump_distance(order['location_id'], competitor_location_id, character)
+                if jumps is not None:
+                    jumps_str = f" ({jumps}j)"
                 line += f"\n  `> ❗️ Undercut by {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}`"
 
         message_lines.append(line)
