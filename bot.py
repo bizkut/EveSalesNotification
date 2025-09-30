@@ -418,6 +418,14 @@ def setup_database():
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS location_cache (
+                    location_id BIGINT PRIMARY KEY,
+                    system_id INTEGER,
+                    region_id INTEGER
+                )
+            """)
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -1258,6 +1266,34 @@ def remove_stale_undercut_statuses(character_id: int, current_order_ids: list[in
         database.release_db_connection(conn)
 
 
+def get_location_from_cache(location_id: int) -> dict | None:
+    """Retrieves a location's region and system from the local cache."""
+    conn = database.get_db_connection()
+    location_info = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT system_id, region_id FROM location_cache WHERE location_id = %s", (location_id,))
+            row = cursor.fetchone()
+            if row:
+                location_info = {'system_id': row[0], 'region_id': row[1]}
+    finally:
+        database.release_db_connection(conn)
+    return location_info
+
+def save_location_to_cache(location_id: int, system_id: int, region_id: int):
+    """Saves a location's resolved system and region to the cache."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO location_cache (location_id, system_id, region_id) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                (location_id, system_id, region_id)
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+
 # --- ESI API Functions ---
 
 def get_esi_cache_from_db(cache_key):
@@ -1346,7 +1382,7 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
     headers = {"Accept": "application/json"}
 
     if character:
-        access_token = get_access_token(character.refresh_token)
+        access_token = get_access_token(character.id, character.refresh_token)
         if not access_token:
             logging.error(f"Failed to get access token for {character.name}")
             return (None, None) if return_headers else None
@@ -1398,7 +1434,22 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
         return (None, None) if return_headers else None
 
 
-def get_access_token(refresh_token):
+# --- ESI Access Token Caching ---
+ACCESS_TOKEN_CACHE = {}
+
+def get_access_token(character_id, refresh_token):
+    """
+    Retrieves a valid access token for a character, using an in-memory cache
+    to avoid redundant requests.
+    """
+    if character_id in ACCESS_TOKEN_CACHE:
+        token_info = ACCESS_TOKEN_CACHE[character_id]
+        # Check if the token is still valid (with a 60-second buffer)
+        if token_info['expires_at'] > time.time() + 60:
+            logging.debug(f"Returning cached access token for character {character_id}")
+            return token_info['access_token']
+
+    logging.info(f"No valid cached token for character {character_id}. Requesting a new one.")
     url = "https://login.eveonline.com/v2/oauth/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Host": "login.eveonline.com"}
     data = {
@@ -1410,9 +1461,19 @@ def get_access_token(refresh_token):
     try:
         response = requests.post(url, headers=headers, data=data)
         response.raise_for_status()
-        return response.json().get("access_token")
+        token_data = response.json()
+        access_token = token_data.get("access_token")
+        expires_in = token_data.get("expires_in", 1200) # Default to 20 minutes
+
+        # Cache the new token with its expiration time
+        ACCESS_TOKEN_CACHE[character_id] = {
+            'access_token': access_token,
+            'expires_at': time.time() + expires_in
+        }
+        logging.info(f"Successfully obtained and cached new access token for character {character_id}")
+        return access_token
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error refreshing access token: {e}")
+        logging.error(f"Error refreshing access token for character {character_id}: {e}")
         return None
 
 def get_character_details_from_token(access_token):
@@ -2814,32 +2875,47 @@ async def master_orders_poll(application: Application):
 
                 orders_by_region = defaultdict(list)
                 for order in open_orders:
+                    location_id = order['location_id']
                     region_id = None
-                    # Resolve region for structures
-                    if order['location_id'] > 10000000000:
-                        structure_info = await asyncio.to_thread(get_structure_info, character, order['location_id'])
-                        if structure_info and 'solar_system_id' in structure_info:
-                            system_info = await asyncio.to_thread(get_system_info, structure_info['solar_system_id'])
-                            if system_info and 'constellation_id' in system_info:
-                                constellation_info = await asyncio.to_thread(get_constellation_info, system_info['constellation_id'])
-                                if constellation_info and 'region_id' in constellation_info:
-                                    region_id = constellation_info['region_id']
-                    # Resolve region for NPC stations
+
+                    # 1. Check local cache first
+                    cached_location = await asyncio.to_thread(get_location_from_cache, location_id)
+                    if cached_location:
+                        region_id = cached_location['region_id']
                     else:
-                        station_info = await asyncio.to_thread(get_station_info, order['location_id'])
-                        if station_info and 'system_id' in station_info:
-                            system_info = await asyncio.to_thread(get_system_info, station_info['system_id'])
-                            if system_info and 'constellation_id' in system_info:
-                                constellation_info = await asyncio.to_thread(get_constellation_info, system_info['constellation_id'])
-                                if constellation_info and 'region_id' in constellation_info:
-                                    region_id = constellation_info['region_id']
+                        # 2. If not in cache, resolve via ESI
+                        system_id = None
+                        # Resolve for structures (requires auth)
+                        if location_id > 10000000000:
+                            structure_info = await asyncio.to_thread(get_structure_info, character, location_id)
+                            if structure_info:
+                                system_id = structure_info.get('solar_system_id')
+                        # Resolve for NPC stations (public)
+                        else:
+                            station_info = await asyncio.to_thread(get_station_info, location_id)
+                            if station_info:
+                                system_id = station_info.get('system_id')
+
+                        # Get region from system
+                        if system_id:
+                            system_info = await asyncio.to_thread(get_system_info, system_id)
+                            if system_info:
+                                constellation_id = system_info.get('constellation_id')
+                                if constellation_id:
+                                    constellation_info = await asyncio.to_thread(get_constellation_info, constellation_id)
+                                    if constellation_info:
+                                        region_id = constellation_info.get('region_id')
+
+                        # 3. Save to cache if successfully resolved
+                        if region_id and system_id:
+                            await asyncio.to_thread(save_location_to_cache, location_id, system_id, region_id)
 
                     # Augment the order with the resolved region and group it
                     if region_id:
                         order['region_id'] = region_id
                         orders_by_region[region_id].append(order)
                     else:
-                        logging.warning(f"Could not resolve region for order {order['order_id']} at location {order['location_id']}.")
+                        logging.warning(f"Could not resolve region for order {order['order_id']} at location {location_id}.")
 
                 # Step 1: Pre-fetch all required regional market data
                 for region_id, orders in orders_by_region.items():
