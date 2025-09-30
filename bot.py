@@ -2950,233 +2950,238 @@ async def run_daily_overview_for_character(character: Character, context: Contex
 async def master_orders_poll(application: Application):
     """
     A single, continuous polling loop that caches open market orders and checks
-    for undercuts for all monitored characters.
+    for undercuts for all monitored characters, using a highly concurrent approach.
     """
     context = ContextTypes.DEFAULT_TYPE(application=application)
 
     while True:
         logging.info("Starting master orders polling cycle.")
-        characters_to_poll = list(CHARACTERS)
+        start_time = time.time()
         min_delay = 300  # Default to 5 minutes
 
+        characters_to_poll = [c for c in list(CHARACTERS) if not get_character_deletion_status(c.id)]
         if not characters_to_poll:
             logging.debug("No characters to poll for open orders. Sleeping.")
             await asyncio.sleep(min_delay)
             continue
 
-        market_data_cache = {}
+        # --- Step 1: Concurrently fetch all character orders ---
+        logging.debug(f"Fetching open orders for {len(characters_to_poll)} characters...")
+        order_tasks = [asyncio.to_thread(get_market_orders, char, return_headers=True, force_revalidate=True) for char in characters_to_poll]
+        order_results = await asyncio.gather(*order_tasks, return_exceptions=True)
 
-        for character in characters_to_poll:
-            if get_character_deletion_status(character.id):
-                logging.info(f"Skipping orders poll for {character.name} because they are pending deletion.")
+        # Process results and update cache
+        all_open_orders_by_char = {}
+        for i, result in enumerate(order_results):
+            character = characters_to_poll[i]
+            if isinstance(result, Exception) or result is None or result[0] is None:
+                logging.error(f"Failed to fetch open orders for {character.name}. Error: {result}")
                 continue
 
-            logging.debug(f"Polling open orders for {character.name}")
-            try:
-                open_orders, headers = await asyncio.to_thread(get_market_orders, character, return_headers=True, force_revalidate=True)
-                if open_orders is None:
-                    logging.error(f"Failed to fetch open orders for {character.name}. Skipping poll.")
-                    # If the API fails, we should not clear out the cache, so we continue.
-                    continue
+            open_orders, headers = result
+            all_open_orders_by_char[character.id] = open_orders
+            char_delay = get_next_run_delay(headers)
+            min_delay = min(min_delay, char_delay)
 
-                char_delay = get_next_run_delay(headers)
-                min_delay = min(min_delay, char_delay)
+            # Update order cache in the background
+            asyncio.create_task(update_character_order_cache(character.id, open_orders))
 
-                # --- Open Order Caching ---
-                # Get the set of order IDs from the ESI response and the database cache
-                esi_order_ids = {o['order_id'] for o in open_orders}
-                cached_orders = await asyncio.to_thread(get_tracked_market_orders, character.id)
-                cached_order_ids = {o['order_id'] for o in cached_orders}
+        # --- Step 2: Concurrently resolve all unique locations to regions ---
+        all_locations = set()
+        for char_orders in all_open_orders_by_char.values():
+            for order in char_orders:
+                all_locations.add(order['location_id'])
 
-                # Determine which orders have been closed or expired and remove them from the cache
-                orders_to_remove = cached_order_ids - esi_order_ids
-                if orders_to_remove:
-                    logging.info(f"Removing {len(orders_to_remove)} closed/expired orders from cache for {character.name}.")
-                    await asyncio.to_thread(remove_tracked_market_orders, character.id, list(orders_to_remove))
-
-                # Update the cache with the latest list of open orders from ESI
-                if open_orders:
-                    logging.debug(f"Caching {len(open_orders)} open orders for {character.name}.")
-                    await asyncio.to_thread(update_tracked_market_orders, character.id, open_orders)
-                elif not orders_to_remove and cached_order_ids:
-                    # This case handles when the character has no open orders.
-                    # If there were no orders to remove, but there were orders in the cache,
-                    # it means all orders were closed. We must clear the cache.
-                    logging.info(f"All open orders for {character.name} have been closed. Clearing cache.")
-                    await asyncio.to_thread(remove_tracked_market_orders, character.id, list(cached_order_ids))
+        logging.debug(f"Resolving {len(all_locations)} unique locations...")
+        # We need an authenticated character for structure lookups. We'll use the first one available.
+        auth_char = characters_to_poll[0] if characters_to_poll else None
+        location_tasks = {loc_id: asyncio.create_task(resolve_location_to_region(loc_id, auth_char)) for loc_id in all_locations}
+        await asyncio.gather(*location_tasks.values(), return_exceptions=True)
+        location_to_region_map = {loc_id: task.result() for loc_id, task in location_tasks.items() if not task.done() or not isinstance(task.result(), Exception)}
 
 
-                # --- Undercut Notifications (only for subscribed characters) ---
-                if not character.enable_undercut_notifications:
-                    continue
+        # --- Step 3: Concurrently fetch all required regional market data ---
+        required_markets = defaultdict(set)
+        for char_id, orders in all_open_orders_by_char.items():
+            for order in orders:
+                region_id = location_to_region_map.get(order['location_id'])
+                if region_id:
+                    required_markets[region_id].add(order['type_id'])
 
-                current_order_ids = [o['order_id'] for o in open_orders]
-                await asyncio.to_thread(remove_stale_undercut_statuses, character.id, current_order_ids)
+        logging.debug(f"Fetching market data for {len(required_markets)} regions and {sum(len(v) for v in required_markets.values())} unique type_ids...")
+        market_tasks = []
+        for region_id, type_ids in required_markets.items():
+            for type_id in type_ids:
+                market_tasks.append(asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True))
 
-                if not open_orders:
-                    continue
+        market_results = await asyncio.gather(*market_tasks, return_exceptions=True)
 
-                previous_statuses = await asyncio.to_thread(get_undercut_statuses, character.id)
-                new_statuses_to_update = []
-                notifications_to_send = []
+        # Process market results into a usable cache
+        market_data_cache = defaultdict(dict)
+        for result in market_results:
+            if isinstance(result, Exception) or not result:
+                continue
+            # All orders in the result are for the same region and type
+            region_id = result[0]['region_id']
+            type_id = result[0]['type_id']
 
-                orders_by_region = defaultdict(list)
-                for order in open_orders:
-                    location_id = order['location_id']
-                    region_id = None
+            buy_orders = [o for o in result if o.get('is_buy_order')]
+            sell_orders = [o for o in result if not o.get('is_buy_order')]
+            best_buy = max(buy_orders, key=lambda x: x['price']) if buy_orders else None
+            best_sell = min(sell_orders, key=lambda x: x['price']) if sell_orders else None
+            market_data_cache[region_id][type_id] = {'buy': best_buy, 'sell': best_sell}
 
-                    # 1. Check local cache first
-                    cached_location = await asyncio.to_thread(get_location_from_cache, location_id)
-                    if cached_location:
-                        region_id = cached_location['region_id']
-                    else:
-                        # 2. If not in cache, resolve via ESI
-                        system_id = None
-                        # Resolve for structures (requires auth)
-                        if location_id > 10000000000:
-                            structure_info = await asyncio.to_thread(get_structure_info, character, location_id)
-                            if structure_info:
-                                system_id = structure_info.get('solar_system_id')
-                        # Resolve for NPC stations (public)
-                        else:
-                            station_info = await asyncio.to_thread(get_station_info, location_id)
-                            if station_info:
-                                system_id = station_info.get('system_id')
+        # --- Step 4: Process all characters with all data pre-fetched ---
+        logging.debug("All data fetched. Processing undercuts for all characters...")
+        processing_tasks = []
+        for character in characters_to_poll:
+            if character.id in all_open_orders_by_char and character.enable_undercut_notifications:
+                task = process_undercuts_for_character(
+                    character,
+                    all_open_orders_by_char[character.id],
+                    location_to_region_map,
+                    market_data_cache,
+                    context
+                )
+                processing_tasks.append(task)
 
-                        # Get region from system
-                        if system_id:
-                            system_info = await asyncio.to_thread(get_system_info, system_id)
-                            if system_info:
-                                constellation_id = system_info.get('constellation_id')
-                                if constellation_id:
-                                    constellation_info = await asyncio.to_thread(get_constellation_info, constellation_id)
-                                    if constellation_info:
-                                        region_id = constellation_info.get('region_id')
+        await asyncio.gather(*processing_tasks, return_exceptions=True)
 
-                        # 3. Save to cache if successfully resolved
-                        if region_id and system_id:
-                            await asyncio.to_thread(save_location_to_cache, location_id, system_id, region_id)
-
-                    # Augment the order with the resolved region and group it
-                    if region_id:
-                        order['region_id'] = region_id
-                        orders_by_region[region_id].append(order)
-                    else:
-                        logging.warning(f"Could not resolve region for order {order['order_id']} at location {location_id}.")
-
-                # Step 1: Pre-fetch all required regional market data
-                for region_id, orders in orders_by_region.items():
-                    # Get unique type IDs for the orders in this region
-                    type_ids_in_region = list(set(o['type_id'] for o in orders))
-
-                    # Ensure cache structure exists
-                    if region_id not in market_data_cache:
-                        market_data_cache[region_id] = {}
-
-                    # For each type, fetch the regional market data if not already cached
-                    for type_id in type_ids_in_region:
-                        if type_id not in market_data_cache[region_id]:
-                            regional_market_orders = await asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True)
-                            if regional_market_orders:
-                                buy_orders = [o for o in regional_market_orders if o.get('is_buy_order')]
-                                sell_orders = [o for o in regional_market_orders if not o.get('is_buy_order')]
-                                # Find the best buy and sell prices in the entire region
-                                best_buy = max(buy_orders, key=lambda x: x['price']) if buy_orders else None
-                                best_sell = min(sell_orders, key=lambda x: x['price']) if sell_orders else None
-                                market_data_cache[region_id][type_id] = {
-                                    'buy': best_buy,
-                                    'sell': best_sell
-                                }
-
-                # Step 2: Iterate through all open orders and check for undercuts using the cached regional data
-                for order in open_orders:
-                    is_undercut = False
-                    competitor_order = None
-                    region_id = order.get('region_id') # This was added in the universal lookup step
-
-                    if not region_id:
-                        continue # Skip orders where region could not be resolved
-
-                    # Get the regional market prices for this order's type
-                    regional_prices = market_data_cache.get(region_id, {}).get(order['type_id'])
-                    if regional_prices:
-                        if order.get('is_buy_order'):
-                            # My buy order is "undercut" if someone else has a higher buy price
-                            best_regional_buy = regional_prices.get('buy')
-                            if best_regional_buy and best_regional_buy['price'] > order['price']:
-                                is_undercut = True
-                                competitor_order = best_regional_buy
-                        else: # My sell order
-                            # My sell order is undercut if someone else has a lower sell price
-                            best_regional_sell = regional_prices.get('sell')
-                            if best_regional_sell and best_regional_sell['price'] < order['price']:
-                                is_undercut = True
-                                competitor_order = best_regional_sell
-
-                    competitor_price = None
-                    competitor_location_id = None
-                    if is_undercut and competitor_order:
-                        competitor_price = competitor_order['price']
-                        competitor_location_id = competitor_order['location_id']
-
-                    new_statuses_to_update.append({
-                        'order_id': order['order_id'],
-                        'is_undercut': is_undercut,
-                        'competitor_price': competitor_price,
-                        'competitor_location_id': competitor_location_id
-                    })
-
-                    was_undercut = previous_statuses.get(order['order_id'], {}).get('is_undercut', False)
-                    if is_undercut and not was_undercut:
-                        notifications_to_send.append({'my_order': order, 'competitor': competitor_order})
-
-                if new_statuses_to_update:
-                    await asyncio.to_thread(update_undercut_statuses, character.id, new_statuses_to_update)
-
-                if notifications_to_send:
-                    logging.info(f"Found {len(notifications_to_send)} new undercuts for {character.name}.")
-
-                    all_type_ids = [n['my_order']['type_id'] for n in notifications_to_send]
-                    all_loc_ids = [n['my_order']['location_id'] for n in notifications_to_send] + \
-                                  [n['competitor']['location_id'] for n in notifications_to_send if n.get('competitor')]
-                    id_to_name = await asyncio.to_thread(get_names_from_ids, list(set(all_type_ids + all_loc_ids)), character)
-
-                    for notif in notifications_to_send:
-                        my_order = notif['my_order']
-                        competitor = notif['competitor']
-
-                        item_name = id_to_name.get(my_order['type_id'], f"TypeID {my_order['type_id']}")
-                        my_location_name = id_to_name.get(my_order['location_id'], "an unknown location")
-                        order_type = "Buy" if my_order.get('is_buy_order') else "Sell"
-
-                        competitor_loc_name = id_to_name.get(competitor['location_id'], "an unknown location")
-
-                        # For notifications, we'll calculate jumps from the order's location, as the character may be offline.
-                        jumps = await get_jump_distance(my_order['location_id'], competitor['location_id'], character)
-
-                        location_line = f"`{competitor_loc_name}`"
-                        if jumps is not None:
-                            location_line += f" ({jumps} jumps)"
-
-                        message = (
-                            f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
-                            f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
-                            f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
-                            f"  • **Your Location:** `{my_location_name}`\n"
-                            f"  • **Best Market Price:** `{competitor['price']:,.2f}` ISK\n"
-                            f"  • **Best Price Location:** {location_line}\n\n"
-                            f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`"
-                        )
-                        await send_telegram_message(context, message, chat_id=character.telegram_user_id)
-                        await asyncio.sleep(1)
-
-            except Exception as e:
-                logging.error(f"Error in master_orders_poll for character {character.name}: {e}", exc_info=True)
-            finally:
-                await asyncio.sleep(1)
-
-        logging.info(f"Master orders polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
+        end_time = time.time()
+        logging.info(f"Master orders polling cycle complete in {end_time - start_time:.2f} seconds. Sleeping for {min_delay:.2f} seconds.")
         await asyncio.sleep(min_delay)
+
+
+async def update_character_order_cache(character_id: int, open_orders: list):
+    """Asynchronously updates the database cache for a character's open orders."""
+    try:
+        esi_order_ids = {o['order_id'] for o in open_orders}
+        cached_orders = await asyncio.to_thread(get_tracked_market_orders, character_id)
+        cached_order_ids = {o['order_id'] for o in cached_orders}
+
+        orders_to_remove = cached_order_ids - esi_order_ids
+        if orders_to_remove:
+            logging.info(f"Removing {len(orders_to_remove)} closed/expired orders from cache for char {character_id}.")
+            await asyncio.to_thread(remove_tracked_market_orders, character_id, list(orders_to_remove))
+
+        if open_orders:
+            logging.debug(f"Caching {len(open_orders)} open orders for char {character_id}.")
+            await asyncio.to_thread(update_tracked_market_orders, character_id, open_orders)
+        elif not orders_to_remove and cached_order_ids:
+            logging.info(f"All open orders for char {character_id} have been closed. Clearing cache.")
+            await asyncio.to_thread(remove_tracked_market_orders, character_id, list(cached_order_ids))
+    except Exception as e:
+        logging.error(f"Error updating order cache for character {character_id}: {e}", exc_info=True)
+
+
+async def resolve_location_to_region(location_id: int, auth_char: Character) -> int | None:
+    """Resolves a location_id to a region_id, using cache first."""
+    cached_location = await asyncio.to_thread(get_location_from_cache, location_id)
+    if cached_location and cached_location.get('region_id'):
+        return cached_location['region_id']
+
+    system_id, region_id = None, None
+    try:
+        if location_id > 10000000000: # Structure
+            if not auth_char: return None
+            structure_info = await asyncio.to_thread(get_structure_info, auth_char, location_id)
+            if structure_info: system_id = structure_info.get('solar_system_id')
+        else: # NPC Station
+            station_info = await asyncio.to_thread(get_station_info, location_id)
+            if station_info: system_id = station_info.get('system_id')
+
+        if system_id:
+            system_info = await asyncio.to_thread(get_system_info, system_id)
+            if system_info:
+                constellation_info = await asyncio.to_thread(get_constellation_info, system_info.get('constellation_id'))
+                if constellation_info: region_id = constellation_info.get('region_id')
+
+        if region_id and system_id:
+            await asyncio.to_thread(save_location_to_cache, location_id, system_id, region_id)
+        return region_id
+    except Exception as e:
+        logging.error(f"Could not resolve region for location {location_id}: {e}")
+        return None
+
+
+async def process_undercuts_for_character(
+    character: Character,
+    open_orders: list,
+    location_to_region_map: dict,
+    market_data_cache: dict,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    """Analyzes and sends undercut notifications for a single character."""
+    try:
+        await asyncio.to_thread(remove_stale_undercut_statuses, character.id, [o['order_id'] for o in open_orders])
+        previous_statuses = await asyncio.to_thread(get_undercut_statuses, character.id)
+        new_statuses_to_update = []
+        notifications_to_send = []
+
+        for order in open_orders:
+            region_id = location_to_region_map.get(order['location_id'])
+            if not region_id: continue
+
+            is_undercut, competitor_order = False, None
+            regional_prices = market_data_cache.get(region_id, {}).get(order['type_id'])
+            if regional_prices:
+                if order.get('is_buy_order'):
+                    best_regional_buy = regional_prices.get('buy')
+                    if best_regional_buy and best_regional_buy['price'] > order['price']:
+                        is_undercut, competitor_order = True, best_regional_buy
+                else: # Sell order
+                    best_regional_sell = regional_prices.get('sell')
+                    if best_regional_sell and best_regional_sell['price'] < order['price']:
+                        is_undercut, competitor_order = True, best_regional_sell
+
+            competitor_price = competitor_order['price'] if competitor_order else None
+            competitor_location_id = competitor_order['location_id'] if competitor_order else None
+            new_statuses_to_update.append({
+                'order_id': order['order_id'], 'is_undercut': is_undercut,
+                'competitor_price': competitor_price, 'competitor_location_id': competitor_location_id
+            })
+
+            was_undercut = previous_statuses.get(order['order_id'], {}).get('is_undercut', False)
+            if is_undercut and not was_undercut:
+                notifications_to_send.append({'my_order': order, 'competitor': competitor_order})
+
+        if new_statuses_to_update:
+            await asyncio.to_thread(update_undercut_statuses, character.id, new_statuses_to_update)
+
+        if notifications_to_send:
+            logging.info(f"Found {len(notifications_to_send)} new undercuts for {character.name}.")
+            all_ids_to_resolve = set()
+            for notif in notifications_to_send:
+                all_ids_to_resolve.add(notif['my_order']['type_id'])
+                all_ids_to_resolve.add(notif['my_order']['location_id'])
+                if notif.get('competitor'):
+                    all_ids_to_resolve.add(notif['competitor']['location_id'])
+
+            id_to_name = await asyncio.to_thread(get_names_from_ids, list(all_ids_to_resolve), character)
+
+            for notif in notifications_to_send:
+                my_order, competitor = notif['my_order'], notif['competitor']
+                item_name = id_to_name.get(my_order['type_id'], f"TypeID {my_order['type_id']}")
+                my_location_name = id_to_name.get(my_order['location_id'], "an unknown location")
+                order_type = "Buy" if my_order.get('is_buy_order') else "Sell"
+                competitor_loc_name = id_to_name.get(competitor['location_id'], "an unknown location")
+
+                jumps = await get_jump_distance(my_order['location_id'], competitor['location_id'], character)
+                location_line = f"`{competitor_loc_name}`" + (f" ({jumps} jumps)" if jumps is not None else "")
+
+                message = (
+                    f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
+                    f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
+                    f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
+                    f"  • **Your Location:** `{my_location_name}`\n"
+                    f"  • **Best Market Price:** `{competitor['price']:,.2f}` ISK\n"
+                    f"  • **Best Price Location:** {location_line}\n\n"
+                    f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`"
+                )
+                await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                await asyncio.sleep(1) # Stagger notifications
+    except Exception as e:
+        logging.error(f"Error processing undercuts for character {character.name}: {e}", exc_info=True)
 
 
 async def master_contracts_poll(application: Application):
