@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import calendar
 from PIL import Image
 import psycopg2
+from tasks import continue_backfill_character_history
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -54,6 +55,8 @@ class Character:
     enable_contract_notifications: bool
     notification_batch_threshold: int
     created_at: datetime
+    is_backfilling: bool
+    backfill_before_id: int | None
 
 CHARACTERS: list[Character] = []
 
@@ -71,7 +74,8 @@ def load_characters_from_db():
                     notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_overview, enable_undercut_notifications,
-                    enable_contract_notifications, notification_batch_threshold, created_at
+                    enable_contract_notifications, notification_batch_threshold, created_at,
+                    is_backfilling, backfill_before_id
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -89,7 +93,8 @@ def load_characters_from_db():
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             wallet_balance_threshold,
             enable_sales, enable_buys,
-            enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at
+            enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
+            is_backfilling, backfill_before_id
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -107,7 +112,9 @@ def load_characters_from_db():
             enable_undercut_notifications=bool(enable_undercut),
             enable_contract_notifications=bool(enable_contracts),
             notification_batch_threshold=batch_threshold,
-            created_at=created_at
+            created_at=created_at,
+            is_backfilling=bool(is_backfilling),
+            backfill_before_id=backfill_before_id
         )
         CHARACTERS.append(character)
         logging.info(f"Loaded character: {character.name} ({character.id})")
@@ -183,6 +190,19 @@ def setup_database():
                 logging.info("Applying migration: Adding 'enable_contract_notifications' column to characters table...")
                 cursor.execute("ALTER TABLE characters ADD COLUMN enable_contract_notifications BOOLEAN DEFAULT TRUE;")
                 logging.info("Migration for 'enable_contract_notifications' complete.")
+
+            # Migration: Add is_backfilling and backfill_before_id columns for gradual history backfill
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'is_backfilling'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'is_backfilling' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN is_backfilling BOOLEAN DEFAULT FALSE;")
+                logging.info("Migration for 'is_backfilling' complete.")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'backfill_before_id'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'backfill_before_id' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN backfill_before_id BIGINT;")
+                logging.info("Migration for 'backfill_before_id' complete.")
 
 
             cursor.execute("""
@@ -743,7 +763,8 @@ def get_characters_for_user(telegram_user_id):
                     notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_overview, enable_undercut_notifications,
-                    enable_contract_notifications, notification_batch_threshold, created_at
+                    enable_contract_notifications, notification_batch_threshold, created_at,
+                    is_backfilling, backfill_before_id
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -752,7 +773,8 @@ def get_characters_for_user(telegram_user_id):
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at
+                    enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
+                    is_backfilling, backfill_before_id
                 ) = row
 
                 user_characters.append(Character(
@@ -766,7 +788,9 @@ def get_characters_for_user(telegram_user_id):
                     enable_undercut_notifications=bool(enable_undercut),
                     enable_contract_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
-                    created_at=created_at
+                    created_at=created_at,
+                    is_backfilling=bool(is_backfilling),
+                    backfill_before_id=backfill_before_id
                 ))
     finally:
         database.release_db_connection(conn)
@@ -785,7 +809,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_overview, enable_undercut_notifications,
-                    enable_contract_notifications, notification_batch_threshold, created_at
+                    enable_contract_notifications, notification_batch_threshold, created_at,
+                    is_backfilling, backfill_before_id
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -795,7 +820,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at
+                    enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
+                    is_backfilling, backfill_before_id
                 ) = row
 
                 character = Character(
@@ -809,7 +835,9 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_undercut_notifications=bool(enable_undercut),
                     enable_contract_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
-                    created_at=created_at
+                    created_at=created_at,
+                    is_backfilling=bool(is_backfilling),
+                    backfill_before_id=backfill_before_id
                 )
     finally:
         database.release_db_connection(conn)
@@ -838,6 +866,24 @@ def update_character_setting(character_id: int, setting: str, value: any):
     finally:
         database.release_db_connection(conn)
     logging.info(f"Updated {setting} for character {character_id} to {value}.")
+
+
+def update_character_backfill_state(character_id: int, is_backfilling: bool, before_id: int | None):
+    """Updates the backfill state for a character in the database."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE characters SET is_backfilling = %s, backfill_before_id = %s WHERE character_id = %s",
+                (is_backfilling, before_id, character_id)
+            )
+            conn.commit()
+        logging.info(f"Updated backfill state for character {character_id}: is_backfilling={is_backfilling}, before_id={before_id}")
+    except Exception as e:
+        logging.error(f"Error updating backfill state for character {character_id}: {e}", exc_info=True)
+        conn.rollback()
+    finally:
+        database.release_db_connection(conn)
 
 
 def update_character_notification_setting(character_id: int, setting: str, value: bool):
@@ -1427,49 +1473,32 @@ def get_wallet_journal(character, fetch_all=False, return_headers=False):
     return all_entries
 
 
-def get_wallet_transactions(character, fetch_all=False, return_headers=False):
+def get_wallet_transactions(character, before_id=None, return_headers=False):
     """
-    Fetches wallet transactions from ESI.
-    If fetch_all is True, retrieves all pages. Otherwise, fetches only the first page.
+    Fetches one batch of wallet transactions from ESI.
+    If before_id is provided, it acts as a cursor to fetch transactions older than that ID.
     Returns the list of transactions, or None on failure. Optionally returns headers.
     """
     if not character:
         return (None, None) if return_headers else None
 
-    all_transactions, page = [], 1
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/transactions/"
-    first_page_headers = None
+    params = {"datasource": "tranquility"}
+    if before_id:
+        # The ESI parameter is `from_id`, which fetches transactions *before* the given ID.
+        params['from_id'] = before_id
 
-    while True:
-        params = {"datasource": "tranquility", "page": page}
-        revalidate_this_page = (not fetch_all) or (page == 1)
-        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+    # We always force revalidation for this endpoint to ensure we get the latest data
+    # for live notifications and for the backfill process to work correctly.
+    data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=True)
 
-        if data is None: # Explicitly check for API failure
-            logging.error(f"Failed to fetch page {page} of wallet transactions for {character.name}.")
-            return (None, None) if return_headers else None
-
-        if page == 1:
-            first_page_headers = headers
-
-        if not data: # Empty list means no more pages
-            break
-
-        all_transactions.extend(data)
-
-        if not fetch_all:
-            break
-
-        pages_header = headers.get('x-pages') if headers else None
-        if not pages_header or int(pages_header) <= page:
-            break
-
-        page += 1
-        time.sleep(0.1)
+    if data is None: # Explicitly check for API failure
+        logging.error(f"Failed to fetch wallet transactions for {character.name} with from_id={before_id}.")
+        return (None, None) if return_headers else None
 
     if return_headers:
-        return all_transactions, first_page_headers
-    return all_transactions
+        return data, headers
+    return data
 
 def get_market_orders(character, return_headers=False, force_revalidate=False):
     if not character: return None
@@ -3210,72 +3239,68 @@ def backfill_character_journal_history(character: Character) -> bool:
 
 def backfill_all_character_history(character: Character) -> bool:
     """
-    Performs a one-time backfill of all transaction history from
-    ESI into the local database for a given character.
-    Returns True on success, False on any ESI failure.
+    Performs a one-time backfill of critical history from ESI.
+    This is now a two-phase process for transactions: an initial fast sync,
+    followed by a gradual background backfill.
+    Returns True on success, False on any ESI failure during the initial sync.
     """
     state_key = f"history_backfilled_{character.id}"
     if get_bot_state(state_key):
         logging.info(f"Full history already backfilled for {character.name}. Skipping.")
-        return True # Already done, so it's a success in this context
+        return True
 
-    logging.warning(f"Starting full history backfill for {character.name}. This may take some time...")
+    logging.warning(f"Starting initial fast sync for {character.name}...")
 
-    # --- Backfill Transactions ---
-    logging.info(f"Fetching all wallet transactions for {character.name}...")
-    all_transactions = get_wallet_transactions(character, fetch_all=True)
-    if all_transactions is None: # Explicitly check for None, as [] is a valid success
-        logging.error(f"Failed to fetch wallet transactions during history backfill for {character.name}.")
+    # --- Phase 1: Initial Fast Transaction Sync ---
+    logging.info(f"Fetching most recent transactions for {character.name}...")
+    initial_transactions = get_wallet_transactions(character) # No before_id gets the latest
+    if initial_transactions is None:
+        logging.error(f"Failed to fetch initial transactions during sync for {character.name}.")
         return False
 
-    add_historical_transactions_to_db(character.id, all_transactions)
-    # Also populate purchase lots for FIFO, same as the old seeding logic
-    buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-    if buy_transactions:
-        for tx in buy_transactions:
-            add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
-        logging.info(f"Seeded {len(buy_transactions)} historical buy transactions for FIFO tracking for {character.name}.")
+    # --- Phase 2: Kick off Background Backfill ---
+    if not initial_transactions:
+        logging.info(f"No transaction history found for {character.name}. Marking backfill as complete.")
+        set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+    else:
+        add_historical_transactions_to_db(character.id, initial_transactions)
+        buy_transactions = [tx for tx in initial_transactions if tx.get('is_buy')]
+        if buy_transactions:
+            for tx in buy_transactions:
+                add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+            logging.info(f"Seeded {len(buy_transactions)} initial buy transactions for FIFO tracking for {character.name}.")
 
+        oldest_tx_id = min(tx['transaction_id'] for tx in initial_transactions)
+        logging.info(f"Oldest transaction ID from initial sync is {oldest_tx_id}. Kicking off background backfill.")
 
-    # --- Backfill Wallet Journal for Fees/Taxes ---
+        update_character_backfill_state(character.id, is_backfilling=True, before_id=oldest_tx_id)
+        continue_backfill_character_history.delay(character.id)
+        logging.info(f"Scheduled background backfill task for character {character.name}.")
+
+    # --- The rest of the original function remains for immediate data seeding ---
     if not backfill_character_journal_history(character):
-        # The sub-function will log the specific error
         return False
 
-
-    # --- Backfill Order History (for cancelled/expired notifications) ---
     logging.info(f"Seeding order history for {character.name}...")
     all_historical_orders = get_market_orders_history(character, force_revalidate=True)
     if all_historical_orders is None:
         logging.error(f"Failed to fetch order history during backfill for {character.name}.")
         return False
+    add_processed_orders(character.id, [o['order_id'] for o in all_historical_orders])
+    logging.info(f"Seeded {len(all_historical_orders)} historical orders for {character.name}.")
 
-    order_ids = [o['order_id'] for o in all_historical_orders]
-    # We still need to mark these as "processed" for the notification system
-    add_processed_orders(character.id, order_ids)
-    logging.info(f"Seeded {len(order_ids)} historical orders for {character.name}.")
-
-
-    # --- Backfill Current Open Orders ---
     logging.info(f"Fetching and caching current open orders for {character.name}...")
     open_orders = get_market_orders(character, force_revalidate=True)
     if open_orders is None:
         logging.error(f"Failed to fetch open market orders during backfill for {character.name}.")
         return False
-    # Clear any old tracked orders and update with the fresh list
-    # This is important for re-added characters to ensure no stale orders remain.
     all_cached_orders = get_tracked_market_orders(character.id)
     if all_cached_orders:
-        cached_order_ids = [o['order_id'] for o in all_cached_orders]
-        remove_tracked_market_orders(character.id, cached_order_ids)
+        remove_tracked_market_orders(character.id, [o['order_id'] for o in all_cached_orders])
     update_tracked_market_orders(character.id, open_orders)
     logging.info(f"Cached {len(open_orders)} open orders for {character.name}.")
 
-
-    # --- Mark as complete ---
-    # Store the timestamp of when the backfill finished. This is the new reference for the notification grace period.
-    set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
-    logging.warning(f"Full history backfill for {character.name} is complete.")
+    logging.warning(f"Initial fast sync for {character.name} is complete. Full history will be retrieved in the background.")
     return True
 
 
