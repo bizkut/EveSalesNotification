@@ -143,7 +143,8 @@ def login():
         # Required to fetch market data from player-owned structures.
         "esi-markets.structure_markets.v1",
         "esi-skills.read_skills.v1",
-        "esi-location.read_online.v1"
+        "esi-location.read_online.v1",
+        "esi-contracts.read_character_contracts.v1"
     ]
     scope_string = " ".join(scopes)
 
