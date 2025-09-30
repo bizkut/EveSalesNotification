@@ -11,6 +11,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Multi-User & Character Support**: Any user can add multiple characters by interacting with the bot in a private message. All data is stored securely in a database.
 - **Seamless Character Updates**: Re-authorizing an existing character (e.g., to update API scopes) is handled gracefully. The bot sends a confirmation and immediately starts using the new permissions.
 - **Private & Secure**: Notifications and command responses are sent directly to the user who owns the character.
+- **New Contract Notifications**: Get real-time alerts for any new contracts that require your attention.
 - **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds using efficient ETag-based polling.
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data & Undercut Alerts**:
@@ -43,6 +44,7 @@ The bot is designed for efficiency and resilience, relying on a combination of b
     -   **`master_wallet_transaction_poll`**: Fetches the latest wallet transactions to identify new sales and buys for notifications and historical logging.
     -   **`master_wallet_journal_poll`**: Fetches the latest wallet journal entries, which are crucial for accurately calculating taxes and broker's fees.
     -   **`master_order_history_poll`**: Fetches historical order data to detect and notify users about cancelled or expired orders.
+    -   **`master_contracts_poll`**: Fetches a character's contracts and notifies the user about any new, outstanding contracts requiring their attention.
 -   **Database Caching**: All data fetched from the ESI API is stored in a PostgreSQL database.
     -   **Historical Data**: Wallet transactions and journal entries are stored permanently, creating a complete financial history for each character.
     -   **Snapshot Data**: Open market orders are stored as a snapshot. The `master_orders_poll` task ensures this table is always a direct reflection of the character's current open orders on the ESI.
@@ -69,6 +71,7 @@ Follow these steps to deploy your own instance of the bot.
 3.  For the **Callback URL**, you will need a public-facing URL. We will generate this in the next step, but for now, you can use a placeholder like `https://example.com/callback`. You will need to come back and update this later.
 4.  Under the "Scopes" section, add the following required scopes:
     -   `esi-wallet.read_character_wallet.v1`
+    -   `esi-contracts.read_character_contracts.v1`
     -   `esi-markets.read_character_orders.v1`
     -   `esi-universe.read_structures.v1`
     -   `esi-markets.structure_markets.v1`
@@ -123,6 +126,7 @@ All interaction with the bot is handled through a clean, inline button-based men
     -   **📊 Open Orders**: Shows a paginated list of your open buy or sell orders and your current order capacity.
     -   **📈 View Sales**: Displays a detailed, paginated history of all sales, including profit and fee calculations.
     -   **🛒 View Buys**: Displays a detailed, paginated history of all buy transactions.
+    -   **📝 View Contracts**: Shows a paginated list of all outstanding contracts.
     -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
     -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, wallet balance alerts, notification preferences, and view public character info.
     -   **➕ Add Character**: Starts the process of adding a new character.

@@ -52,6 +52,7 @@ class Character:
     enable_buy_notifications: bool
     enable_daily_summary: bool
     enable_undercut_notifications: bool
+    enable_contract_notifications: bool
     notification_batch_threshold: int
     created_at: datetime
 
@@ -71,7 +72,7 @@ def load_characters_from_db():
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_summary, enable_undercut_notifications,
-                    notification_batch_threshold, created_at
+                    enable_contract_notifications, notification_batch_threshold, created_at
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -89,7 +90,7 @@ def load_characters_from_db():
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             region_id, wallet_balance_threshold,
             enable_sales, enable_buys,
-            enable_summary, enable_undercut, batch_threshold, created_at
+            enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -106,6 +107,7 @@ def load_characters_from_db():
             enable_buy_notifications=bool(enable_buys),
             enable_daily_summary=bool(enable_summary),
             enable_undercut_notifications=bool(enable_undercut),
+            enable_contract_notifications=bool(enable_contracts),
             notification_batch_threshold=batch_threshold,
             created_at=created_at
         )
@@ -170,6 +172,13 @@ def setup_database():
                 logging.info("Applying migration: Adding 'needs_update_notification' column to characters table...")
                 cursor.execute("ALTER TABLE characters ADD COLUMN needs_update_notification BOOLEAN DEFAULT FALSE;")
                 logging.info("Migration for 'needs_update_notification' complete.")
+
+            # Migration: Add enable_contract_notifications column if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_contract_notifications'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'enable_contract_notifications' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN enable_contract_notifications BOOLEAN DEFAULT TRUE;")
+                logging.info("Migration for 'enable_contract_notifications' complete.")
 
 
             cursor.execute("""
@@ -360,6 +369,32 @@ def setup_database():
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS contracts (
+                    contract_id INTEGER NOT NULL,
+                    character_id INTEGER NOT NULL,
+                    issuer_id INTEGER NOT NULL,
+                    assignee_id INTEGER,
+                    start_location_id BIGINT,
+                    end_location_id BIGINT,
+                    type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    date_issued TIMESTAMP WITH TIME ZONE NOT NULL,
+                    date_expired TIMESTAMP WITH TIME ZONE NOT NULL,
+                    for_corporation BOOLEAN NOT NULL,
+                    contract_data JSONB,
+                    PRIMARY KEY (contract_id, character_id)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS processed_contracts (
+                    contract_id INTEGER NOT NULL,
+                    character_id INTEGER NOT NULL,
+                    PRIMARY KEY (contract_id, character_id)
+                )
+            """)
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -406,6 +441,97 @@ def add_processed_journal_refs(character_id, ref_ids):
                 "INSERT INTO historical_journal (ref_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 data_to_insert
             )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+
+def get_processed_contracts(character_id):
+    """Retrieves all processed contract IDs for a character from the database."""
+    conn = database.get_db_connection()
+    processed_ids = set()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT contract_id FROM processed_contracts WHERE character_id = %s", (character_id,))
+            processed_ids = {row[0] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
+    return processed_ids
+
+def add_processed_contracts(character_id, contract_ids):
+    """Adds a list of contract IDs for a character to the database."""
+    if not contract_ids:
+        return
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [(c_id, character_id) for c_id in contract_ids]
+            cursor.executemany(
+                "INSERT INTO processed_contracts (contract_id, character_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                data_to_insert
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+def update_contracts_cache(character_id, contracts):
+    """Inserts or updates a list of contracts for a character in the database."""
+    if not contracts:
+        return
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            contracts_with_char_id = [
+                (
+                    c['contract_id'],
+                    character_id,
+                    c['issuer_id'],
+                    c.get('assignee_id'),
+                    c.get('start_location_id'),
+                    c.get('end_location_id'),
+                    c['type'],
+                    c['status'],
+                    c['date_issued'],
+                    c['date_expired'],
+                    c['for_corporation'],
+                    json.dumps(c)
+                ) for c in contracts
+            ]
+            upsert_query = """
+                INSERT INTO contracts (
+                    contract_id, character_id, issuer_id, assignee_id, start_location_id,
+                    end_location_id, type, status, date_issued, date_expired,
+                    for_corporation, contract_data
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (contract_id, character_id) DO UPDATE
+                SET issuer_id = EXCLUDED.issuer_id,
+                    assignee_id = EXCLUDED.assignee_id,
+                    start_location_id = EXCLUDED.start_location_id,
+                    end_location_id = EXCLUDED.end_location_id,
+                    type = EXCLUDED.type,
+                    status = EXCLUDED.status,
+                    date_issued = EXCLUDED.date_issued,
+                    date_expired = EXCLUDED.date_expired,
+                    for_corporation = EXCLUDED.for_corporation,
+                    contract_data = EXCLUDED.contract_data;
+            """
+            cursor.executemany(upsert_query, contracts_with_char_id)
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+def remove_stale_contracts(character_id, current_contract_ids):
+    """Removes contracts that are no longer active from the cache."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            if not current_contract_ids:
+                cursor.execute("DELETE FROM contracts WHERE character_id = %s", (character_id,))
+            else:
+                placeholders = ','.join(['%s'] * len(current_contract_ids))
+                query = f"DELETE FROM contracts WHERE character_id = %s AND contract_id NOT IN ({placeholders})"
+                cursor.execute(query, [character_id] + current_contract_ids)
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -613,7 +739,7 @@ def get_characters_for_user(telegram_user_id):
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_summary, enable_undercut_notifications,
-                    notification_batch_threshold, created_at
+                    enable_contract_notifications, notification_batch_threshold, created_at
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -622,7 +748,7 @@ def get_characters_for_user(telegram_user_id):
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, enable_undercut, batch_threshold, created_at
+                    enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
                 ) = row
 
                 user_characters.append(Character(
@@ -635,6 +761,7 @@ def get_characters_for_user(telegram_user_id):
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
                     enable_undercut_notifications=bool(enable_undercut),
+                    enable_contract_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at
                 ))
@@ -655,7 +782,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_summary, enable_undercut_notifications,
-                    notification_batch_threshold, created_at
+                    enable_contract_notifications, notification_batch_threshold, created_at
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -665,7 +792,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, enable_undercut, batch_threshold, created_at
+                    enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
                 ) = row
 
                 character = Character(
@@ -678,6 +805,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
                     enable_undercut_notifications=bool(enable_undercut),
+                    enable_contract_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at
                 )
@@ -716,7 +844,8 @@ def update_character_notification_setting(character_id: int, setting: str, value
         "sales": "enable_sales_notifications",
         "buys": "enable_buy_notifications",
         "summary": "enable_daily_summary",
-        "undercut": "enable_undercut_notifications"
+        "undercut": "enable_undercut_notifications",
+        "contracts": "enable_contract_notifications"
     }
     if setting not in allowed_settings:
         logging.error(f"Attempted to update an invalid notification setting: {setting}")
@@ -802,6 +931,63 @@ def get_character_deletion_status(character_id: int):
     finally:
         database.release_db_connection(conn)
     return deletion_time
+
+
+def get_contract_profits_from_db(character_id: int) -> list:
+    """Retrieves all contract profits for a character."""
+    conn = database.get_db_connection()
+    profits = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT contract_id, profit, date FROM contract_profits WHERE character_id = %s", (character_id,))
+            rows = cursor.fetchall()
+            for row in rows:
+                profits.append({
+                    "contract_id": row[0],
+                    "profit": float(row[1]), # Convert Decimal to float
+                    "date": row[2]
+                })
+    finally:
+        database.release_db_connection(conn)
+    return profits
+
+def add_contract_profit(character_id, contract_id, profit, date):
+    """Adds a calculated contract profit to the database."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO contract_profits (character_id, contract_id, profit, date)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (contract_id, character_id) DO NOTHING
+                """,
+                (character_id, contract_id, profit, date)
+            )
+            conn.commit()
+            logging.info(f"Stored profit of {profit:,.2f} for contract {contract_id} for character {character_id}.")
+    finally:
+        database.release_db_connection(conn)
+
+def get_journal_entry_by_context_id(character_id: int, context_id: int, ref_type: str):
+    """Retrieves a specific journal entry by context ID and ref_type from the database."""
+    conn = database.get_db_connection()
+    entry = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, amount, balance, context_id, context_id_type, date, description, first_party_id, reason, ref_type, second_party_id, tax, tax_receiver_id FROM wallet_journal WHERE character_id = %s AND context_id = %s AND ref_type = %s",
+                (character_id, context_id, ref_type)
+            )
+            row = cursor.fetchone()
+            if row:
+                colnames = [desc[0] for desc in cursor.description]
+                entry = dict(zip(colnames, row))
+                if isinstance(entry['date'], str):
+                    entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+    finally:
+        database.release_db_connection(conn)
+    return entry
 
 
 def get_historical_transactions_from_db(character_id: int) -> list:
@@ -1298,6 +1484,48 @@ def get_wallet_balance(character, return_headers=False, force_revalidate=False):
     if not character: return None
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
     return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
+
+def get_contracts(character, return_headers=False, force_revalidate=False):
+    """
+    Fetches all pages of contracts from ESI.
+    Returns the list of contracts, or None on failure. Optionally returns headers.
+    """
+    if not character:
+        return (None, None) if return_headers else None
+
+    all_contracts = []
+    page = 1
+    url = f"https://esi.evetech.net/v1/characters/{character.id}/contracts/"
+    first_page_headers = None
+
+    while True:
+        params = {"datasource": "tranquility", "page": page}
+        revalidate_this_page = force_revalidate and page == 1
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+
+        if data is None: # Explicitly check for API failure
+            logging.error(f"Failed to fetch page {page} of contracts for {character.name}.")
+            return (None, None) if return_headers else None
+
+        if page == 1:
+            first_page_headers = headers
+
+        if not data: # Empty list means no more pages
+            break
+
+        all_contracts.extend(data)
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1)
+
+    if return_headers:
+        return all_contracts, first_page_headers
+    return all_contracts
+
 
 def get_market_orders_history(character, return_headers=False, force_revalidate=False):
     """
@@ -2619,6 +2847,169 @@ async def master_orders_poll(application: Application):
         await asyncio.sleep(min_delay)
 
 
+async def master_contracts_poll(application: Application):
+    """
+    A single, continuous polling loop that checks for new contracts for all
+    monitored characters.
+    """
+    context = ContextTypes.DEFAULT_TYPE(application=application)
+    while True:
+        logging.info("Starting master contracts polling cycle.")
+        # Poll all characters that have contract notifications enabled
+        characters_to_poll = [c for c in list(CHARACTERS) if c.enable_contract_notifications]
+        min_delay = 300  # Default to 5 minutes
+
+        if not characters_to_poll:
+            logging.debug("No characters to poll for contracts. Sleeping.")
+            await asyncio.sleep(min_delay)
+            continue
+
+        for character in characters_to_poll:
+            # Security Check: Ensure character hasn't been deleted
+            if character.id not in [c.id for c in CHARACTERS]:
+                logging.warning(f"Skipping contract poll for character {character.name} ({character.id}) because they have been removed.")
+                continue
+
+            # Grace period check
+            history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+            if not history_backfilled_at_str:
+                logging.info(f"Skipping contract poll for {character.name} because historical data has not been backfilled yet.")
+                continue
+            try:
+                history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+                if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+                    logging.info(f"Skipping contract poll for {character.name} (within 1-hour grace period).")
+                    continue
+            except ValueError:
+                pass  # Legacy value, grace period is over.
+
+            logging.debug(f"Polling contracts for {character.name}")
+            try:
+                # Fetch all pages of contracts from ESI
+                contracts, headers = get_contracts(character, return_headers=True, force_revalidate=True)
+                char_delay = get_next_run_delay(headers)
+                min_delay = min(min_delay, char_delay)
+
+                if contracts is None:
+                    logging.error(f"Failed to fetch contracts for {character.name}. Skipping.")
+                    continue
+
+                # --- Cache Management ---
+                current_contract_ids = [c['contract_id'] for c in contracts]
+                remove_stale_contracts(character.id, current_contract_ids)
+                update_contracts_cache(character.id, contracts)
+
+                # --- Notification Logic ---
+                processed_contract_ids = get_processed_contracts(character.id)
+
+                # We only want to notify for 'outstanding' contracts that are new to the user.
+                new_contracts = [
+                    c for c in contracts
+                    if c['contract_id'] not in processed_contract_ids
+                    and c['status'] == 'outstanding'
+                ]
+
+                if not new_contracts:
+                    # Still need to mark all fetched contracts as processed if they are not new,
+                    # to avoid re-processing them on next run if they are old but not in the processed list.
+                    # This handles the initial seeding case.
+                    add_processed_contracts(character.id, current_contract_ids)
+                    continue
+
+                logging.info(f"Detected {len(new_contracts)} new contracts for {character.name}.")
+
+                if get_character_deletion_status(character.id):
+                    logging.info(f"Skipping contract notifications for {character.name} because they are pending deletion.")
+                else:
+                    # Resolve all necessary names in one go
+                    ids_to_resolve = set()
+                    for c in new_contracts:
+                        ids_to_resolve.add(c['issuer_id'])
+                        if c.get('assignee_id'):
+                            ids_to_resolve.add(c['assignee_id'])
+                        if c.get('start_location_id'):
+                            ids_to_resolve.add(c['start_location_id'])
+                        if c.get('end_location_id'):
+                            ids_to_resolve.add(c['end_location_id'])
+
+                    id_to_name = get_names_from_ids(list(ids_to_resolve), character=character)
+
+                    for contract in new_contracts:
+                        # Format the notification message
+                        contract_type = contract['type'].replace('_', ' ').title()
+                        status = contract['status'].replace('_', ' ').title()
+                        issuer_name = id_to_name.get(contract['issuer_id'], 'Unknown Issuer')
+
+                        message_lines = [
+                            f"📝 *New Contract ({character.name})* 📝",
+                            f"\n*Type:* `{contract_type}`",
+                            f"*From:* `{issuer_name}`",
+                            f"*Status:* `{status}`"
+                        ]
+
+                        if contract.get('assignee_id'):
+                             assignee_name = id_to_name.get(contract['assignee_id'], 'Unknown Assignee')
+                             message_lines.append(f"*To:* `{assignee_name}`")
+
+                        if contract.get('start_location_id'):
+                            start_loc_name = id_to_name.get(contract['start_location_id'], 'Unknown Location')
+                            message_lines.append(f"*Location:* `{start_loc_name}`")
+
+                        if contract.get('end_location_id') and contract.get('end_location_id') != contract.get('start_location_id'):
+                            end_loc_name = id_to_name.get(contract['end_location_id'], 'Unknown Location')
+                            message_lines.append(f"*Destination:* `{end_loc_name}`")
+
+                        if contract.get('title'):
+                             message_lines.append(f"*Title:* `{contract['title']}`")
+
+                        if contract.get('reward', 0) > 0:
+                            message_lines.append(f"*Reward:* `{contract['reward']:,.2f} ISK`")
+
+                        if contract.get('collateral', 0) > 0:
+                            message_lines.append(f"*Collateral:* `{contract['collateral']:,.2f} ISK`")
+
+                        if contract.get('price', 0) > 0:
+                             message_lines.append(f"*Price:* `{contract['price']:,.2f} ISK`")
+
+                        if contract.get('volume'):
+                            message_lines.append(f"*Volume:* `{contract['volume']:,.2f} m³`")
+
+                        try:
+                            expires_dt = datetime.fromisoformat(contract['date_expired'].replace('Z', '+00:00'))
+                            time_left = expires_dt - datetime.now(timezone.utc)
+
+                            if time_left.total_seconds() > 0:
+                                days, remainder = divmod(time_left.total_seconds(), 86400)
+                                hours, remainder = divmod(remainder, 3600)
+                                minutes, _ = divmod(remainder, 60)
+
+                                expires_str = ""
+                                if days > 0: expires_str += f"{int(days)}d "
+                                if hours > 0: expires_str += f"{int(hours)}h "
+                                if minutes > 0: expires_str += f"{int(minutes)}m"
+
+                                if expires_str:
+                                    message_lines.append(f"*Expires In:* `{expires_str.strip()}`")
+
+                        except (ValueError, KeyError):
+                            pass
+
+                        message = "\n".join(message_lines)
+                        await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                        await asyncio.sleep(1) # Stagger notifications
+
+                # Mark all contracts from this poll as processed
+                add_processed_contracts(character.id, current_contract_ids)
+
+            except Exception as e:
+                logging.error(f"Error processing contracts for {character.name}: {e}", exc_info=True)
+            finally:
+                await asyncio.sleep(1) # Stagger requests between characters
+
+        logging.info(f"Master contracts polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
+        await asyncio.sleep(min_delay)
+
+
 async def master_daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Runs once per day and sends a summary to all characters who have it enabled.
@@ -2874,10 +3265,23 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                 CHARACTERS.append(character)
                 logging.info(f"Added new character {character.name} to the polling list after successful data seed.")
                 keyboard = [
-                    [InlineKeyboardButton("💰 View Balances", callback_data="balance"), InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")],
-                    [InlineKeyboardButton("📈 View Sales", callback_data="sales"), InlineKeyboardButton("🛒 View Buys", callback_data="buys")],
-                    [InlineKeyboardButton("📊 Request Summary", callback_data="summary"), InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-                    [InlineKeyboardButton("➕ Add Character", callback_data="add_character"), InlineKeyboardButton("🗑️ Remove", callback_data="remove")]
+                    [
+                        InlineKeyboardButton("💰 View Balances", callback_data="balance"),
+                        InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
+                    ],
+                    [
+                        InlineKeyboardButton("📈 View Sales", callback_data="sales"),
+                        InlineKeyboardButton("🛒 View Buys", callback_data="buys")
+                    ],
+                    [
+                        InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
+                        InlineKeyboardButton("📊 Request Summary", callback_data="summary")
+                    ],
+                    [
+                        InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+                        InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
+                        InlineKeyboardButton("🗑️ Remove", callback_data="remove")
+                    ]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 success_message = f"✅ Sync complete for **{character.name}**! I will now start monitoring their market activity."
@@ -2991,10 +3395,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             InlineKeyboardButton("🛒 View Buys", callback_data="buys")
         ],
         [
-            InlineKeyboardButton("📊 Request Summary", callback_data="summary"),
-            InlineKeyboardButton("⚙️ Settings", callback_data="settings")
+            InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
+            InlineKeyboardButton("📊 Request Summary", callback_data="summary")
         ],
         [
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
             InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
             InlineKeyboardButton("🗑️ Remove", callback_data="remove")
         ]
@@ -3809,6 +4214,165 @@ async def buys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _select_character_for_historical_buys(update, context)
 
 
+async def contracts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Displays outstanding contracts. Prompts for character selection
+    if the user has multiple characters.
+    """
+    await _select_character_for_contracts(update, context)
+
+
+async def _select_character_for_contracts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Asks the user to select a character to view their contracts."""
+    user_id = update.effective_user.id
+    user_characters = get_characters_for_user(user_id)
+    chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
+
+    if not user_characters:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="You have no characters added.")
+        await start_command(update, context)
+        return
+
+    if len(user_characters) == 1:
+        await _display_contracts(update, context, character_id=user_characters[0].id, page=0)
+    else:
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"contracts_list_{char.id}_0")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character to view their outstanding contracts:"
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
+
+
+def get_contracts_from_db(character_id: int) -> list:
+    """Retrieves all cached contracts for a character from the local database."""
+    conn = database.get_db_connection()
+    contracts = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT contract_data FROM contracts WHERE character_id = %s", (character_id,))
+            contracts = [row[0] for row in cursor.fetchall()]
+    finally:
+        database.release_db_connection(conn)
+    return contracts
+
+
+async def _display_contracts(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, page: int = 0):
+    """Fetches and displays a paginated list of outstanding contracts from the local cache."""
+    query = update.callback_query
+    character = get_character_by_id(character_id)
+    if await check_and_handle_pending_deletion(update, context, character):
+        return
+    if not character:
+        await query.edit_message_text(text="Error: Could not find character.")
+        return
+
+    await query.edit_message_text(text=f"⏳ Fetching contracts for {character.name}...")
+
+    # --- Data Fetching & Filtering ---
+    all_contracts = get_contracts_from_db(character.id)
+    outstanding_contracts = [c for c in all_contracts if c.get('status') == 'outstanding']
+
+    if not outstanding_contracts:
+        user_characters = get_characters_for_user(query.from_user.id)
+        back_callback = "start_command" # Go back to main menu if no contracts
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=f"📝 *Outstanding Contracts for {character.name}*\n\nNo outstanding contracts found.",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        return
+
+    # Sort by date, newest first for display
+    outstanding_contracts.sort(key=lambda x: datetime.fromisoformat(x['date_issued'].replace('Z', '+00:00')), reverse=True)
+
+    # --- Pagination ---
+    items_per_page = 5
+    total_items = len(outstanding_contracts)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages - 1))
+    start_index = page * items_per_page
+    end_index = start_index + items_per_page
+    paginated_contracts = outstanding_contracts[start_index:end_index]
+
+    # --- Name Resolution ---
+    ids_to_resolve = set()
+    for c in paginated_contracts:
+        ids_to_resolve.add(c['issuer_id'])
+        if c.get('assignee_id'):
+            ids_to_resolve.add(c['assignee_id'])
+        if c.get('start_location_id'):
+            ids_to_resolve.add(c['start_location_id'])
+        if c.get('end_location_id'):
+            ids_to_resolve.add(c['end_location_id'])
+    id_to_name = get_names_from_ids(list(ids_to_resolve), character)
+
+    # --- Message Formatting ---
+    header = f"📝 *Outstanding Contracts for {character.name}*\n"
+    message_lines = []
+    for contract in paginated_contracts:
+        contract_type = contract['type'].replace('_', ' ').title()
+        issuer_name = id_to_name.get(contract['issuer_id'], 'Unknown')
+
+        line = f"*{contract_type}* from `{issuer_name}`"
+        if contract.get('title'):
+            line += f"\n  *Title:* `{contract['title']}`"
+
+        if contract.get('assignee_id'):
+            assignee_name = id_to_name.get(contract['assignee_id'], 'Unknown')
+            line += f"\n  *To:* `{assignee_name}`"
+
+        if contract.get('start_location_id'):
+            location_name = id_to_name.get(contract['start_location_id'], 'Unknown')
+            line += f"\n  *Location:* `{location_name}`"
+
+        if contract.get('reward', 0) > 0:
+            line += f"\n  *Reward:* `{contract['reward']:,.2f}` ISK"
+
+        if contract.get('collateral', 0) > 0:
+            line += f"\n  *Collateral:* `{contract['collateral']:,.2f}` ISK"
+
+        try:
+            expires_dt = datetime.fromisoformat(contract['date_expired'].replace('Z', '+00:00'))
+            time_left = expires_dt - datetime.now(timezone.utc)
+            if time_left.total_seconds() <= 0:
+                expires_str = "Expired"
+            else:
+                days = time_left.days
+                hours = time_left.seconds // 3600
+                expires_str = f"{days}d {hours}h"
+            line += f"\n  *Expires in:* `{expires_str}`"
+        except (ValueError, KeyError):
+            pass
+
+        message_lines.append(line)
+
+
+    # --- Keyboard ---
+    keyboard = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"contracts_list_{character_id}_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"contracts_list_{character_id}_{page + 1}"))
+
+    if nav_row: keyboard.append(nav_row)
+    user_characters = get_characters_for_user(query.from_user.id)
+    back_callback = "start_command"
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # --- Send Message ---
+    full_message = header + "\n\n".join(message_lines)
+    await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
+
+
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Allows a user to select a character to manage their general settings
@@ -3849,6 +4413,7 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
     keyboard = [
         [InlineKeyboardButton(f"Sales Notifications: {'✅ On' if character.enable_sales_notifications else '❌ Off'}", callback_data=f"toggle_sales_{character.id}")],
         [InlineKeyboardButton(f"Buy Notifications: {'✅ On' if character.enable_buy_notifications else '❌ Off'}", callback_data=f"toggle_buys_{character.id}")],
+        [InlineKeyboardButton(f"Contract Notifications: {'✅ On' if character.enable_contract_notifications else '❌ Off'}", callback_data=f"toggle_contracts_{character.id}")],
         [InlineKeyboardButton(f"Daily Summary: {'✅ On' if character.enable_daily_summary else '❌ Off'}", callback_data=f"toggle_summary_{character.id}")],
         [InlineKeyboardButton(f"Undercut Notifications: {'✅ On' if character.enable_undercut_notifications else '❌ Off'}", callback_data=f"toggle_undercut_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
@@ -4206,7 +4771,8 @@ async def post_init(application: Application):
     asyncio.create_task(master_wallet_transaction_poll(application))
     asyncio.create_task(master_order_history_poll(application))
     asyncio.create_task(master_orders_poll(application))
-    logging.info("Master polling loops for journal, transactions, order history, and open orders have been started.")
+    asyncio.create_task(master_contracts_poll(application))
+    logging.info("Master polling loops for journal, transactions, order history, open orders, and contracts have been started.")
 
     # Schedule the job to check for new characters
     application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
@@ -4804,6 +5370,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "settings": await settings_command(update, context)
     elif data == "add_character": await add_character_command(update, context)
     elif data == "remove": await remove_character_command(update, context)
+    elif data == "contracts": await contracts_command(update, context)
 
     # --- Open Orders Flow ---
     elif data == "open_orders_sales":
@@ -4873,6 +5440,12 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("settings_char_"):
         char_id = int(data.split('_')[-1])
         await _show_character_settings(update, context, get_character_by_id(char_id))
+
+    elif data.startswith("contracts_list_"):
+        _, _, char_id_str, page_str = data.split('_')
+        character_id = int(char_id_str)
+        page = int(page_str)
+        await _display_contracts(update, context, character_id, page)
 
     # --- Toggling Notification Settings ---
     elif data.startswith("toggle_"):
