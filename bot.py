@@ -2997,7 +2997,17 @@ async def master_orders_poll(application: Application):
         auth_char = characters_to_poll[0] if characters_to_poll else None
         location_tasks = {loc_id: asyncio.create_task(resolve_location_to_region(loc_id, auth_char)) for loc_id in all_locations}
         await asyncio.gather(*location_tasks.values(), return_exceptions=True)
-        location_to_region_map = {loc_id: task.result() for loc_id, task in location_tasks.items() if not task.done() or not isinstance(task.result(), Exception)}
+
+        location_to_region_map = {}
+        for loc_id, task in location_tasks.items():
+            # Check for exceptions before trying to get the result
+            if task.exception():
+                logging.error(f"Location resolution task for {loc_id} failed: {task.exception()}")
+                continue
+            result = task.result()
+            # Only add to map if the resolution was successful and not None
+            if result is not None:
+                location_to_region_map[loc_id] = result
 
 
         # --- Step 3: Concurrently fetch all required regional market data ---
