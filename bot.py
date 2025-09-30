@@ -1678,6 +1678,14 @@ def get_station_info(station_id: int):
     return make_esi_request(url)
 
 
+def get_structure_info(character: Character, structure_id: int):
+    """Fetches structure information from ESI, requires authentication."""
+    if not character:
+        return None
+    url = f"https://esi.evetech.net/v2/universe/structures/{structure_id}/"
+    return make_esi_request(url, character=character)
+
+
 def get_system_info(system_id: int):
     """Fetches public solar system information from ESI."""
     url = f"https://esi.evetech.net/v4/universe/systems/{system_id}/"
@@ -2770,15 +2778,20 @@ async def master_orders_poll(application: Application):
                 new_statuses_to_update = []
                 notifications_to_send = []
 
-                station_orders_by_region = defaultdict(list)
-                structure_orders_by_id = defaultdict(list)
+                orders_by_region = defaultdict(list)
                 for order in open_orders:
+                    # If the order is in a player-owned structure, resolve its region
                     if order['location_id'] > 10000000000:
-                        structure_orders_by_id[order['location_id']].append(order)
-                    elif 'region_id' in order:
-                        station_orders_by_region[order['region_id']].append(order)
+                        structure_info = await asyncio.to_thread(get_structure_info, character, order['location_id'])
+                        if structure_info and 'solar_system_id' in structure_info:
+                            system_info = await asyncio.to_thread(get_system_info, structure_info['solar_system_id'])
+                            if system_info and 'region_id' in system_info:
+                                order['region_id'] = system_info['region_id'] # Augment the order with its region
+                    # Group all orders by their region ID
+                    if 'region_id' in order:
+                        orders_by_region[order['region_id']].append(order)
 
-                for region_id, orders in station_orders_by_region.items():
+                for region_id, orders in orders_by_region.items():
                     type_ids_in_region = list(set(o['type_id'] for o in orders))
                     if region_id not in market_data_cache:
                         market_data_cache[region_id] = {}
@@ -2796,29 +2809,10 @@ async def master_orders_poll(application: Application):
                                     'sell': best_sell
                                 }
 
-                for structure_id, orders in structure_orders_by_id.items():
-                    if structure_id not in market_data_cache:
-                        all_structure_orders = await asyncio.to_thread(get_structure_market_orders, character, structure_id, force_revalidate=True)
-                        if all_structure_orders:
-                            order_map = defaultdict(lambda: {'buy': [], 'sell': []})
-                            for o in all_structure_orders:
-                                if o.get('is_buy_order'):
-                                    order_map[o['type_id']]['buy'].append(o)
-                                else:
-                                    order_map[o['type_id']]['sell'].append(o)
-
-                            final_price_map = {}
-                            for type_id, order_groups in order_map.items():
-                                final_price_map[type_id] = {
-                                    'buy': max(order_groups['buy'], key=lambda x: x['price']) if order_groups['buy'] else None,
-                                    'sell': min(order_groups['sell'], key=lambda x: x['price']) if order_groups['sell'] else None
-                                }
-                            market_data_cache[structure_id] = final_price_map
-
                 for order in open_orders:
                     is_undercut = False
                     competitor_order = None
-                    market_location_id = order['location_id'] if order['location_id'] > 10000000000 else order.get('region_id')
+                    market_location_id = order.get('region_id')
 
                     market_prices_for_loc = market_data_cache.get(market_location_id)
                     if market_prices_for_loc:
