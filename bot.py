@@ -1133,10 +1133,10 @@ def get_character_skills(character, force_revalidate=False):
     url = f"https://esi.evetech.net/v4/characters/{character.id}/skills/"
     return make_esi_request(url, character=character, force_revalidate=force_revalidate)
 
-def get_wallet_balance(character, return_headers=False):
+def get_wallet_balance(character, return_headers=False, force_revalidate=False):
     if not character: return None
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
-    return make_esi_request(url, character=character, return_headers=return_headers)
+    return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
 
 def get_market_orders_history(character, return_headers=False, force_revalidate=False):
     """
@@ -1578,9 +1578,11 @@ async def master_wallet_journal_poll(application: Application):
     while True:
         logging.info("Starting master wallet journal polling cycle.")
         characters_to_poll = list(CHARACTERS)
+        min_delay = 3600  # Start with a high delay
 
         if not characters_to_poll:
             logging.debug("No characters to poll for wallet journal. Sleeping.")
+            min_delay = 60
         else:
             for character in characters_to_poll:
                 if character.id not in [c.id for c in CHARACTERS]:
@@ -1602,8 +1604,11 @@ async def master_wallet_journal_poll(application: Application):
 
                 logging.debug(f"Polling wallet journal for {character.name}")
                 try:
-                    # Fetch the most recent page of journal entries
-                    recent_journal_entries = get_wallet_journal(character)
+                    # Fetch the most recent page of journal entries and get headers
+                    recent_journal_entries, headers = get_wallet_journal(character, return_headers=True)
+                    char_delay = get_next_run_delay(headers)
+                    min_delay = min(min_delay, char_delay)
+
                     if not recent_journal_entries:
                         continue
 
@@ -1629,8 +1634,8 @@ async def master_wallet_journal_poll(application: Application):
                 finally:
                     await asyncio.sleep(1) # Stagger requests
 
-        logging.info("Master wallet journal polling cycle complete. Sleeping for 60 seconds.")
-        await asyncio.sleep(60)
+        logging.info(f"Master wallet journal polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
+        await asyncio.sleep(min_delay)
 
 
 async def master_wallet_transaction_poll(application: Application):
@@ -1643,9 +1648,11 @@ async def master_wallet_transaction_poll(application: Application):
     while True:
         logging.info("Starting master wallet transaction polling cycle.")
         characters_to_poll = list(CHARACTERS)  # Poll all characters for data integrity
+        min_delay = 3600  # Start with a high delay (1 hour)
 
         if not characters_to_poll:
             logging.debug("No characters to poll for wallet transactions. Sleeping.")
+            min_delay = 60  # Default sleep if no characters
         else:
             for character in characters_to_poll:
                 # Security Check: Ensure character hasn't been deleted since the job started.
@@ -1672,7 +1679,10 @@ async def master_wallet_transaction_poll(application: Application):
                 logging.debug(f"Polling wallet for {character.name}")
                 try:
                     # Fetch only the most recent page of transactions from ESI
-                    recent_transactions = get_wallet_transactions(character)
+                    recent_transactions, headers = get_wallet_transactions(character, return_headers=True)
+                    char_delay = get_next_run_delay(headers)
+                    min_delay = min(min_delay, char_delay)
+
                     if not recent_transactions:
                         continue
 
@@ -1708,7 +1718,7 @@ async def master_wallet_transaction_poll(application: Application):
                     all_type_ids = list(sales.keys()) + list(buys.keys())
                     all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
                     id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [character.region_id])), character=character)
-                    wallet_balance = get_wallet_balance(character)
+                    wallet_balance = get_wallet_balance(character, force_revalidate=True)
 
                     # --- Unconditional Data Processing ---
 
@@ -1871,8 +1881,8 @@ async def master_wallet_transaction_poll(application: Application):
                 finally:
                     await asyncio.sleep(1)
 
-        logging.info("Master wallet transaction polling cycle complete. Sleeping for 60 seconds.")
-        await asyncio.sleep(60)
+        logging.info(f"Master wallet transaction polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
+        await asyncio.sleep(min_delay)
 
 
 async def master_order_history_poll(application: Application):
@@ -1884,9 +1894,11 @@ async def master_order_history_poll(application: Application):
     while True:
         logging.info("Starting master order history polling cycle.")
         characters_to_poll = [c for c in list(CHARACTERS) if c.notifications_enabled]
+        min_delay = 3600  # Start with a high delay
 
         if not characters_to_poll:
             logging.debug("No characters to poll for order history. Sleeping.")
+            min_delay = 60
         else:
             for character in characters_to_poll:
                 # Security Check: Ensure character hasn't been deleted since the job started.
@@ -1913,6 +1925,9 @@ async def master_order_history_poll(application: Application):
                 logging.debug(f"Polling order history for {character.name}")
                 try:
                     order_history, headers = get_market_orders_history(character, return_headers=True, force_revalidate=True)
+                    char_delay = get_next_run_delay(headers)
+                    min_delay = min(min_delay, char_delay)
+
                     if order_history is None:
                         logging.error(f"Failed to fetch order history for {character.name}. Skipping.")
                         continue
@@ -1991,8 +2006,8 @@ async def master_order_history_poll(application: Application):
                 finally:
                     await asyncio.sleep(1)
 
-        logging.info("Master order history polling cycle complete. Sleeping for 60 seconds.")
-        await asyncio.sleep(60)
+        logging.info(f"Master order history polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
+        await asyncio.sleep(min_delay)
 
 
 
@@ -2661,7 +2676,7 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
             message_lines.append(f"• `{char.name}`: `(Pending Deletion)`")
             continue  # Skip to the next character
 
-        balance = get_wallet_balance(char)
+        balance = get_wallet_balance(char, force_revalidate=True)
         if balance is not None:
             message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
             total_balance += balance
