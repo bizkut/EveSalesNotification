@@ -5,3 +5,5 @@ gunicorn
 psycopg2-binary
 matplotlib
 Pillow
+celery
+redis
