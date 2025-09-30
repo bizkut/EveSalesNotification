@@ -1,5 +1,10 @@
 import os
+import sys
 from celery import Celery
+
+# Add the project's root directory to the Python path
+# This is necessary for the Celery worker to find the 'bot' module
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 # Get the broker URL from environment variables
 # Default to a local Redis instance if not set, for development flexibility
