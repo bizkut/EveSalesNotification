@@ -4794,13 +4794,11 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def post_init(application: Application):
     """
-    Sets bot commands and starts background tasks after initialization.
+    Starts background tasks after initialization.
     """
-    commands = [
-        BotCommand("start", "Show the main menu & keyboard"),
-    ]
-    await application.bot.set_my_commands(commands)
-    logging.info("Bot commands have been set in the Telegram menu.")
+    # Command to set the bot's commands in the UI has been removed
+    # to prevent the command list from popping up. The /start command
+    # will still work but will not be advertised.
 
     # Start the master polling loops as background tasks
     asyncio.create_task(master_wallet_journal_poll(application))
