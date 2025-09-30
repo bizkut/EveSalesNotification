@@ -2196,17 +2196,35 @@ def _calculate_summary_data(character: Character) -> dict:
         tx for tx in all_transactions if not tx.get('is_buy') and
         datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > one_day_ago
     ]
-    total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
-
-    # Sum all fees from the journal for the last 24h
-    total_fees_24h = sum(
-        abs(entry['amount']) for entry in full_journal
+    fees_past_24_hours = [
+        entry for entry in full_journal
         if entry['ref_type'] in fee_ref_types and entry['date'] > one_day_ago
-    )
+    ]
+    total_sales_24h = sum(s['quantity'] * s['unit_price'] for s in sales_past_24_hours)
+    total_fees_24h = sum(abs(f['amount']) for f in fees_past_24_hours)
 
-    # Calculate profit for the last 24h
-    gross_profit_24h = calculate_fifo_profit_for_summary(sales_past_24_hours, character.id)
-    profit_24h = gross_profit_24h - total_fees_24h
+    # --- Accurate 24h Profit Calculation ---
+    inventory, events_in_period = _prepare_chart_data(character.id, one_day_ago)
+
+    profit_24h = -total_fees_24h # Start with fees as a negative profit
+
+    sales_in_period = [e['data'] for e in events_in_period if e['type'] == 'tx' and not e['data'].get('is_buy')]
+    for sale in sales_in_period:
+        sale_value = sale['quantity'] * sale['unit_price']
+        cogs = 0
+        remaining_to_sell = sale['quantity']
+        lots = inventory.get(sale['type_id'], [])
+        if lots:
+            consumed_count = 0
+            for lot in lots:
+                if remaining_to_sell <= 0: break
+                take = min(remaining_to_sell, lot['quantity'])
+                cogs += take * lot['price']
+                remaining_to_sell -= take
+                lot['quantity'] -= take
+                if lot['quantity'] == 0: consumed_count += 1
+            inventory[sale['type_id']] = lots[consumed_count:]
+        profit_24h += sale_value - cogs
 
     # --- Monthly Summary ---
     sales_this_month = [
