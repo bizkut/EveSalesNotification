@@ -335,6 +335,18 @@ def setup_database():
                 )
             """)
 
+            # Table for storing daily profit snapshots for performance
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_profit_summary (
+                    character_id INTEGER NOT NULL,
+                    date DATE NOT NULL,
+                    cumulative_profit NUMERIC(17, 2) NOT NULL,
+                    PRIMARY KEY (character_id, date)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_profit_summary_char_date ON daily_profit_summary (character_id, date DESC);")
+
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -856,7 +868,8 @@ def delete_character(character_id: int):
                 "trading_fees",
                 "historical_journal",
                 "wallet_journal",
-                "chart_cache"
+                "chart_cache",
+                "daily_profit_summary"
             ]
             for table in tables_to_delete_from:
                 cursor.execute(f"DELETE FROM {table} WHERE character_id = %s", (character_id,))
@@ -871,7 +884,8 @@ def delete_character(character_id: int):
             keys_to_delete = [
                 f"history_backfilled_{character_id}",
                 f"low_balance_alert_sent_at_{character_id}",
-                f"chart_cache_dirty_{character_id}"
+                f"chart_cache_dirty_{character_id}",
+                f"profit_summary_backfilled_{character_id}"
             ]
             cursor.execute("DELETE FROM bot_state WHERE key = ANY(%s)", (keys_to_delete,))
             logging.info(f"Deleted bot_state entries for character {character_id}.")
@@ -885,6 +899,54 @@ def delete_character(character_id: int):
     except Exception as e:
         conn.rollback()
         logging.error(f"Error deleting character {character_id}: {e}", exc_info=True)
+    finally:
+        database.release_db_connection(conn)
+
+
+def get_latest_daily_profit_summary(character_id: int, before_date: date = None) -> tuple[date, float] | None:
+    """
+    Retrieves the most recent daily profit summary for a character, optionally before a specific date.
+    Returns the date and the cumulative profit.
+    """
+    conn = database.get_db_connection()
+    summary = None
+    try:
+        with conn.cursor() as cursor:
+            if before_date:
+                cursor.execute(
+                    "SELECT date, cumulative_profit FROM daily_profit_summary WHERE character_id = %s AND date < %s ORDER BY date DESC LIMIT 1",
+                    (character_id, before_date)
+                )
+            else:
+                cursor.execute(
+                    "SELECT date, cumulative_profit FROM daily_profit_summary WHERE character_id = %s ORDER BY date DESC LIMIT 1",
+                    (character_id,)
+                )
+            row = cursor.fetchone()
+            if row:
+                # Convert profit from Decimal to float
+                summary = (row[0], float(row[1]))
+    finally:
+        database.release_db_connection(conn)
+    return summary
+
+
+def save_daily_profit_summaries(character_id: int, summaries: list[dict]):
+    """Saves a list of daily profit summaries to the database."""
+    if not summaries:
+        return
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [(character_id, s['date'], s['profit']) for s in summaries]
+            upsert_query = """
+                INSERT INTO daily_profit_summary (character_id, date, cumulative_profit)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (character_id, date) DO UPDATE
+                SET cumulative_profit = EXCLUDED.cumulative_profit;
+            """
+            cursor.executemany(upsert_query, data_to_insert)
+            conn.commit()
     finally:
         database.release_db_connection(conn)
 
@@ -2701,6 +2763,190 @@ def backfill_character_journal_history(character: Character) -> bool:
     return True
 
 
+def update_daily_profit_summary(character_id: int) -> bool:
+    """
+    Calculates and saves new daily profit summaries from the last known
+    summary date up to yesterday. This function performs a full
+    re-simulation to ensure accuracy but only saves the missing days.
+    """
+    latest_summary = get_latest_daily_profit_summary(character_id)
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+
+    start_date_to_log = None
+    if latest_summary:
+        last_summary_date = latest_summary[0]
+        if last_summary_date >= yesterday:
+            logging.info(f"Profit summary for {character_id} is already up to date.")
+            return True
+        start_date_to_log = last_summary_date + timedelta(days=1)
+
+    logging.info(f"Updating daily profit summary for {character_id} from {start_date_to_log or 'the beginning'}...")
+
+    all_transactions = get_historical_transactions_from_db(character_id)
+    full_journal = get_full_wallet_journal_from_db(character_id)
+    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+
+    all_events = []
+    for tx in all_transactions:
+        all_events.append({'type': 'tx', 'data': tx, 'date': datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))})
+    for entry in full_journal:
+        if entry['ref_type'] in fee_ref_types:
+            all_events.append({'type': 'fee', 'data': entry, 'date': entry['date']})
+
+    if not all_events:
+        return True
+
+    all_events.sort(key=lambda x: x['date'])
+
+    if start_date_to_log is None:
+        start_date_to_log = all_events[0]['date'].date()
+
+    inventory = defaultdict(list)
+    daily_summaries_to_save = []
+    cumulative_profit = 0.0
+    current_day = all_events[0]['date'].date()
+
+    for event in all_events:
+        event_date = event['date'].date()
+
+        if event_date > current_day:
+            if current_day >= start_date_to_log and current_day <= yesterday:
+                daily_summaries_to_save.append({'date': current_day, 'profit': cumulative_profit})
+
+            days_diff = (event_date - current_day).days
+            for i in range(1, days_diff):
+                day_to_add = current_day + timedelta(days=i)
+                if day_to_add >= start_date_to_log and day_to_add <= yesterday:
+                    daily_summaries_to_save.append({'date': day_to_add, 'profit': cumulative_profit})
+            current_day = event_date
+
+        if event['type'] == 'tx':
+            tx = event['data']
+            type_id = tx['type_id']
+            if tx.get('is_buy'):
+                inventory[type_id].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+            else:
+                sale_value = tx['quantity'] * tx['unit_price']
+                cogs = 0
+                remaining_to_sell = tx['quantity']
+                lots = inventory.get(type_id, [])
+                if lots:
+                    consumed_count = 0
+                    for lot in lots:
+                        if remaining_to_sell <= 0: break
+                        take = min(remaining_to_sell, lot['quantity'])
+                        cogs += take * lot['price']
+                        remaining_to_sell -= take
+                        lot['quantity'] -= take
+                        if lot['quantity'] == 0: consumed_count += 1
+                    inventory[type_id] = lots[consumed_count:]
+                profit_from_sale = sale_value - cogs
+                cumulative_profit += profit_from_sale
+        elif event['type'] == 'fee':
+            cumulative_profit -= abs(event['data']['amount'])
+
+    if current_day >= start_date_to_log and current_day <= yesterday:
+        daily_summaries_to_save.append({'date': current_day, 'profit': cumulative_profit})
+
+    if daily_summaries_to_save:
+        save_daily_profit_summaries(character_id, daily_summaries_to_save)
+        logging.info(f"Saved {len(daily_summaries_to_save)} new daily profit summaries for {character_id}.")
+
+    return True
+
+
+def backfill_daily_profit_summary(character_id: int) -> bool:
+    """
+    Performs a one-time calculation of daily cumulative profit for a character's
+    entire history and saves it to the summary table. This is a read-only,
+    in-memory calculation that processes events chronologically.
+    """
+    state_key = f"profit_summary_backfilled_{character_id}"
+    if get_bot_state(state_key):
+        logging.info(f"Daily profit summary already backfilled for {character_id}. Skipping.")
+        return True
+
+    logging.warning(f"Starting daily profit summary backfill for character {character_id}...")
+
+    all_transactions = get_historical_transactions_from_db(character_id)
+    full_journal = get_full_wallet_journal_from_db(character_id)
+    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+
+    if not all_transactions and not full_journal:
+        logging.info(f"No transactions or journal entries found for character {character_id}. Skipping profit backfill.")
+        set_bot_state(state_key, "true")
+        return True
+
+    # --- Combine all financial events and sort chronologically ---
+    all_events = []
+    for tx in all_transactions:
+        all_events.append({'type': 'tx', 'data': tx, 'date': datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))})
+    for entry in full_journal:
+        if entry['ref_type'] in fee_ref_types:
+            all_events.append({'type': 'fee', 'data': entry, 'date': entry['date']})
+
+    if not all_events:
+        logging.info(f"No relevant financial events found for character {character_id}. Skipping profit backfill.")
+        set_bot_state(state_key, "true")
+        return True
+
+    all_events.sort(key=lambda x: x['date'])
+
+    # --- In-Memory FIFO Simulation & Daily Snapshot ---
+    inventory = defaultdict(list)
+    daily_summaries = []
+    cumulative_profit = 0.0
+    current_day = all_events[0]['date'].date()
+
+    for event in all_events:
+        event_date = event['date'].date()
+
+        # If the day has changed, save the profit from the *end* of the previous day.
+        if event_date > current_day:
+            # Fill in any gaps for days with no activity
+            days_diff = (event_date - current_day).days
+            for i in range(days_diff):
+                day_to_add = current_day + timedelta(days=i)
+                daily_summaries.append({'date': day_to_add, 'profit': cumulative_profit})
+            current_day = event_date
+
+        # Process the event
+        if event['type'] == 'tx':
+            tx = event['data']
+            type_id = tx['type_id']
+            if tx.get('is_buy'):
+                inventory[type_id].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+            else:  # Sale
+                sale_value = tx['quantity'] * tx['unit_price']
+                cogs = 0
+                remaining_to_sell = tx['quantity']
+                lots = inventory.get(type_id, [])
+                if lots:
+                    consumed_count = 0
+                    for lot in lots:
+                        if remaining_to_sell <= 0: break
+                        take = min(remaining_to_sell, lot['quantity'])
+                        cogs += take * lot['price']
+                        remaining_to_sell -= take
+                        lot['quantity'] -= take
+                        if lot['quantity'] == 0: consumed_count += 1
+                    inventory[type_id] = lots[consumed_count:]
+                profit_from_sale = sale_value - cogs
+                cumulative_profit += profit_from_sale
+        elif event['type'] == 'fee':
+            fee_amount = abs(event['data']['amount'])
+            cumulative_profit -= fee_amount
+
+    # Save the summary for the very last day of activity
+    daily_summaries.append({'date': current_day, 'profit': cumulative_profit})
+
+    save_daily_profit_summaries(character_id, daily_summaries)
+
+    logging.warning(f"Daily profit summary backfill for {character_id} complete. Saved {len(daily_summaries)} summaries.")
+    set_bot_state(state_key, "true")
+    return True
+
+
 def backfill_all_character_history(character: Character) -> bool:
     """
     Performs a one-time backfill of all transaction history from
@@ -2733,6 +2979,11 @@ def backfill_all_character_history(character: Character) -> bool:
     # --- Backfill Wallet Journal for Fees/Taxes ---
     if not backfill_character_journal_history(character):
         # The sub-function will log the specific error
+        return False
+
+    # --- Backfill Daily Profit Summary ---
+    if not backfill_daily_profit_summary(character.id):
+        logging.error(f"Failed to backfill daily profit summary for {character.name}.")
         return False
 
 
@@ -3132,36 +3383,40 @@ def format_isk(value):
 def generate_hourly_chart(character_id: int):
     """
     Generates a chart with cumulative profit (area) and hourly sales/fees (bars)
-    for the last 24 hours.
+    for the last 24 hours, optimized with daily profit summaries.
     """
     character = get_character_by_id(character_id)
-    if not character:
-        return None
+    if not character: return None
 
     now = datetime.now(timezone.utc)
     start_of_period = now - timedelta(days=1)
 
-    # --- 1. Fetch all historical data ---
-    all_transactions = get_historical_transactions_from_db(character_id)
-    full_journal = get_full_wallet_journal_from_db(character_id)
-    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+    accumulated_profit, inventory, events_in_period = _get_chart_data(character_id, start_of_period)
+    cumulative_profit_over_time = [accumulated_profit]
 
-    # --- 2. Process all transactions chronologically to calculate profit for each sale ---
-    inventory = defaultdict(list)
-    sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
+    hours = [(start_of_period + timedelta(hours=i)) for i in range(24)]
+    bar_labels = [h.strftime('%H:00') for h in hours]
+    hourly_sales = {label: 0 for label in bar_labels}
+    hourly_fees = {label: 0 for label in bar_labels}
 
-    for tx in sorted_transactions:
-        tx['date_obj'] = datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
-        if tx.get('is_buy'):
-            inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-        else:  # It's a sale
+    for i in range(24):
+        hour_start = start_of_period + timedelta(hours=i)
+        hour_end = hour_start + timedelta(hours=1)
+        hour_label = hour_start.strftime('%H:00')
+
+        sales_in_hour = [e['data'] for e in events_in_period if e['type'] == 'tx' and not e['data'].get('is_buy') and hour_start <= e['date'] < hour_end]
+        fees_in_hour = [e['data'] for e in events_in_period if e['type'] == 'fee' and hour_start <= e['date'] < hour_end]
+
+        hourly_sales[hour_label] = sum(s['quantity'] * s['unit_price'] for s in sales_in_hour)
+        hourly_fees[hour_label] = sum(abs(f['amount']) for f in fees_in_hour)
+
+        profit_this_hour = -hourly_fees[hour_label]
+        for sale in sales_in_hour:
+            sale_value = sale['quantity'] * sale['unit_price']
             cogs = 0
-            remaining_to_sell = tx['quantity']
-            lots = inventory.get(tx['type_id'], [])
-            cogs_calculable = True
-            if not lots:
-                cogs_calculable = False
-            else:
+            remaining_to_sell = sale['quantity']
+            lots = inventory.get(sale['type_id'], [])
+            if lots:
                 consumed_count = 0
                 for lot in lots:
                     if remaining_to_sell <= 0: break
@@ -3169,87 +3424,35 @@ def generate_hourly_chart(character_id: int):
                     cogs += take * lot['price']
                     remaining_to_sell -= take
                     lot['quantity'] -= take
-                    if lot['quantity'] == 0:
-                        consumed_count += 1
-                inventory[tx['type_id']] = lots[consumed_count:]
-                if remaining_to_sell > 0:
-                    cogs_calculable = False
-            tx['cogs'] = cogs if cogs_calculable else None
-
-    # --- 3. Aggregate data into hourly buckets for the chart ---
-    hours = [(start_of_period + timedelta(hours=i)) for i in range(25)]
-    hour_labels = [h.strftime('%H:00') for h in hours]
-
-    bar_labels = hour_labels[:-1]
-    hourly_sales = {label: 0 for label in bar_labels}
-    hourly_fees = {label: 0 for label in bar_labels}
-
-    journal_fees = [entry for entry in full_journal if entry['ref_type'] in fee_ref_types]
-
-    sales_before_period = [tx for tx in sorted_transactions if not tx.get('is_buy') and tx['date_obj'] < start_of_period]
-    fees_before_period = [f for f in journal_fees if f['date'] < start_of_period]
-
-    profit_before_period = sum((s['quantity'] * s['unit_price']) - s['cogs'] for s in sales_before_period if s.get('cogs') is not None)
-    profit_before_period -= sum(abs(f['amount']) for f in fees_before_period)
-
-    accumulated_profit = profit_before_period
-    cumulative_profit_over_time = [accumulated_profit]
-
-    for i in range(24):
-        hour_start = start_of_period + timedelta(hours=i)
-        hour_end = hour_start + timedelta(hours=1)
-        hour_label = hour_start.strftime('%H:00')
-
-        sales_in_hour = [tx for tx in sorted_transactions if not tx.get('is_buy') and hour_start <= tx['date_obj'] < hour_end]
-        fees_in_hour = [f for f in journal_fees if hour_start <= f['date'] < hour_end]
-
-        total_sales_value_in_hour = sum(s['quantity'] * s['unit_price'] for s in sales_in_hour)
-        total_fees_in_hour = sum(abs(f['amount']) for f in fees_in_hour)
-
-        profit_this_hour = sum((s['quantity'] * s['unit_price']) - s['cogs'] for s in sales_in_hour if s.get('cogs') is not None)
-        profit_this_hour -= total_fees_in_hour
-
-        hourly_sales[hour_label] = total_sales_value_in_hour
-        hourly_fees[hour_label] = total_fees_in_hour
+                    if lot['quantity'] == 0: consumed_count += 1
+                inventory[sale['type_id']] = lots[consumed_count:]
+            profit_this_hour += sale_value - cogs
 
         accumulated_profit += profit_this_hour
         cumulative_profit_over_time.append(accumulated_profit)
 
-    if not any(hourly_sales.values()) and not any(hourly_fees.values()):
-        return None
+    if not any(hourly_sales.values()) and not any(hourly_fees.values()): return None
 
-    # --- Chart Generation ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(12, 7))
     fig.patch.set_facecolor('#1c1c1c')
     ax.set_facecolor('#282828')
-
-    # Plot Sales and Fees as bar charts first (on the bottom layer)
     bar_width = 0.4
     r1 = range(len(bar_labels))
     r2 = [x + bar_width for x in r1]
     ax.bar(r1, list(hourly_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
     ax.bar(r2, list(hourly_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
-
-
-    # Create a second y-axis for the profit line/area chart
     ax2 = ax.twinx()
-    # Plot accumulated profit as an area chart
-    ax2.fill_between(hour_labels, cumulative_profit_over_time, color="lime", alpha=0.3, zorder=1)
-    ax2.plot(hour_labels, cumulative_profit_over_time, label='Accumulated Profit', color='lime', marker='o', linestyle='-', zorder=3)
-
-
+    ax2.fill_between(range(25), cumulative_profit_over_time, color="lime", alpha=0.3, zorder=1)
+    ax2.plot(range(25), cumulative_profit_over_time, label='Accumulated Profit', color='lime', marker='o', linestyle='-', zorder=3)
     ax.set_title(f'Hourly Performance for {character.name} (Last 24h)', color='white', fontsize=16)
     ax.set_xlabel('Hour (UTC)', color='white', fontsize=12)
     ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
     ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
-
-    # Combine legends from both axes
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines + lines2, labels + labels2, loc=0)
-
     plt.xticks([r + bar_width/2 for r in range(len(bar_labels))], bar_labels, rotation=45, ha='right')
     ax.tick_params(axis='x', colors='white')
     ax.tick_params(axis='y', colors='white')
@@ -3258,47 +3461,49 @@ def generate_hourly_chart(character_id: int):
     plt.setp(ax2.spines.values(), color='gray')
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-
-
     buf = io.BytesIO()
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
     return buf
 
+def _get_chart_data(character_id, start_of_period):
+    """A helper function to fetch and process all financial events for chart generation."""
+    latest_summary = get_latest_daily_profit_summary(character_id, before_date=start_of_period.date())
+    profit_before_period = 0.0
+    processing_start_time = datetime.min.replace(tzinfo=timezone.utc)
+    if latest_summary:
+        summary_date, profit_before_period = latest_summary
+        processing_start_time = datetime.combine(summary_date, dt_time.min, tzinfo=timezone.utc)
 
-def generate_daily_chart(character_id: int):
-    """
-    Generates a chart with cumulative profit (area) and daily sales/fees (bars)
-    for the current month.
-    """
-    character = get_character_by_id(character_id)
-    if not character:
-        return None
-
-    now = datetime.now(timezone.utc)
-    start_of_period = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    _, num_days = calendar.monthrange(now.year, now.month)
-
-    # --- 1. Fetch and process all historical data for profit calculation ---
     all_transactions = get_historical_transactions_from_db(character_id)
     full_journal = get_full_wallet_journal_from_db(character_id)
     fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
 
-    inventory = defaultdict(list)
-    sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
+    all_events = []
+    for tx in all_transactions:
+        tx_date = datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
+        if tx_date >= processing_start_time:
+            all_events.append({'type': 'tx', 'data': tx, 'date': tx_date})
+    for entry in full_journal:
+        if entry['ref_type'] in fee_ref_types and entry['date'] >= processing_start_time:
+            all_events.append({'type': 'fee', 'data': entry, 'date': entry['date']})
+    all_events.sort(key=lambda x: x['date'])
 
-    for tx in sorted_transactions:
-        tx['date_obj'] = datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
-        if tx.get('is_buy'):
-            inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-        else:  # Sale
+    inventory = defaultdict(list)
+    cumulative_profit = profit_before_period
+
+    for event in all_events:
+        if event['date'] >= start_of_period:
+            break
+
+        if event['type'] == 'tx' and not event['data'].get('is_buy'):
+            tx = event['data']
+            sale_value = tx['quantity'] * tx['unit_price']
             cogs = 0
             remaining_to_sell = tx['quantity']
             lots = inventory.get(tx['type_id'], [])
-            cogs_calculable = True
-            if not lots: cogs_calculable = False
-            else:
+            if lots:
                 consumed_count = 0
                 for lot in lots:
                     if remaining_to_sell <= 0: break
@@ -3308,78 +3513,86 @@ def generate_daily_chart(character_id: int):
                     lot['quantity'] -= take
                     if lot['quantity'] == 0: consumed_count += 1
                 inventory[tx['type_id']] = lots[consumed_count:]
-                if remaining_to_sell > 0: cogs_calculable = False
-            tx['cogs'] = cogs if cogs_calculable else None
+            cumulative_profit += sale_value - cogs
+        elif event['type'] == 'tx' and event['data'].get('is_buy'):
+             inventory[event['data']['type_id']].append({'quantity': event['data']['quantity'], 'price': event['data']['unit_price']})
+        elif event['type'] == 'fee':
+            cumulative_profit -= abs(event['data']['amount'])
 
-    # --- 2. Aggregate data into daily buckets for the chart ---
+    return cumulative_profit, inventory, [e for e in all_events if e['date'] >= start_of_period]
+
+def generate_daily_chart(character_id: int):
+    character = get_character_by_id(character_id)
+    if not character: return None
+
+    now = datetime.now(timezone.utc)
+    start_of_period = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    _, num_days = calendar.monthrange(now.year, now.month)
+
+    accumulated_profit, inventory, events_in_period = _get_chart_data(character_id, start_of_period)
+
+    cumulative_profit_over_time = [accumulated_profit]
     days = list(range(1, num_days + 1))
     daily_sales = {day: 0 for day in days}
     daily_fees = {day: 0 for day in days}
 
-    journal_fees = [entry for entry in full_journal if entry['ref_type'] in fee_ref_types]
-
-    sales_before_period = [tx for tx in sorted_transactions if not tx.get('is_buy') and tx['date_obj'] < start_of_period]
-    fees_before_period = [f for f in journal_fees if f['date'] < start_of_period]
-
-    profit_before_period = sum((s['quantity'] * s['unit_price']) - s['cogs'] for s in sales_before_period if s.get('cogs') is not None)
-    profit_before_period -= sum(abs(f['amount']) for f in fees_before_period)
-
-    accumulated_profit = profit_before_period
-    cumulative_profit_over_time = [accumulated_profit]
-
     for day in days:
         day_start = start_of_period.replace(day=day)
+        if day_start > now: break
         day_end = day_start + timedelta(days=1)
 
-        sales_in_day = [tx for tx in sorted_transactions if not tx.get('is_buy') and day_start <= tx['date_obj'] < day_end]
-        fees_in_day = [f for f in journal_fees if day_start <= f['date'] < day_end]
+        sales_in_day = [e['data'] for e in events_in_period if e['type'] == 'tx' and not e['data'].get('is_buy') and day_start <= e['date'] < day_end]
+        fees_in_day = [e['data'] for e in events_in_period if e['type'] == 'fee' and day_start <= e['date'] < day_end]
 
-        total_sales_value_in_day = sum(s['quantity'] * s['unit_price'] for s in sales_in_day)
-        total_fees_in_day = sum(abs(f['amount']) for f in fees_in_day)
+        daily_sales[day] = sum(s['quantity'] * s['unit_price'] for s in sales_in_day)
+        daily_fees[day] = sum(abs(f['amount']) for f in fees_in_day)
 
-        profit_this_day = sum((s['quantity'] * s['unit_price']) - s['cogs'] for s in sales_in_day if s.get('cogs') is not None)
-        profit_this_day -= total_fees_in_day
-
-        daily_sales[day] = total_sales_value_in_day
-        daily_fees[day] = total_fees_in_day
+        profit_this_day = -daily_fees[day]
+        for sale in sales_in_day:
+            sale_value = sale['quantity'] * sale['unit_price']
+            cogs = 0
+            remaining_to_sell = sale['quantity']
+            lots = inventory.get(sale['type_id'], [])
+            if lots:
+                consumed_count = 0
+                for lot in lots:
+                    if remaining_to_sell <= 0: break
+                    take = min(remaining_to_sell, lot['quantity'])
+                    cogs += take * lot['price']
+                    remaining_to_sell -= take
+                    lot['quantity'] -= take
+                    if lot['quantity'] == 0: consumed_count += 1
+                inventory[sale['type_id']] = lots[consumed_count:]
+            profit_this_day += sale_value - cogs
 
         accumulated_profit += profit_this_day
         cumulative_profit_over_time.append(accumulated_profit)
 
-    if not any(daily_sales.values()) and not any(daily_fees.values()):
-        return None
+    if not any(daily_sales.values()) and not any(daily_fees.values()): return None
 
-    # --- Chart Generation ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(12, 7))
     fig.patch.set_facecolor('#1c1c1c')
     ax.set_facecolor('#282828')
-
     bar_width = 0.4
     r1 = days
     r2 = [x + bar_width for x in r1]
     ax.bar(r1, list(daily_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
     ax.bar(r2, list(daily_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
-
     ax2 = ax.twinx()
-    # x-axis for line plot needs a point for day 0
-    line_x_axis = list(range(num_days + 1))
+    line_x_axis = list(range(len(cumulative_profit_over_time)))
     ax2.fill_between(line_x_axis, cumulative_profit_over_time, color="lime", alpha=0.3, zorder=1, step='post')
     ax2.plot(line_x_axis, cumulative_profit_over_time, label='Accumulated Profit', color='lime', linestyle='-', zorder=3, drawstyle='steps-post')
-
-
     ax.set_title(f'Daily Performance for {character.name} - {now.strftime("%B %Y")}', color='white', fontsize=16)
     ax.set_xlabel('Day of Month', color='white', fontsize=12)
     ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
     ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
-
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines + lines2, labels + labels2, loc=0)
-
-    ax.set_xticks([r + bar_width/2 for r in r1])
-    ax.set_xticklabels(r1)
+    ax.set_xticks([r for r in r1 if r <= now.day])
+    ax.set_xticklabels([r for r in r1 if r <= now.day])
     ax.tick_params(axis='x', colors='white')
     ax.tick_params(axis='y', colors='white')
     ax2.tick_params(axis='y', colors='white')
@@ -3387,8 +3600,6 @@ def generate_daily_chart(character_id: int):
     plt.setp(ax2.spines.values(), color='gray')
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-
-
     buf = io.BytesIO()
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
@@ -3396,35 +3607,38 @@ def generate_daily_chart(character_id: int):
     return buf
 
 def generate_monthly_chart(character_id: int, year: int):
-    """
-    Generates a chart with cumulative profit (area) and monthly sales/fees (bars)
-    for a specific year.
-    """
     character = get_character_by_id(character_id)
-    if not character:
-        return None
+    if not character: return None
 
+    now = datetime.now(timezone.utc)
     start_of_period = datetime(year, 1, 1, tzinfo=timezone.utc)
 
-    # --- 1. Fetch and process all historical data for profit calculation ---
-    all_transactions = get_historical_transactions_from_db(character_id)
-    full_journal = get_full_wallet_journal_from_db(character_id)
-    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+    accumulated_profit, inventory, events_in_period = _get_chart_data(character_id, start_of_period)
 
-    inventory = defaultdict(list)
-    sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
+    cumulative_profit_over_time = [accumulated_profit]
+    months = list(range(1, 13))
+    month_names = [calendar.month_abbr[m] for m in months]
+    monthly_sales = {m: 0 for m in months}
+    monthly_fees = {m: 0 for m in months}
 
-    for tx in sorted_transactions:
-        tx['date_obj'] = datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))
-        if tx.get('is_buy'):
-            inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-        else:  # Sale
+    for month in months:
+        month_start = datetime(year, month, 1, tzinfo=timezone.utc)
+        if month_start > now: break
+        next_month_start = datetime(year, month + 1, 1, tzinfo=timezone.utc) if month < 12 else datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+
+        sales_in_month = [e['data'] for e in events_in_period if e['type'] == 'tx' and not e['data'].get('is_buy') and month_start <= e['date'] < next_month_start]
+        fees_in_month = [e['data'] for e in events_in_period if e['type'] == 'fee' and month_start <= e['date'] < next_month_start]
+
+        monthly_sales[month] = sum(s['quantity'] * s['unit_price'] for s in sales_in_month)
+        monthly_fees[month] = sum(abs(f['amount']) for f in fees_in_month)
+
+        profit_this_month = -monthly_fees[month]
+        for sale in sales_in_month:
+            sale_value = sale['quantity'] * sale['unit_price']
             cogs = 0
-            remaining_to_sell = tx['quantity']
-            lots = inventory.get(tx['type_id'], [])
-            cogs_calculable = True
-            if not lots: cogs_calculable = False
-            else:
+            remaining_to_sell = sale['quantity']
+            lots = inventory.get(sale['type_id'], [])
+            if lots:
                 consumed_count = 0
                 for lot in lots:
                     if remaining_to_sell <= 0: break
@@ -3433,81 +3647,35 @@ def generate_monthly_chart(character_id: int, year: int):
                     remaining_to_sell -= take
                     lot['quantity'] -= take
                     if lot['quantity'] == 0: consumed_count += 1
-                inventory[tx['type_id']] = lots[consumed_count:]
-                if remaining_to_sell > 0: cogs_calculable = False
-            tx['cogs'] = cogs if cogs_calculable else None
-
-    # --- 2. Aggregate data into monthly buckets for the chart ---
-    months = list(range(1, 13))
-    month_names = [calendar.month_abbr[m] for m in months]
-    monthly_sales = {m: 0 for m in months}
-    monthly_fees = {m: 0 for m in months}
-
-    journal_fees = [entry for entry in full_journal if entry['ref_type'] in fee_ref_types]
-
-    sales_before_period = [tx for tx in sorted_transactions if not tx.get('is_buy') and tx['date_obj'] < start_of_period]
-    fees_before_period = [f for f in journal_fees if f['date'] < start_of_period]
-
-    profit_before_period = sum((s['quantity'] * s['unit_price']) - s['cogs'] for s in sales_before_period if s.get('cogs') is not None)
-    profit_before_period -= sum(abs(f['amount']) for f in fees_before_period)
-
-    accumulated_profit = profit_before_period
-    cumulative_profit_over_time = [accumulated_profit]
-
-    for month in months:
-        month_start = datetime(year, month, 1, tzinfo=timezone.utc)
-        next_month = month + 1 if month < 12 else 1
-        next_year = year if month < 12 else year + 1
-        month_end = datetime(next_year, next_month, 1, tzinfo=timezone.utc)
-
-        sales_in_month = [tx for tx in sorted_transactions if not tx.get('is_buy') and month_start <= tx['date_obj'] < month_end]
-        fees_in_month = [f for f in journal_fees if month_start <= f['date'] < month_end]
-
-        total_sales_value_in_month = sum(s['quantity'] * s['unit_price'] for s in sales_in_month)
-        total_fees_in_month = sum(abs(f['amount']) for f in fees_in_month)
-
-        profit_this_month = sum((s['quantity'] * s['unit_price']) - s['cogs'] for s in sales_in_month if s.get('cogs') is not None)
-        profit_this_month -= total_fees_in_month
-
-        monthly_sales[month] = total_sales_value_in_month
-        monthly_fees[month] = total_fees_in_month
+                inventory[sale['type_id']] = lots[consumed_count:]
+            profit_this_month += sale_value - cogs
 
         accumulated_profit += profit_this_month
         cumulative_profit_over_time.append(accumulated_profit)
 
-    yearly_transactions = [tx for tx in sorted_transactions if tx['date_obj'].year == year]
-    yearly_fees = [f for f in journal_fees if f['date'].year == year]
-    if not yearly_transactions and not yearly_fees:
-        return None
+    if not any(monthly_sales.values()) and not any(monthly_fees.values()): return None
 
-    # --- Chart Generation ---
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(12, 7))
     fig.patch.set_facecolor('#1c1c1c')
     ax.set_facecolor('#282828')
-
     bar_width = 0.4
     r1 = [m - bar_width/2 for m in months]
     r2 = [m + bar_width/2 for m in months]
     ax.bar(r1, list(monthly_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
     ax.bar(r2, list(monthly_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
-
     ax2 = ax.twinx()
-    line_x_axis = list(range(13))
+    line_x_axis = list(range(len(cumulative_profit_over_time)))
     ax2.fill_between(line_x_axis, cumulative_profit_over_time, color="lime", alpha=0.3, zorder=1, step='post')
     ax2.plot(line_x_axis, cumulative_profit_over_time, label='Accumulated Profit', color='lime', linestyle='-', zorder=3, drawstyle='steps-post')
-
-
     ax.set_title(f'Monthly Performance for {character.name} - {year}', color='white', fontsize=16)
     ax.set_xlabel('Month', color='white', fontsize=12)
     ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
     ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
-
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines + lines2, labels + labels2, loc=0)
-
     ax.set_xticks(months)
     ax.set_xticklabels(month_names)
     ax.tick_params(axis='x', colors='white')
@@ -3517,7 +3685,6 @@ def generate_monthly_chart(character_id: int, year: int):
     plt.setp(ax2.spines.values(), color='gray')
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-
     buf = io.BytesIO()
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
@@ -4138,6 +4305,32 @@ async def post_init(application: Application):
     # Schedule the job to purge characters marked for deletion
     application.job_queue.run_repeating(purge_deleted_characters_job, interval=300, first=300) # Every 5 minutes
     logging.info("Scheduled job to purge deleted characters every 5 minutes.")
+
+    # Schedule the daily profit summary job to run once per day
+    application.job_queue.run_daily(master_profit_summary_job, time=dt_time(hour=1, minute=0, tzinfo=timezone.utc))
+    logging.info("Scheduled daily profit summary job.")
+
+
+async def master_profit_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Runs once per day to calculate and save the daily profit summary for all characters.
+    """
+    logging.info("Starting daily profit summary job for all characters.")
+    characters_to_update = list(CHARACTERS)
+
+    if not characters_to_update:
+        logging.info("No characters to update for daily profit summary. Skipping.")
+        return
+
+    for character in characters_to_update:
+        try:
+            logging.info(f"Running daily profit summary update for {character.name}...")
+            await asyncio.to_thread(update_daily_profit_summary, character.id)
+            await asyncio.sleep(1) # Stagger the work slightly
+        except Exception as e:
+            logging.error(f"Error running daily profit summary for {character.name}: {e}", exc_info=True)
+
+    logging.info("Finished daily profit summary job.")
 
 
 async def purge_deleted_characters_job(context: ContextTypes.DEFAULT_TYPE) -> None:
