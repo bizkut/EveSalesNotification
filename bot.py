@@ -2220,27 +2220,31 @@ def _calculate_summary_data(character: Character) -> dict:
     total_fees_24h = sum(abs(f['amount']) for f in fees_past_24_hours)
 
     # --- Accurate 24h Profit Calculation ---
-    inventory, events_in_period = _prepare_chart_data(character.id, one_day_ago)
-
-    profit_24h = -total_fees_24h # Start with fees as a negative profit
-
-    sales_in_period = [e['data'] for e in events_in_period if e['type'] == 'tx' and not e['data'].get('is_buy')]
-    for sale in sales_in_period:
-        sale_value = sale['quantity'] * sale['unit_price']
-        cogs = 0
-        remaining_to_sell = sale['quantity']
-        lots = inventory.get(sale['type_id'], [])
-        if lots:
-            consumed_count = 0
-            for lot in lots:
-                if remaining_to_sell <= 0: break
-                take = min(remaining_to_sell, lot['quantity'])
-                cogs += take * lot['price']
-                remaining_to_sell -= take
-                lot['quantity'] -= take
-                if lot['quantity'] == 0: consumed_count += 1
-            inventory[sale['type_id']] = lots[consumed_count:]
-        profit_24h += sale_value - cogs
+    inventory_24h, events_in_24h = _prepare_chart_data(character.id, one_day_ago)
+    profit_24h = 0
+    for event in events_in_24h:
+        if event['type'] == 'tx':
+            tx = event['data']
+            if tx.get('is_buy'):
+                inventory_24h[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+            else: # Sale
+                sale_value = tx['quantity'] * tx['unit_price']
+                cogs = 0
+                remaining_to_sell = tx['quantity']
+                lots = inventory_24h.get(tx['type_id'], [])
+                if lots:
+                    consumed_count = 0
+                    for lot in lots:
+                        if remaining_to_sell <= 0: break
+                        take = min(remaining_to_sell, lot['quantity'])
+                        cogs += take * lot['price']
+                        remaining_to_sell -= take
+                        lot['quantity'] -= take
+                        if lot['quantity'] == 0: consumed_count += 1
+                    inventory_24h[tx['type_id']] = lots[consumed_count:]
+                profit_24h += sale_value - cogs
+        elif event['type'] == 'fee':
+            profit_24h -= abs(event['data']['amount'])
 
     # --- Last 30 Days Summary ---
     thirty_days_ago = now - timedelta(days=30)
@@ -2257,25 +2261,30 @@ def _calculate_summary_data(character: Character) -> dict:
 
     # --- Accurate 30-Day Profit Calculation ---
     inventory_30_days, events_in_30_days = _prepare_chart_data(character.id, thirty_days_ago)
-    profit_30_days = -total_fees_30_days
-
-    sales_in_30_days_events = [e['data'] for e in events_in_30_days if e['type'] == 'tx' and not e['data'].get('is_buy')]
-    for sale in sales_in_30_days_events:
-        sale_value = sale['quantity'] * sale['unit_price']
-        cogs = 0
-        remaining_to_sell = sale['quantity']
-        lots = inventory_30_days.get(sale['type_id'], [])
-        if lots:
-            consumed_count = 0
-            for lot in lots:
-                if remaining_to_sell <= 0: break
-                take = min(remaining_to_sell, lot['quantity'])
-                cogs += take * lot['price']
-                remaining_to_sell -= take
-                lot['quantity'] -= take
-                if lot['quantity'] == 0: consumed_count += 1
-            inventory_30_days[sale['type_id']] = lots[consumed_count:]
-        profit_30_days += sale_value - cogs
+    profit_30_days = 0
+    for event in events_in_30_days:
+        if event['type'] == 'tx':
+            tx = event['data']
+            if tx.get('is_buy'):
+                inventory_30_days[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+            else: # Sale
+                sale_value = tx['quantity'] * tx['unit_price']
+                cogs = 0
+                remaining_to_sell = tx['quantity']
+                lots = inventory_30_days.get(tx['type_id'], [])
+                if lots:
+                    consumed_count = 0
+                    for lot in lots:
+                        if remaining_to_sell <= 0: break
+                        take = min(remaining_to_sell, lot['quantity'])
+                        cogs += take * lot['price']
+                        remaining_to_sell -= take
+                        lot['quantity'] -= take
+                        if lot['quantity'] == 0: consumed_count += 1
+                    inventory_30_days[tx['type_id']] = lots[consumed_count:]
+                profit_30_days += sale_value - cogs
+        elif event['type'] == 'fee':
+            profit_30_days -= abs(event['data']['amount'])
 
     wallet_balance = get_last_known_wallet_balance(character)
 
