@@ -339,9 +339,17 @@ def setup_database():
                     order_id BIGINT NOT NULL,
                     character_id INTEGER NOT NULL,
                     is_undercut BOOLEAN NOT NULL,
+                    competitor_price NUMERIC(17, 2),
                     PRIMARY KEY (order_id, character_id)
                 )
             """)
+
+            # Migration: Add competitor_price column to undercut_statuses if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'undercut_statuses' AND column_name = 'competitor_price'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'competitor_price' column to undercut_statuses table...")
+                cursor.execute("ALTER TABLE undercut_statuses ADD COLUMN competitor_price NUMERIC(17, 2);")
+                logging.info("Migration for 'competitor_price' complete.")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chart_cache (
@@ -950,36 +958,48 @@ def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes):
         database.release_db_connection(conn)
 
 
-def get_undercut_statuses(character_id: int) -> dict[int, bool]:
-    """Retrieves the last known undercut status for all of a character's orders."""
+def get_undercut_statuses(character_id: int) -> dict[int, dict]:
+    """
+    Retrieves the last known undercut status and competitor price for all of a character's orders.
+    Returns a dict mapping order_id to {'is_undercut': bool, 'competitor_price': float|None}.
+    """
     conn = database.get_db_connection()
     statuses = {}
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT order_id, is_undercut FROM undercut_statuses WHERE character_id = %s",
+                "SELECT order_id, is_undercut, competitor_price FROM undercut_statuses WHERE character_id = %s",
                 (character_id,)
             )
-            statuses = {row[0]: row[1] for row in cursor.fetchall()}
+            for row in cursor.fetchall():
+                order_id, is_undercut, competitor_price = row
+                statuses[order_id] = {
+                    'is_undercut': is_undercut,
+                    # Convert Decimal from DB to float, or keep it as None
+                    'competitor_price': float(competitor_price) if competitor_price is not None else None
+                }
     finally:
         database.release_db_connection(conn)
     return statuses
 
 def update_undercut_statuses(character_id: int, statuses: list[dict]):
-    """Inserts or updates the undercut status for a list of orders."""
+    """Inserts or updates the undercut status and competitor price for a list of orders."""
     if not statuses:
         return
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
+            # `statuses` is a list of dicts: [{'order_id': X, 'is_undercut': Y, 'competitor_price': Z}, ...]
+            # The competitor_price can be None.
             data_to_insert = [
-                (s['order_id'], character_id, s['is_undercut']) for s in statuses
+                (s['order_id'], character_id, s['is_undercut'], s.get('competitor_price')) for s in statuses
             ]
             upsert_query = """
-                INSERT INTO undercut_statuses (order_id, character_id, is_undercut)
-                VALUES (%s, %s, %s)
+                INSERT INTO undercut_statuses (order_id, character_id, is_undercut, competitor_price)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (order_id, character_id) DO UPDATE
-                SET is_undercut = EXCLUDED.is_undercut;
+                SET is_undercut = EXCLUDED.is_undercut,
+                    competitor_price = EXCLUDED.competitor_price;
             """
             cursor.executemany(upsert_query, data_to_insert)
             conn.commit()
@@ -2543,9 +2563,17 @@ async def master_orders_poll(application: Application):
                                     is_undercut = True
                                     competitor_order = best_sell_order
 
-                    new_statuses_to_update.append({'order_id': order['order_id'], 'is_undercut': is_undercut})
+                    competitor_price = None
+                    if is_undercut and competitor_order:
+                        competitor_price = competitor_order['price']
 
-                    was_undercut = previous_statuses.get(order['order_id'], False)
+                    new_statuses_to_update.append({
+                        'order_id': order['order_id'],
+                        'is_undercut': is_undercut,
+                        'competitor_price': competitor_price
+                    })
+
+                    was_undercut = previous_statuses.get(order['order_id'], {}).get('is_undercut', False)
                     if is_undercut and not was_undercut:
                         notifications_to_send.append({'my_order': order, 'competitor': competitor_order})
 
@@ -4333,33 +4361,17 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     end_index = start_index + items_per_page
     paginated_orders = filtered_orders[start_index:end_index]
 
-    # --- Name and Market Data Resolution ---
+    # --- Data Resolution (Names & Undercut Status) ---
     type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
     location_ids = [order['location_id'] for order in paginated_orders]
-    ids_to_resolve = list(set(type_ids_on_page + location_ids + [character.region_id]))
+    ids_to_resolve = list(set(type_ids_on_page + location_ids))
 
-    # Concurrently fetch names and market data
-    market_tasks = [
-        asyncio.to_thread(get_region_market_orders, character.region_id, type_id, force_revalidate=True)
-        for type_id in type_ids_on_page
-    ]
-    name_task = asyncio.to_thread(get_names_from_ids, ids_to_resolve, character)
-
-    results = await asyncio.gather(*market_tasks, name_task)
-    market_data_results = results[:-1]
-    id_to_name = results[-1]
-
-    # Process market data
-    market_prices = {}
-    for i, type_id in enumerate(type_ids_on_page):
-        regional_orders = market_data_results[i]
-        if regional_orders:
-            buy_orders = [o['price'] for o in regional_orders if o.get('is_buy_order')]
-            sell_orders = [o['price'] for o in regional_orders if not o.get('is_buy_order')]
-            market_prices[type_id] = {
-                'buy': max(buy_orders) if buy_orders else 0,
-                'sell': min(sell_orders) if sell_orders else float('inf')
-            }
+    # Concurrently fetch names and undercut statuses from the database
+    results = await asyncio.gather(
+        asyncio.to_thread(get_names_from_ids, ids_to_resolve, character),
+        asyncio.to_thread(get_undercut_statuses, character.id)
+    )
+    id_to_name, all_undercut_statuses = results
 
     message_lines = []
     for order in paginated_orders:
@@ -4375,23 +4387,18 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             f"  *Location:* `{location_name}`"
         )
 
-        # Add undercut alert
-        type_id = order['type_id']
-        if type_id in market_prices:
-            if is_buy:
-                highest_buy = market_prices[type_id].get('buy', 0)
-                if highest_buy > price:
-                    line += f"\n  `> ❗️ Undercut! Best buy: {highest_buy:,.2f}`"
-            else: # is_sell
-                lowest_sell = market_prices[type_id].get('sell', float('inf'))
-                if lowest_sell < price:
-                    line += f"\n  `> ❗️ Undercut! Best sell: {lowest_sell:,.2f}`"
+        # Add undercut alert from the cached status
+        undercut_status = all_undercut_statuses.get(order['order_id'])
+        if undercut_status and undercut_status['is_undercut']:
+            competitor_price = undercut_status.get('competitor_price', 0.0)
+            if competitor_price:
+                order_type_str = "buy" if is_buy else "sell"
+                line += f"\n  `> ❗️ Undercut! Best {order_type_str}: {competitor_price:,.2f}`"
 
         message_lines.append(line)
 
     # --- Page Summary & Disclaimer ---
-    region_name = id_to_name.get(character.region_id, f"ID: {character.region_id}")
-    summary_footer = f"\n\n---\n_Prices compared against the *{region_name}* region._"
+    summary_footer = "\n\n---\n_Undercut status is updated periodically._"
 
     # --- Keyboard ---
     keyboard = []
