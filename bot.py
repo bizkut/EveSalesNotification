@@ -4666,7 +4666,10 @@ def get_contracts_from_db(character_id: int) -> list:
 
 
 async def _display_contracts(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, page: int = 0):
-    """Fetches and displays a paginated list of outstanding contracts from the local cache."""
+    """
+    Fetches and displays a paginated list of open orders, concurrently fetching all
+    necessary data including real-time regional market prices for comparison.
+    """
     query = update.callback_query
     character = get_character_by_id(character_id)
     if await check_and_handle_pending_deletion(update, context, character):
@@ -5244,7 +5247,10 @@ async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, is_buy: bool, page: int = 0):
-    """Fetches and displays a paginated list of open orders from the local cache."""
+    """
+    Fetches and displays a paginated list of open orders, concurrently fetching all
+    necessary data including real-time regional market prices for comparison.
+    """
     query = update.callback_query
     character = get_character_by_id(character_id)
     if await check_and_handle_pending_deletion(update, context, character):
@@ -5253,147 +5259,149 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text="Error: Could not find character.")
         return
 
-    # Let the user know we're working on it
     await query.edit_message_text(text=f"⏳ Fetching open orders for {character.name}...")
 
-    # --- Data Fetching ---
-    # Use asyncio.gather to run skill and order fetches concurrently
-    # Orders are fetched from the local DB cache, which is updated by the master_orders_poll
-    results = await asyncio.gather(
+    # --- Initial Data Fetching ---
+    all_orders, skills_data = await asyncio.gather(
         asyncio.to_thread(get_tracked_market_orders, character.id),
         asyncio.to_thread(get_character_skills, character)
     )
-    all_orders, skills_data = results
-    if all_orders is None:
-        # This case should be rare now, but good to keep as a fallback.
-        await query.edit_message_text(text=f"❌ Could not fetch market orders for {character.name}. The database might be unavailable.")
-        return
 
-    # --- Order Capacity Calculation (must happen before filtering) ---
+    # --- Order Capacity Calculation ---
     order_capacity_str = ""
     if skills_data and 'skills' in skills_data:
         skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
-        # Skill IDs for market orders:
-        # Trade (3443): +4 orders/level
-        # Retail (3444): +8 orders/level
-        # Wholesale (16596): +16 orders/level
-        # Tycoon (18580): +32 orders/level
-        trade_level = skill_map.get(3443, 0)
-        retail_level = skill_map.get(3444, 0)
-        wholesale_level = skill_map.get(16596, 0)
-        tycoon_level = skill_map.get(18580, 0)
-
-        # 5 (base) + (Trade * 4) + (Retail * 8) + (Wholesale * 16) + (Tycoon * 32)
-        max_orders = 5 + (trade_level * 4) + (retail_level * 8) + (wholesale_level * 16) + (tycoon_level * 32)
-        # Use len(all_orders) for the current count, not the filtered count
+        max_orders = 5 + (skill_map.get(3443, 0) * 4) + (skill_map.get(3444, 0) * 8) + (skill_map.get(16596, 0) * 16) + (skill_map.get(18580, 0) * 32)
         order_capacity_str = f"({len(all_orders)} / {max_orders} orders)"
 
-    # Filter for buy or sell orders
+    # --- Filtering and Pagination ---
     filtered_orders = [order for order in all_orders if bool(order.get('is_buy_order')) == is_buy]
     order_type_str = "Buy" if is_buy else "Sale"
-
-    # --- Message Formatting ---
     header = f"📄 *Open {order_type_str} Orders for {character.name}* {order_capacity_str}\n\n"
 
     if not filtered_orders:
-        # Provide a back button
         keyboard = [[InlineKeyboardButton("« Back", callback_data="open_orders")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        # Combine header and the "no orders" message
         message = header + f"✅ No open {order_type_str.lower()} orders found."
-        await query.edit_message_text(
-            text=message,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text(text=message, reply_markup=reply_markup, parse_mode='Markdown')
         return
 
-    # Sort orders by issued date, newest first
     filtered_orders.sort(key=lambda x: datetime.fromisoformat(x['issued'].replace('Z', '+00:00')), reverse=True)
-
-    # --- Pagination ---
-    items_per_page = 10
+    items_per_page = 5 # Reduced to make space for more data per order
     total_items = len(filtered_orders)
     total_pages = (total_items + items_per_page - 1) // items_per_page
-    page = max(0, min(page, total_pages - 1)) # clamp page number
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    paginated_orders = filtered_orders[start_index:end_index]
+    page = max(0, min(page, total_pages - 1))
+    paginated_orders = filtered_orders[page * items_per_page:(page + 1) * items_per_page]
 
-    # --- Data Resolution (Names, Undercut Status, Character Location) ---
-    type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
-    location_ids = [order['location_id'] for order in paginated_orders]
+    # --- Concurrent Data Resolution for the Page ---
+    locations_on_page = {o['location_id'] for o in paginated_orders}
 
-    # Fetch character's current location and all undercut statuses for them
-    results = await asyncio.gather(
-        asyncio.to_thread(get_character_location, character),
-        asyncio.to_thread(get_undercut_statuses, character.id)
-    )
-    char_location_info, all_undercut_statuses = results
+    # 1. Resolve locations to regions
+    location_region_tasks = {loc_id: resolve_location_to_region(loc_id, character) for loc_id in locations_on_page}
+    location_region_results = await asyncio.gather(*location_region_tasks.values(), return_exceptions=True)
+    location_to_region_map = {loc_id: res for loc_id, res in zip(location_region_tasks.keys(), location_region_results) if isinstance(res, int)}
+
+    # 2. Gather market data requirements
+    required_markets = defaultdict(set)
+    for order in paginated_orders:
+        region_id = location_to_region_map.get(order['location_id'])
+        if region_id:
+            required_markets[region_id].add(order['type_id'])
+
+    # 3. Fetch market data and other info concurrently
+    market_tasks = []
+    for region_id, type_ids in required_markets.items():
+        for type_id in type_ids:
+            market_tasks.append(asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True))
+
+    other_tasks = {
+        "undercut_statuses": asyncio.to_thread(get_undercut_statuses, character.id),
+        "char_location": asyncio.to_thread(get_character_location, character)
+    }
+
+    all_task_results = await asyncio.gather(*market_tasks, *other_tasks.values(), return_exceptions=True)
+
+    # 4. Process results
+    market_data_cache = defaultdict(dict)
+    market_results = all_task_results[:len(market_tasks)]
+    for result in market_results:
+        if isinstance(result, Exception) or not result: continue
+        region_id, type_id = result[0]['region_id'], result[0]['type_id']
+        buy_orders = [o for o in result if o.get('is_buy_order')]
+        sell_orders = [o for o in result if not o.get('is_buy_order')]
+        market_data_cache[region_id][type_id] = {
+            'buy': max(buy_orders, key=lambda x: x['price']) if buy_orders else None,
+            'sell': min(sell_orders, key=lambda x: x['price']) if sell_orders else None
+        }
+
+    other_results = all_task_results[len(market_tasks):]
+    all_undercut_statuses = other_results[0] if not isinstance(other_results[0], Exception) else {}
+    char_location_info = other_results[1] if not isinstance(other_results[1], Exception) else {}
     character_location_id = char_location_info.get('station_id') or char_location_info.get('structure_id') if char_location_info else None
 
-    # Now, gather all the IDs we need to resolve into names
-    competitor_location_ids = [
-        status.get('competitor_location_id')
-        for status in all_undercut_statuses.values()
-        if status.get('competitor_location_id')
-    ]
-    ids_to_resolve = list(set(type_ids_on_page + location_ids + competitor_location_ids))
-    id_to_name = await asyncio.to_thread(get_names_from_ids, ids_to_resolve, character)
 
+    # --- Name Resolution ---
+    ids_to_resolve = {o['type_id'] for o in paginated_orders} | {o['location_id'] for o in paginated_orders}
+    for status in all_undercut_statuses.values():
+        if status.get('competitor_location_id'):
+            ids_to_resolve.add(status['competitor_location_id'])
+    id_to_name = await asyncio.to_thread(get_names_from_ids, list(ids_to_resolve), character)
+
+    # --- Message Formatting ---
     message_lines = []
     for order in paginated_orders:
         item_name = id_to_name.get(order['type_id'], f"Type ID {order['type_id']}")
         location_name = id_to_name.get(order['location_id'], f"Location ID {order['location_id']}")
-        remaining_vol = order['volume_remain']
-        total_vol = order['volume_total']
-        price = order['price']
-
         line = (
             f"*{item_name}*\n"
-            f"  `{remaining_vol:,}` of `{total_vol:,}` @ `{price:,.2f}` ISK\n"
+            f"  `{order['volume_remain']:,}` of `{order['volume_total']:,}` @ `{order['price']:,.2f}` ISK\n"
             f"  *Location:* `{location_name}`"
         )
 
-        # Add undercut alert from the cached status
+        # Add regional best price info
+        region_id = location_to_region_map.get(order['location_id'])
+        if region_id and region_id in market_data_cache and order['type_id'] in market_data_cache[region_id]:
+            regional_prices = market_data_cache[region_id][order['type_id']]
+            if is_buy: # For my buy order, I care about the best (highest) buy order
+                best_regional_order = regional_prices.get('buy')
+                if best_regional_order:
+                    price_diff = order['price'] - best_regional_order['price']
+                    price_diff_str = f"({price_diff:+,}) ISK" if price_diff != 0 else ""
+                    line += f"\n  *Region Best Buy:* `{best_regional_order['price']:,.2f}` ISK {price_diff_str}"
+            else: # For my sell order, I care about the best (lowest) sell order
+                best_regional_order = regional_prices.get('sell')
+                if best_regional_order:
+                    price_diff = order['price'] - best_regional_order['price']
+                    price_diff_str = f"({price_diff:+,}) ISK" if price_diff != 0 else ""
+                    line += f"\n  *Region Best Sell:* `{best_regional_order['price']:,.2f}` ISK {price_diff_str}"
+
+        # Add undercut alert (this is from the background poll, can be slightly delayed)
         undercut_status = all_undercut_statuses.get(order['order_id'])
         if undercut_status and undercut_status['is_undercut']:
             competitor_price = undercut_status.get('competitor_price', 0.0)
             competitor_location_id = undercut_status.get('competitor_location_id')
-
             if competitor_price and competitor_location_id:
                 competitor_loc_name = id_to_name.get(competitor_location_id, "Unknown Location")
                 jumps_str = ""
                 if character_location_id:
                     jumps = await get_jump_distance(character_location_id, competitor_location_id, character)
-                    if jumps is not None:
-                        jumps_str = f" ({jumps}j)"
-
-                order_type_str = "buy" if is_buy else "sell"
-                line += f"\n  `> ❗️ Undercut! Best {order_type_str}: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}`"
+                    if jumps is not None: jumps_str = f" ({jumps}j)"
+                line += f"\n  `> ❗️ Undercut by {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}`"
 
         message_lines.append(line)
 
-    # --- Page Summary & Disclaimer ---
-    summary_footer = "\n\n---\n_Undercut status is updated periodically._"
-
-    # --- Keyboard ---
+    # --- Footer and Keyboard ---
+    summary_footer = "\n\n---\n_Undercut status is from the last background poll._"
     keyboard = []
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page - 1}"))
-
     nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
-
     if page < total_pages - 1:
         nav_row.append(InlineKeyboardButton("Next »", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page + 1}"))
 
-    if nav_row:
-        keyboard.append(nav_row)
-
-    # Add a back button to go back to the open orders sub-menu
-    back_callback = "open_orders"
-    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
+    if nav_row: keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="open_orders")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # --- Send Message ---
