@@ -13,13 +13,14 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Private & Secure**: Notifications and command responses are sent directly to the user who owns the character.
 - **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds using efficient ETag-based polling.
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
-- **Rich Contextual Data**:
-  - **Accurate Profit Tracking (FIFO & Journal-Based)**: The bot uses the First-In, First-Out (FIFO) method to calculate the Cost of Goods Sold (COGS) for all sales. It then uses your character's actual wallet journal data for 100% accurate tax and broker fee calculations, providing a true financial record in all views (live notifications, historical reports, and charts).
-  - **Live Market Price Context**: Sales are compared against the current best buy order in your character's configured main trade hub.
+- **Rich Contextual Data & Undercut Alerts**:
+  - **Accurate Profit Tracking (FIFO & Journal-Based)**: The bot uses the First-In, First-Out (FIFO) method to calculate the Cost of Goods Sold (COGS) for all sales. It then uses your character's actual wallet journal data for 100% accurate tax and broker fee calculations, providing a true financial record in all views.
+  - **Live Market Price Context**: Sales notifications are compared against the current best buy order in your character's configured main trade hub.
+  - **Open Order Undercut Alerts**: When viewing open orders, the bot checks for undercuts in your configured region. It will warn you if a higher buy order or a lower sell order exists, helping you stay competitive.
   - **Wallet Balance**: All notifications include your character's current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Summary**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
-- **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot also displays your character's current order capacity (e.g., "152 / 305 orders").
+- **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot displays your character's current order capacity (e.g., "152 / 305 orders") and provides undercut alerts.
 - **Public Character Info**: View a summary of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The summary now includes inline buttons to create an hourly (last 24h), daily (current month), and monthly (for all historical years) performance chart. After viewing a chart, you can easily return to the summary view using the "Back to Summary" button.
@@ -125,6 +126,16 @@ All interaction with the bot is handled through a clean, inline button-based men
 
 **Location:** `Jita 4-4 - Caldari Navy Assembly Plant`
 **Wallet:** `1,234,567,890.12 ISK`
+```
+
+**Open Order Undercut:**
+```
+📄 *Open Buy Orders for Character Name* (152 / 305 orders)
+
+*Tritanium*
+  `1,000,000` of `5,000,000` @ `9.90` ISK
+  *Location:* `Jita 4-4 - Caldari Navy Assembly Plant`
+  `> ❗️ Undercut! Best buy: 9.95`
 ```
 
 **Daily Summary:**
