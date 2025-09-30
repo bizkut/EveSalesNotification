@@ -2480,16 +2480,15 @@ async def master_undercut_poll(application: Application):
                         my_location_name = id_to_name.get(my_order['location_id'], "an unknown location")
                         order_type = "Buy" if my_order.get('is_buy_order') else "Sell"
 
-                        competitor_price_str = f"`{competitor['price']:,.2f}` ISK"
                         competitor_loc_name = id_to_name.get(competitor['location_id'], "an unknown location")
-                        competitor_loc_str = f"at `{competitor_loc_name}`"
 
                         message = (
                             f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
                             f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
                             f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
-                            f"  • **Competitor's Price:** {competitor_price_str} {competitor_loc_str}\n\n"
-                            f"  • **Your Order Location:** `{my_location_name}`\n"
+                            f"  • **Your Location:** `{my_location_name}`\n"
+                            f"  • **Competitor's Price:** `{competitor['price']:,.2f}` ISK\n"
+                            f"  • **Competitor's Location:** `{competitor_loc_name}`\n\n"
                             f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`"
                         )
                         await send_telegram_message(context, message, chat_id=character.telegram_user_id)
