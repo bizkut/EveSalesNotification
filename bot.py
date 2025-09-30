@@ -3229,6 +3229,22 @@ def backfill_all_character_history(character: Character) -> bool:
     logging.info(f"Seeded {len(order_ids)} historical orders for {character.name}.")
 
 
+    # --- Backfill Current Open Orders ---
+    logging.info(f"Fetching and caching current open orders for {character.name}...")
+    open_orders = get_market_orders(character, force_revalidate=True)
+    if open_orders is None:
+        logging.error(f"Failed to fetch open market orders during backfill for {character.name}.")
+        return False
+    # Clear any old tracked orders and update with the fresh list
+    # This is important for re-added characters to ensure no stale orders remain.
+    all_cached_orders = get_tracked_market_orders(character.id)
+    if all_cached_orders:
+        cached_order_ids = [o['order_id'] for o in all_cached_orders]
+        remove_tracked_market_orders(character.id, cached_order_ids)
+    update_tracked_market_orders(character.id, open_orders)
+    logging.info(f"Cached {len(open_orders)} open orders for {character.name}.")
+
+
     # --- Mark as complete ---
     # Store the timestamp of when the backfill finished. This is the new reference for the notification grace period.
     set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
