@@ -2929,53 +2929,48 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the main menu using an InlineKeyboardMarkup."""
+    """Displays the main menu or routes to the add character flow for new users."""
     user = update.effective_user
     user_characters = get_characters_for_user(user.id)
-    welcome_message = f"Welcome, {user.first_name}!"
 
-    # Determine the message and keyboard based on whether the user has characters
+    # If the user has no characters, treat it as a request to add one.
     if not user_characters:
-        message = (
-            f"{welcome_message}\n\nIt looks like you don't have any EVE Online characters "
-            "added yet. To get started, please add one."
-        )
-        keyboard = [[InlineKeyboardButton("➕ Add Character", callback_data="add_character")]]
-    else:
-        message = (
-            f"{welcome_message}\n\nYou have {len(user_characters)} character(s) registered. "
-            "Please choose an option:"
-        )
-        keyboard = [
-            [
-                InlineKeyboardButton("💰 View Balances", callback_data="balance"),
-                InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
-            ],
-            [
-                InlineKeyboardButton("📈 View Sales", callback_data="sales"),
-                InlineKeyboardButton("🛒 View Buys", callback_data="buys")
-            ],
-            [
-                InlineKeyboardButton("📊 Request Summary", callback_data="summary"),
-                InlineKeyboardButton("⚙️ Settings", callback_data="settings")
-            ],
-            [
-                InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
-                InlineKeyboardButton("🗑️ Remove", callback_data="remove")
-            ]
-        ]
+        await add_character_command(update, context)
+        return
 
+    # Otherwise, show the main menu for existing users.
+    welcome_message = f"Welcome, {user.first_name}!"
+    message = (
+        f"{welcome_message}\n\nYou have {len(user_characters)} character(s) registered. "
+        "Please choose an option:"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("💰 View Balances", callback_data="balance"),
+            InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
+        ],
+        [
+            InlineKeyboardButton("📈 View Sales", callback_data="sales"),
+            InlineKeyboardButton("🛒 View Buys", callback_data="buys")
+        ],
+        [
+            InlineKeyboardButton("📊 Request Summary", callback_data="summary"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings")
+        ],
+        [
+            InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
+            InlineKeyboardButton("🗑️ Remove", callback_data="remove")
+        ]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # If the command was triggered by a button press (callback query), edit the message.
-    # Otherwise, if it was triggered by /start (message), send a new message.
     if update.callback_query:
         await update.callback_query.answer()
         try:
             await update.callback_query.edit_message_text(text=message, reply_markup=reply_markup)
         except BadRequest as e:
             if "message is not modified" not in str(e).lower():
-                raise e # Re-raise if it's not the expected error
+                raise e
             logging.info("Message not modified, skipping edit.")
     else:
         await update.message.reply_text(text=message, reply_markup=reply_markup)
@@ -2984,38 +2979,51 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Provides a link for the user to add a new EVE Online character.
-    Can be triggered by a command or a callback query.
+    Displays a combined welcome/auth message for new users.
     """
-    user_id = update.effective_user.id
-    logging.info(f"Received add_character request from user {user_id}")
+    user = update.effective_user
+    user_characters = get_characters_for_user(user.id)
+    is_new_user = not user_characters
+
+    logging.info(f"Received add_character request from user {user.id} (New User: {is_new_user})")
     webapp_base_url = os.getenv('WEBAPP_URL', 'http://localhost:5000')
-    login_url = f"{webapp_base_url}/login?user={user_id}"
+    login_url = f"{webapp_base_url}/login?user={user.id}"
 
-    keyboard = [[InlineKeyboardButton("Authorize with EVE Online", url=login_url)]]
-    # Add a back button for a better UX when coming from a callback
-    if update.callback_query:
-        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+    # Determine the message and keyboard based on whether the user is new
+    if is_new_user:
+        welcome_message = f"Welcome, {user.first_name}!"
+        message = (
+            f"{welcome_message}\n\n"
+            "It looks like you don't have any EVE Online characters added yet. To get started, "
+            "please click the button below to authorize one with EVE Online.\n\n"
+            "You will be redirected to the official EVE Online login page. After logging in and "
+            "authorizing, you can close the browser window.\n\n"
+            "It may take a minute or two for the character to be fully registered with the bot."
+        )
+        keyboard = [[InlineKeyboardButton("➕ Authorize Character", url=login_url)]]
+    else: # Existing user
+        message = (
+            "To add a new character, please click the button below and authorize with EVE Online.\n\n"
+            "You will be redirected to the official EVE Online login page. After logging in and "
+            "authorizing, you can close the browser window."
+        )
+        keyboard = [
+            [InlineKeyboardButton("Authorize with EVE Online", url=login_url)],
+            [InlineKeyboardButton("« Back", callback_data="start_command")]
+        ]
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-
-
-    message = (
-        "To add a new character, please click the button below and authorize with EVE Online.\n\n"
-        "You will be redirected to the official EVE Online login page. After logging in and "
-        "authorizing, you can close the browser window.\n\n"
-        "It may take a minute or two for the character to be fully registered with the bot."
-    )
-
     sent_message = None
+
     if update.callback_query:
         await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
         sent_message = update.callback_query.message
     else:
         sent_message = await update.message.reply_text(message, reply_markup=reply_markup)
 
+    # Track the prompt message so it can be deleted upon successful character addition
     if sent_message:
-        chat_id = sent_message.chat_id
-        message_id = sent_message.message_id
-        set_bot_state(f"add_character_prompt_{user_id}", f"{chat_id}:{message_id}")
+        set_bot_state(f"add_character_prompt_{user.id}", f"{sent_message.chat_id}:{sent_message.message_id}")
 
 
 async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
