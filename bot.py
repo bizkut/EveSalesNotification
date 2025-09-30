@@ -3393,10 +3393,11 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("🛒 View Buys", callback_data="buys")
                 ],
                 [
-                    InlineKeyboardButton("📊 Request Overview", callback_data="overview"),
-                    InlineKeyboardButton("⚙️ Settings", callback_data="settings")
+                    InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
+                    InlineKeyboardButton("📊 Request Overview", callback_data="overview")
                 ],
                 [
+                    InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
                     InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
                     InlineKeyboardButton("🗑️ Remove", callback_data="remove")
                 ]
