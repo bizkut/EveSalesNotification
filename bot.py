@@ -2226,21 +2226,41 @@ def _calculate_summary_data(character: Character) -> dict:
             inventory[sale['type_id']] = lots[consumed_count:]
         profit_24h += sale_value - cogs
 
-    # --- Monthly Summary ---
-    sales_this_month = [
+    # --- Last 30 Days Summary ---
+    thirty_days_ago = now - timedelta(days=30)
+    sales_last_30_days = [
         tx for tx in all_transactions if not tx.get('is_buy') and
-        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).month == now.month and
-        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year == now.year
+        datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) >= thirty_days_ago
     ]
-    total_sales_month = sum(s['quantity'] * s['unit_price'] for s in sales_this_month)
+    fees_last_30_days = [
+        entry for entry in full_journal
+        if entry['ref_type'] in fee_ref_types and entry['date'] >= thirty_days_ago
+    ]
+    total_sales_30_days = sum(s['quantity'] * s['unit_price'] for s in sales_last_30_days)
+    total_fees_30_days = sum(abs(f['amount']) for f in fees_last_30_days)
 
-    # Sum all fees from the journal for the current month
-    total_fees_month = sum(
-        abs(entry['amount']) for entry in full_journal
-        if entry['ref_type'] in fee_ref_types and entry['date'].month == now.month and entry['date'].year == now.year
-    )
+    # --- Accurate 30-Day Profit Calculation ---
+    inventory_30_days, events_in_30_days = _prepare_chart_data(character.id, thirty_days_ago)
+    profit_30_days = -total_fees_30_days
 
-    gross_revenue_month = total_sales_month - total_fees_month
+    sales_in_30_days_events = [e['data'] for e in events_in_30_days if e['type'] == 'tx' and not e['data'].get('is_buy')]
+    for sale in sales_in_30_days_events:
+        sale_value = sale['quantity'] * sale['unit_price']
+        cogs = 0
+        remaining_to_sell = sale['quantity']
+        lots = inventory_30_days.get(sale['type_id'], [])
+        if lots:
+            consumed_count = 0
+            for lot in lots:
+                if remaining_to_sell <= 0: break
+                take = min(remaining_to_sell, lot['quantity'])
+                cogs += take * lot['price']
+                remaining_to_sell -= take
+                lot['quantity'] -= take
+                if lot['quantity'] == 0: consumed_count += 1
+            inventory_30_days[sale['type_id']] = lots[consumed_count:]
+        profit_30_days += sale_value - cogs
+
     wallet_balance = get_last_known_wallet_balance(character)
 
     # --- Available Years for Charts ---
@@ -2254,9 +2274,9 @@ def _calculate_summary_data(character: Character) -> dict:
         "total_sales_24h": total_sales_24h,
         "total_fees_24h": total_fees_24h,
         "profit_24h": profit_24h,
-        "total_sales_month": total_sales_month,
-        "total_fees_month": total_fees_month,
-        "gross_revenue_month": gross_revenue_month,
+        "total_sales_30_days": total_sales_30_days,
+        "total_fees_30_days": total_fees_30_days,
+        "profit_30_days": profit_30_days,
         "available_years": available_years
     }
 
@@ -2265,18 +2285,18 @@ def _format_summary_message(summary_data: dict, character: Character) -> tuple[s
     """Formats the summary data into a message string and keyboard."""
     now = summary_data['now']
     message = (
-        f"📊 *Daily Market Summary ({character.name})*\n"
+        f"📊 *Market Summary ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
         f"*Wallet Balance:* `{summary_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
-        f"*Past 24 Hours:*\n"
+        f"*Last Day:*\n"
         f"  - Total Sales Value: `{summary_data['total_sales_24h']:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{summary_data['total_fees_24h']:,.2f} ISK`\n"
         f"  - **Profit (FIFO):** `{summary_data['profit_24h']:,.2f} ISK`\n\n"
         f"---\n\n"
-        f"🗓️ *Current Month Summary ({now.strftime('%B %Y')}):*\n"
-        f"  - Total Sales Value: `{summary_data['total_sales_month']:,.2f} ISK`\n"
-        f"  - Total Fees (Broker + Tax): `{summary_data['total_fees_month']:,.2f} ISK`\n"
-        f"  - *Gross Revenue (Sales - Fees):* `{summary_data['gross_revenue_month']:,.2f} ISK`"
+        f"🗓️ *Last 30 Days:*\n"
+        f"  - Total Sales Value: `{summary_data['total_sales_30_days']:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{summary_data['total_fees_30_days']:,.2f} ISK`\n"
+        f"  - **Profit (FIFO):** `{summary_data['profit_30_days']:,.2f} ISK`"
     )
 
     # --- Chart Buttons ---
