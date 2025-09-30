@@ -109,6 +109,32 @@ SUCCESS_TEMPLATE = """
 </html>
 """
 
+# Template with automatic redirect to the Telegram bot
+SUCCESS_TEMPLATE_REDIRECT = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Success</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; background-color: #282c34; color: white; padding-top: 50px; }
+        a { color: #61dafb; }
+    </style>
+    <script>
+        setTimeout(function() {
+            window.location.href = "{{ telegram_url }}";
+        }, 3000); // 3-second delay
+    </script>
+</head>
+<body>
+    <h1>✅ Success!</h1>
+    <p>Character <strong>{{ character_name }}</strong> has been successfully added.</p>
+    <p>You will be redirected back to Telegram shortly.</p>
+    <p>If you are not redirected, <a href="{{ telegram_url }}">click here to return to the bot</a>.</p>
+</body>
+</html>
+"""
+
 ERROR_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -190,7 +216,18 @@ def callback():
 
     # 3. Save the character to the database
     if add_character_to_db(character_id, character_name, refresh_token, telegram_user_id):
-        return render_template_string(SUCCESS_TEMPLATE, character_name=character_name)
+        # Check if the bot username is configured for automatic redirection
+        bot_username = os.getenv("TELEGRAM_BOT_USERNAME")
+        if bot_username:
+            telegram_url = f"https://t.me/{bot_username}"
+            return render_template_string(
+                SUCCESS_TEMPLATE_REDIRECT,
+                character_name=character_name,
+                telegram_url=telegram_url
+            )
+        else:
+            logging.warning("TELEGRAM_BOT_USERNAME is not set. Falling back to standard success page without redirection.")
+            return render_template_string(SUCCESS_TEMPLATE, character_name=character_name)
     else:
         return render_template_string(ERROR_TEMPLATE, message="An internal error occurred while saving your character."), 500
 
