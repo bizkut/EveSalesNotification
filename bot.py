@@ -178,6 +178,7 @@ def setup_database():
                     character_id INTEGER NOT NULL,
                     volume_remain INTEGER NOT NULL,
                     price NUMERIC(17, 2) NOT NULL,
+                    order_data JSONB,
                     PRIMARY KEY (order_id, character_id)
                 )
             """)
@@ -188,6 +189,13 @@ def setup_database():
                 # Add the column and set a default that will be updated on the next poll
                 cursor.execute("ALTER TABLE market_orders ADD COLUMN price NUMERIC(17, 2) DEFAULT 0.0;")
                 logging.info("Migration for 'price' complete.")
+
+            # Migration: Add order_data column to market_orders if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'market_orders' AND column_name = 'order_data'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'order_data' column to market_orders table...")
+                cursor.execute("ALTER TABLE market_orders ADD COLUMN order_data JSONB;")
+                logging.info("Migration for 'order_data' complete.")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trading_fees (
@@ -426,14 +434,14 @@ def set_bot_state(key, value):
         database.release_db_connection(conn)
 
 def get_tracked_market_orders(character_id):
-    """Retrieves all tracked market orders for a specific character, including price."""
+    """Retrieves all tracked market orders for a specific character from the cache."""
     conn = database.get_db_connection()
-    orders = {}
+    orders = []
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT order_id, volume_remain, price FROM market_orders WHERE character_id = %s", (character_id,))
-            # Convert price from Decimal to float
-            orders = {row[0]: {'volume_remain': row[1], 'price': float(row[2])} for row in cursor.fetchall()}
+            # The order_data column is of type JSONB, so psycopg2 will automatically parse it into a dict.
+            cursor.execute("SELECT order_data FROM market_orders WHERE character_id = %s", (character_id,))
+            orders = [row[0] for row in cursor.fetchall()]
     finally:
         database.release_db_connection(conn)
     return orders
@@ -445,16 +453,24 @@ def update_tracked_market_orders(character_id, orders):
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # orders is now expected to be a list of dicts: [{'order_id': X, 'volume_remain': Y, 'price': Z}, ...]
+            # The `orders` variable is a list of full order dictionaries from the ESI.
+            # We also need to convert the full order object to a JSON string for storing in the JSONB column.
             orders_with_char_id = [
-                (o['order_id'], character_id, o['volume_remain'], o['price']) for o in orders
+                (
+                    o['order_id'],
+                    character_id,
+                    o['volume_remain'],
+                    o['price'],
+                    json.dumps(o)  # Serialize the whole order dict to a JSON string
+                ) for o in orders
             ]
             upsert_query = """
-                INSERT INTO market_orders (order_id, character_id, volume_remain, price)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO market_orders (order_id, character_id, volume_remain, price, order_data)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (order_id, character_id) DO UPDATE
                 SET volume_remain = EXCLUDED.volume_remain,
-                    price = EXCLUDED.price;
+                    price = EXCLUDED.price,
+                    order_data = EXCLUDED.order_data;
             """
             cursor.executemany(upsert_query, orders_with_char_id)
             conn.commit()
@@ -2342,20 +2358,20 @@ async def run_daily_summary_for_character(character: Character, context: Context
         logging.error(f"Failed to send daily summary for {character.name}: {e}", exc_info=True)
 
 
-async def master_undercut_poll(application: Application):
+async def master_orders_poll(application: Application):
     """
-    A single, continuous polling loop that checks for undercut orders
-    for all monitored characters.
+    A single, continuous polling loop that caches open market orders and checks
+    for undercuts for all monitored characters.
     """
     context = ContextTypes.DEFAULT_TYPE(application=application)
 
     while True:
-        logging.info("Starting master undercut polling cycle.")
-        characters_to_poll = [c for c in list(CHARACTERS) if c.enable_undercut_notifications]
+        logging.info("Starting master orders polling cycle.")
+        characters_to_poll = list(CHARACTERS)
         min_delay = 300  # Default to 5 minutes
 
         if not characters_to_poll:
-            logging.debug("No characters have undercut notifications enabled. Sleeping.")
+            logging.debug("No characters to poll for open orders. Sleeping.")
             await asyncio.sleep(min_delay)
             continue
 
@@ -2363,18 +2379,47 @@ async def master_undercut_poll(application: Application):
 
         for character in characters_to_poll:
             if get_character_deletion_status(character.id):
-                logging.info(f"Skipping undercut poll for {character.name} because they are pending deletion.")
+                logging.info(f"Skipping orders poll for {character.name} because they are pending deletion.")
                 continue
 
-            logging.debug(f"Polling for undercuts for {character.name}")
+            logging.debug(f"Polling open orders for {character.name}")
             try:
                 open_orders, headers = await asyncio.to_thread(get_market_orders, character, return_headers=True, force_revalidate=True)
                 if open_orders is None:
-                    logging.error(f"Failed to fetch open orders for {character.name}. Skipping undercut check.")
+                    logging.error(f"Failed to fetch open orders for {character.name}. Skipping poll.")
+                    # If the API fails, we should not clear out the cache, so we continue.
                     continue
 
                 char_delay = get_next_run_delay(headers)
                 min_delay = min(min_delay, char_delay)
+
+                # --- Open Order Caching ---
+                # Get the set of order IDs from the ESI response and the database cache
+                esi_order_ids = {o['order_id'] for o in open_orders}
+                cached_orders = await asyncio.to_thread(get_tracked_market_orders, character.id)
+                cached_order_ids = {o['order_id'] for o in cached_orders}
+
+                # Determine which orders have been closed or expired and remove them from the cache
+                orders_to_remove = cached_order_ids - esi_order_ids
+                if orders_to_remove:
+                    logging.info(f"Removing {len(orders_to_remove)} closed/expired orders from cache for {character.name}.")
+                    await asyncio.to_thread(remove_tracked_market_orders, character.id, list(orders_to_remove))
+
+                # Update the cache with the latest list of open orders from ESI
+                if open_orders:
+                    logging.debug(f"Caching {len(open_orders)} open orders for {character.name}.")
+                    await asyncio.to_thread(update_tracked_market_orders, character.id, open_orders)
+                elif not orders_to_remove and cached_order_ids:
+                    # This case handles when the character has no open orders.
+                    # If there were no orders to remove, but there were orders in the cache,
+                    # it means all orders were closed. We must clear the cache.
+                    logging.info(f"All open orders for {character.name} have been closed. Clearing cache.")
+                    await asyncio.to_thread(remove_tracked_market_orders, character.id, list(cached_order_ids))
+
+
+                # --- Undercut Notifications (only for subscribed characters) ---
+                if not character.enable_undercut_notifications:
+                    continue
 
                 current_order_ids = [o['order_id'] for o in open_orders]
                 await asyncio.to_thread(remove_stale_undercut_statuses, character.id, current_order_ids)
@@ -2491,11 +2536,11 @@ async def master_undercut_poll(application: Application):
                         await asyncio.sleep(1)
 
             except Exception as e:
-                logging.error(f"Error in master_undercut_poll for character {character.name}: {e}", exc_info=True)
+                logging.error(f"Error in master_orders_poll for character {character.name}: {e}", exc_info=True)
             finally:
                 await asyncio.sleep(1)
 
-        logging.info(f"Master undercut polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
+        logging.info(f"Master orders polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
         await asyncio.sleep(min_delay)
 
 
@@ -4073,8 +4118,8 @@ async def post_init(application: Application):
     asyncio.create_task(master_wallet_journal_poll(application))
     asyncio.create_task(master_wallet_transaction_poll(application))
     asyncio.create_task(master_order_history_poll(application))
-    asyncio.create_task(master_undercut_poll(application))
-    logging.info("Master polling loops for journal, transactions, order history, and undercuts have been started.")
+    asyncio.create_task(master_orders_poll(application))
+    logging.info("Master polling loops for journal, transactions, order history, and open orders have been started.")
 
     # Schedule the job to check for new characters
     application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
@@ -4157,7 +4202,7 @@ async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, is_buy: bool, page: int = 0):
-    """Fetches and displays a paginated list of open orders."""
+    """Fetches and displays a paginated list of open orders from the local cache."""
     query = update.callback_query
     character = get_character_by_id(character_id)
     if await check_and_handle_pending_deletion(update, context, character):
@@ -4169,15 +4214,17 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     # Let the user know we're working on it
     await query.edit_message_text(text=f"⏳ Fetching open orders for {character.name}...")
 
-    # --- ESI Calls ---
+    # --- Data Fetching ---
     # Use asyncio.gather to run skill and order fetches concurrently
+    # Orders are fetched from the local DB cache, which is updated by the master_orders_poll
     results = await asyncio.gather(
-        asyncio.to_thread(get_market_orders, character, force_revalidate=True),
+        asyncio.to_thread(get_tracked_market_orders, character.id),
         asyncio.to_thread(get_character_skills, character)
     )
     all_orders, skills_data = results
     if all_orders is None:
-        await query.edit_message_text(text=f"❌ Could not fetch market orders for {character.name}. The ESI API might be unavailable.")
+        # This case should be rare now, but good to keep as a fallback.
+        await query.edit_message_text(text=f"❌ Could not fetch market orders for {character.name}. The database might be unavailable.")
         return
 
     # --- Order Capacity Calculation (must happen before filtering) ---
