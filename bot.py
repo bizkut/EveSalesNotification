@@ -2512,7 +2512,7 @@ def _calculate_overview_data(character: Character) -> dict:
     total_fees_24h = sum(abs(f['amount']) for f in fees_past_24_hours)
 
     # --- Accurate 24h Profit Calculation ---
-    inventory_24h, events_in_24h = _prepare_chart_data(character.id, one_day_ago)
+    _, inventory_24h, events_in_24h = _prepare_chart_data(character.id, one_day_ago)
     profit_24h = 0
     for event in events_in_24h:
         if event['type'] == 'tx':
@@ -2552,7 +2552,7 @@ def _calculate_overview_data(character: Character) -> dict:
     total_fees_30_days = sum(abs(f['amount']) for f in fees_last_30_days)
 
     # --- Accurate 30-Day Profit Calculation ---
-    inventory_30_days, events_in_30_days = _prepare_chart_data(character.id, thirty_days_ago)
+    _, inventory_30_days, events_in_30_days = _prepare_chart_data(character.id, thirty_days_ago)
     profit_30_days = 0
     for event in events_in_30_days:
         if event['type'] == 'tx':
@@ -3723,8 +3723,8 @@ def _prepare_chart_data(character_id, start_of_period):
     """
     Prepares all data needed for chart generation.
     1. Fetches all historical financial events.
-    2. Builds the inventory state up to the start of the chart period.
-    3. Returns the initial inventory state and all events within the period.
+    2. Calculates the inventory state and accumulated profit up to the start of the chart period.
+    3. Returns the initial profit, initial inventory state, and all events within the period.
     """
     all_transactions = get_historical_transactions_from_db(character_id)
     full_journal = get_full_wallet_journal_from_db(character_id)
@@ -3739,6 +3739,7 @@ def _prepare_chart_data(character_id, start_of_period):
     all_events.sort(key=lambda x: x['date'])
 
     inventory = defaultdict(list)
+    accumulated_profit = 0
     events_before_period = [e for e in all_events if e['date'] < start_of_period]
 
     for event in events_before_period:
@@ -3746,7 +3747,9 @@ def _prepare_chart_data(character_id, start_of_period):
             tx = event['data']
             if tx.get('is_buy'):
                 inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-            else: # Sale
+            else:  # Sale
+                sale_value = tx['quantity'] * tx['unit_price']
+                cogs = 0
                 remaining_to_sell = tx['quantity']
                 lots = inventory.get(tx['type_id'], [])
                 if lots:
@@ -3754,13 +3757,18 @@ def _prepare_chart_data(character_id, start_of_period):
                     for lot in lots:
                         if remaining_to_sell <= 0: break
                         take = min(remaining_to_sell, lot['quantity'])
+                        cogs += take * lot['price']
                         remaining_to_sell -= take
                         lot['quantity'] -= take
                         if lot['quantity'] == 0: consumed_count += 1
                     inventory[tx['type_id']] = lots[consumed_count:]
+                accumulated_profit += sale_value - cogs
+        elif event['type'] == 'fee':
+            accumulated_profit -= abs(event['data']['amount'])
+
 
     events_in_period = [e for e in all_events if e['date'] >= start_of_period]
-    return inventory, events_in_period
+    return accumulated_profit, inventory, events_in_period
 
 def generate_last_day_chart(character_id: int):
     """Generates a chart for the last 24 hours."""
@@ -3770,9 +3778,8 @@ def generate_last_day_chart(character_id: int):
     now = datetime.now(timezone.utc)
     start_of_period = now - timedelta(days=1)
 
-    inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
+    accumulated_profit, inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
 
-    accumulated_profit = 0
     cumulative_profit_over_time = [accumulated_profit]
 
     hours = [(start_of_period + timedelta(hours=i)) for i in range(24)]
@@ -3861,9 +3868,8 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     now = datetime.now(timezone.utc)
     start_of_period = (now - timedelta(days=days_to_show-1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
+    accumulated_profit, inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
 
-    accumulated_profit = 0
     cumulative_profit_over_time = [accumulated_profit]
 
     days = [(start_of_period + timedelta(days=i)) for i in range(days_to_show)]
@@ -3959,7 +3965,7 @@ def generate_all_time_chart(character_id: int):
     character = get_character_by_id(character_id)
     if not character: return None
 
-    inventory, events_in_period = _prepare_chart_data(character_id, datetime.min.replace(tzinfo=timezone.utc))
+    accumulated_profit, inventory, events_in_period = _prepare_chart_data(character_id, datetime.min.replace(tzinfo=timezone.utc))
     if not events_in_period: return None
 
     start_date = events_in_period[0]['date']
@@ -3981,7 +3987,6 @@ def generate_all_time_chart(character_id: int):
     monthly_sales = {label: 0 for label in bar_labels}
     monthly_fees = {label: 0 for label in bar_labels}
 
-    accumulated_profit = 0
     cumulative_profit_over_time = [accumulated_profit]
 
     for month_start in months:
