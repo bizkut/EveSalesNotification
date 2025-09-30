@@ -68,6 +68,17 @@ def continue_backfill_character_history(self, character_id: int):
     # Update the character's backfill cursor in the database.
     bot.update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
 
-    # Re-queue the task for the next batch with a small delay to be nice to the ESI API.
+    # Check for a stuck loop. This should ideally never happen.
+    if before_id is not None and min_transaction_id >= before_id:
+        logging.critical(
+            f"Backfill for character {character_id} is stuck. "
+            f"The next 'before_id' ({min_transaction_id}) is not less than the previous one ({before_id}). "
+            f"Stopping backfill to prevent an infinite loop."
+        )
+        bot.update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
+        return
+
+    # Re-queue the task for the next batch immediately.
+    # Celery's built-in retry mechanism will handle rate-limiting or other ESI errors.
     logging.info(f"Queueing next backfill task for character {character_id}, before_id {min_transaction_id}.")
-    continue_backfill_character_history.apply_async(args=[character_id], countdown=2) # 2-second delay.
+    continue_backfill_character_history.apply_async(args=[character_id])
