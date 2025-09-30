@@ -3417,13 +3417,17 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     cumulative_profit_over_time = [accumulated_profit]
 
     days = [(start_of_period + timedelta(days=i)) for i in range(days_to_show)]
-    bar_labels = [d.strftime('%m-%d') for d in days]
+    if days_to_show == 30:
+        label_format = '%d'
+    else:
+        label_format = '%m-%d'
+    bar_labels = [d.strftime(label_format) for d in days]
     daily_sales = {label: 0 for label in bar_labels}
     daily_fees = {label: 0 for label in bar_labels}
 
     for day_start in days:
         day_end = day_start + timedelta(days=1)
-        day_label = day_start.strftime('%m-%d')
+        day_label = day_start.strftime(label_format)
 
         sales_in_day = [e['data'] for e in events_in_period if e['type'] == 'tx' and not e['data'].get('is_buy') and day_start <= e['date'] < day_end]
         fees_in_day = [e['data'] for e in events_in_period if e['type'] == 'fee' and day_start <= e['date'] < day_end]
