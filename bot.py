@@ -933,6 +933,63 @@ def get_character_deletion_status(character_id: int):
     return deletion_time
 
 
+def get_contract_profits_from_db(character_id: int) -> list:
+    """Retrieves all contract profits for a character."""
+    conn = database.get_db_connection()
+    profits = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT contract_id, profit, date FROM contract_profits WHERE character_id = %s", (character_id,))
+            rows = cursor.fetchall()
+            for row in rows:
+                profits.append({
+                    "contract_id": row[0],
+                    "profit": float(row[1]), # Convert Decimal to float
+                    "date": row[2]
+                })
+    finally:
+        database.release_db_connection(conn)
+    return profits
+
+def add_contract_profit(character_id, contract_id, profit, date):
+    """Adds a calculated contract profit to the database."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO contract_profits (character_id, contract_id, profit, date)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (contract_id, character_id) DO NOTHING
+                """,
+                (character_id, contract_id, profit, date)
+            )
+            conn.commit()
+            logging.info(f"Stored profit of {profit:,.2f} for contract {contract_id} for character {character_id}.")
+    finally:
+        database.release_db_connection(conn)
+
+def get_journal_entry_by_context_id(character_id: int, context_id: int, ref_type: str):
+    """Retrieves a specific journal entry by context ID and ref_type from the database."""
+    conn = database.get_db_connection()
+    entry = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, amount, balance, context_id, context_id_type, date, description, first_party_id, reason, ref_type, second_party_id, tax, tax_receiver_id FROM wallet_journal WHERE character_id = %s AND context_id = %s AND ref_type = %s",
+                (character_id, context_id, ref_type)
+            )
+            row = cursor.fetchone()
+            if row:
+                colnames = [desc[0] for desc in cursor.description]
+                entry = dict(zip(colnames, row))
+                if isinstance(entry['date'], str):
+                    entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+    finally:
+        database.release_db_connection(conn)
+    return entry
+
+
 def get_historical_transactions_from_db(character_id: int) -> list:
     """Retrieves all historical transactions for a character from the local database."""
     conn = database.get_db_connection()
