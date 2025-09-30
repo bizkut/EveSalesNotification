@@ -3280,6 +3280,27 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         )
 
 
+def _build_settings_message_and_keyboard(character: Character):
+    """Builds the message text and keyboard for the character settings menu."""
+    user_characters = get_characters_for_user(character.telegram_user_id)
+    back_callback = "start_command" if len(user_characters) <= 1 else "settings"
+
+    # Resolve region name for the button
+    id_to_name = get_names_from_ids([character.region_id])
+    region_name = id_to_name.get(character.region_id, f"ID: {character.region_id}")
+
+    keyboard = [
+        [InlineKeyboardButton("ℹ️ Character Info", callback_data=f"character_info_{character.id}")],
+        [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
+        [InlineKeyboardButton(f"Market Region: {region_name}", callback_data=f"set_region_{character.id}")],
+        [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
+        [InlineKeyboardButton("« Back", callback_data=back_callback)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    message_text = f"⚙️ General settings for *{character.name}*:"
+    return message_text, reply_markup
+
+
 async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
     """Displays the general settings menu for a specific character using an InlineKeyboardMarkup."""
     if await check_and_handle_pending_deletion(update, context, character):
@@ -3289,17 +3310,7 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
         await context.bot.send_message(update.effective_chat.id, "Error: Could not find this character.")
         return
 
-    user_characters = get_characters_for_user(character.telegram_user_id)
-    back_callback = "start_command" if len(user_characters) <= 1 else "settings"
-
-    keyboard = [
-        [InlineKeyboardButton("ℹ️ Character Info", callback_data=f"character_info_{character.id}")],
-        [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
-        [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
-        [InlineKeyboardButton("« Back", callback_data=back_callback)]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    message_text = f"⚙️ General settings for *{character.name}*:"
+    message_text, reply_markup = _build_settings_message_and_keyboard(character)
 
     if update.callback_query:
         # If the original message was a photo, we can't edit it to be text.
@@ -3518,50 +3529,74 @@ async def remove_character_command(update: Update, context: ContextTypes.DEFAULT
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles text input when the bot is expecting a specific value from the user."""
-    user_id = update.effective_user.id
     text = update.message.text
     next_action_tuple = context.user_data.get('next_action')
 
     if not next_action_tuple:
-        # If we are not expecting any input, just show the main menu
         await start_command(update, context)
         return
 
-    action_type, data = next_action_tuple
-    character_id = data
+    action_type, character_id = next_action_tuple
+    prompt_message_id = context.user_data.get('prompt_message_id')
+
+    await update.message.delete()
+
+    async def show_settings_again():
+        """Helper to edit the prompt message back to the settings menu."""
+        if prompt_message_id:
+            character = get_character_by_id(character_id)
+            message_text, reply_markup = _build_settings_message_and_keyboard(character)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=prompt_message_id,
+                    text=message_text,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+            except BadRequest:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=message_text,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+        context.user_data.clear()
 
     if text.lower() == 'cancel':
-        await update.message.reply_text("Action cancelled.")
-        context.user_data.clear()
-        # Create a fake update object to show the settings again
-        fake_query = type('obj', (object,), {'data': f'settings_char_{character_id}'})
-        fake_update = type('obj', (object,), {'callback_query': fake_query, 'effective_chat': update.effective_chat, 'effective_message': update.message, 'effective_user': update.effective_user})
-        await _show_character_settings(fake_update, context, get_character_by_id(character_id))
+        await show_settings_again()
         return
+
+    success = False
+    error_message = ""
 
     if action_type == 'set_region_value':
         try:
             new_region_id = int(text)
             update_character_setting(character_id, 'region_id', new_region_id)
-            await update.message.reply_text(f"✅ Region ID updated to {new_region_id}.")
-            load_characters_from_db() # Reload characters to reflect change
+            load_characters_from_db()
+            success = True
         except ValueError:
-            await update.message.reply_text("❌ Invalid input. Please enter a numeric Region ID. Try again or type `cancel`.")
-            return # Keep waiting for valid input
+            error_message = "❌ Invalid input. Please enter a numeric Region ID. Try again or type `cancel`."
 
     elif action_type == 'set_wallet_value':
         try:
             new_threshold = int(text.replace(',', '').replace('.', ''))
             update_character_setting(character_id, 'wallet_balance_threshold', new_threshold)
-            await update.message.reply_text(f"✅ Wallet balance alert threshold updated to {new_threshold:,.0f} ISK.")
             load_characters_from_db()
+            success = True
         except ValueError:
-            await update.message.reply_text("❌ Invalid input. Please enter a valid number. Try again or type `cancel`.")
-            return # Keep waiting
+            error_message = "❌ Invalid input. Please enter a valid number. Try again or type `cancel`."
 
-    # Clear the state and show the settings menu again
-    context.user_data.clear()
-    await _show_character_settings(update, context, get_character_by_id(character_id))
+    if success:
+        await show_settings_again()
+    elif prompt_message_id:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=prompt_message_id,
+            text=error_message
+        )
+
 
 async def post_init(application: Application):
     """
@@ -3735,10 +3770,34 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     end_index = start_index + items_per_page
     paginated_orders = filtered_orders[start_index:end_index]
 
-    # --- Name Resolution ---
-    type_ids = [order['type_id'] for order in paginated_orders]
+    # --- Name and Market Data Resolution ---
+    type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
     location_ids = [order['location_id'] for order in paginated_orders]
-    id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
+    ids_to_resolve = list(set(type_ids_on_page + location_ids + [character.region_id]))
+
+    # Concurrently fetch names and market data
+    market_tasks = [
+        asyncio.to_thread(get_region_market_orders, character.region_id, type_id, force_revalidate=True)
+        for type_id in type_ids_on_page
+    ]
+    name_task = asyncio.to_thread(get_names_from_ids, ids_to_resolve, character)
+
+    results = await asyncio.gather(*market_tasks, name_task)
+    market_data_results = results[:-1]
+    id_to_name = results[-1]
+
+    # Process market data
+    market_prices = {}
+    for i, type_id in enumerate(type_ids_on_page):
+        regional_orders = market_data_results[i]
+        if regional_orders:
+            buy_orders = [o['price'] for o in regional_orders if o.get('is_buy_order')]
+            sell_orders = [o['price'] for o in regional_orders if not o.get('is_buy_order')]
+            market_prices[type_id] = {
+                'buy': max(buy_orders) if buy_orders else 0,
+                'sell': min(sell_orders) if sell_orders else float('inf')
+            }
+
     message_lines = []
     for order in paginated_orders:
         item_name = id_to_name.get(order['type_id'], f"Type ID {order['type_id']}")
@@ -3752,10 +3811,24 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             f"  `{remaining_vol:,}` of `{total_vol:,}` @ `{price:,.2f}` ISK\n"
             f"  *Location:* `{location_name}`"
         )
+
+        # Add undercut alert
+        type_id = order['type_id']
+        if type_id in market_prices:
+            if is_buy:
+                highest_buy = market_prices[type_id].get('buy', 0)
+                if highest_buy > price:
+                    line += f"\n  `> ❗️ Undercut! Best buy: {highest_buy:,.2f}`"
+            else: # is_sell
+                lowest_sell = market_prices[type_id].get('sell', float('inf'))
+                if lowest_sell < price:
+                    line += f"\n  `> ❗️ Undercut! Best sell: {lowest_sell:,.2f}`"
+
         message_lines.append(line)
 
     # --- Page Summary & Disclaimer ---
-    summary_footer = ""
+    region_name = id_to_name.get(character.region_id, f"ID: {character.region_id}")
+    summary_footer = f"\n\n---\n_Prices compared against the *{region_name}* region._"
 
     # --- Keyboard ---
     keyboard = []
@@ -4241,12 +4314,14 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("set_region_"):
         char_id = int(data.split('_')[-1])
         context.user_data['next_action'] = ('set_region_value', char_id)
-        await query.message.reply_text("Please enter the new Region ID (e.g., 10000002 for The Forge).\n\nType `cancel` to go back.")
+        context.user_data['prompt_message_id'] = query.message.message_id
+        await query.edit_message_text("Please enter the new Region ID (e.g., 10000002 for The Forge).\n\nType `cancel` to go back.")
 
     elif data.startswith("set_wallet_"):
         char_id = int(data.split('_')[-1])
         context.user_data['next_action'] = ('set_wallet_value', char_id)
-        await query.message.reply_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
+        context.user_data['prompt_message_id'] = query.message.message_id
+        await query.edit_message_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
 
     # --- Character Removal Flow ---
     elif data.startswith("remove_select_"):
