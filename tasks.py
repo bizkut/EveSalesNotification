@@ -1,6 +1,5 @@
 import logging
 from celery_app import celery
-import bot
 
 @celery.task(
     bind=True,
@@ -13,6 +12,9 @@ def continue_backfill_character_history(self, character_id: int):
     """
     Celery task to gradually backfill transaction history for a character, using the last transaction ID as a cursor.
     """
+    # Import bot functions locally to avoid circular dependencies
+    import bot
+
     logging.info(f"Starting background backfill task for character_id: {character_id}")
 
     # It's crucial to get the most up-to-date character object from the DB
