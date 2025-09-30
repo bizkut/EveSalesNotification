@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 import calendar
 from PIL import Image
 import psycopg2
-from tasks import continue_backfill_character_history
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -3274,6 +3273,8 @@ def backfill_all_character_history(character: Character) -> bool:
         logging.info(f"Oldest transaction ID from initial sync is {oldest_tx_id}. Kicking off background backfill.")
 
         update_character_backfill_state(character.id, is_backfilling=True, before_id=oldest_tx_id)
+        # Import the task locally to prevent circular import issues
+        from tasks import continue_backfill_character_history
         continue_backfill_character_history.delay(character.id)
         logging.info(f"Scheduled background backfill task for character {character.name}.")
 
