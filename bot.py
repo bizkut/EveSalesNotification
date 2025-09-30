@@ -3037,9 +3037,9 @@ async def master_orders_poll(application: Application):
                 continue
 
             # Get the context for this result
-            context = market_contexts[i]
-            region_id = context['region_id']
-            type_id = context['type_id']
+            market_context = market_contexts[i]
+            region_id = market_context['region_id']
+            type_id = market_context['type_id']
 
             buy_orders = [o for o in result if o.get('is_buy_order')]
             sell_orders = [o for o in result if not o.get('is_buy_order')]
@@ -5334,9 +5334,9 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     market_results = all_task_results[:len(market_tasks)]
     for i, result in enumerate(market_results):
         if isinstance(result, Exception) or not result: continue
-        context = market_contexts[i]
-        region_id = context['region_id']
-        type_id = context['type_id']
+        market_context = market_contexts[i]
+        region_id = market_context['region_id']
+        type_id = market_context['type_id']
         buy_orders = [o for o in result if o.get('is_buy_order')]
         sell_orders = [o for o in result if not o.get('is_buy_order')]
         market_data_cache[region_id][type_id] = {
