@@ -51,6 +51,7 @@ class Character:
     enable_sales_notifications: bool
     enable_buy_notifications: bool
     enable_daily_summary: bool
+    enable_undercut_notifications: bool
     notification_batch_threshold: int
     created_at: datetime
 
@@ -69,7 +70,8 @@ def load_characters_from_db():
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at
+                    enable_daily_summary, enable_undercut_notifications,
+                    notification_batch_threshold, created_at
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -87,7 +89,7 @@ def load_characters_from_db():
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
             region_id, wallet_balance_threshold,
             enable_sales, enable_buys,
-            enable_summary, batch_threshold, created_at
+            enable_summary, enable_undercut, batch_threshold, created_at
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -103,6 +105,7 @@ def load_characters_from_db():
             enable_sales_notifications=bool(enable_sales),
             enable_buy_notifications=bool(enable_buys),
             enable_daily_summary=bool(enable_summary),
+            enable_undercut_notifications=bool(enable_undercut),
             notification_batch_threshold=batch_threshold,
             created_at=created_at
         )
@@ -139,12 +142,20 @@ def setup_database():
                     enable_sales_notifications BOOLEAN DEFAULT TRUE,
                     enable_buy_notifications BOOLEAN DEFAULT TRUE,
                     enable_daily_summary BOOLEAN DEFAULT TRUE,
+                    enable_undercut_notifications BOOLEAN DEFAULT TRUE,
                     notification_batch_threshold INTEGER DEFAULT 3,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
                     needs_update_notification BOOLEAN DEFAULT FALSE,
                     deletion_scheduled_at TIMESTAMP WITH TIME ZONE
                 )
             """)
+
+            # Migration: Add enable_undercut_notifications column if it doesn't exist
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_undercut_notifications'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'enable_undercut_notifications' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN enable_undercut_notifications BOOLEAN DEFAULT TRUE;")
+                logging.info("Migration for 'enable_undercut_notifications' complete.")
 
             # Migration: Add deletion_scheduled_at column if it doesn't exist
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'deletion_scheduled_at'")
@@ -312,6 +323,15 @@ def setup_database():
                     character_id INTEGER NOT NULL,
                     chart_data BYTEA NOT NULL,
                     generated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS undercut_statuses (
+                    order_id BIGINT NOT NULL,
+                    character_id INTEGER NOT NULL,
+                    is_undercut BOOLEAN NOT NULL,
+                    PRIMARY KEY (order_id, character_id)
                 )
             """)
 
@@ -559,7 +579,8 @@ def get_characters_for_user(telegram_user_id):
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at
+                    enable_daily_summary, enable_undercut_notifications,
+                    notification_batch_threshold, created_at
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -568,7 +589,7 @@ def get_characters_for_user(telegram_user_id):
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold, created_at
+                    enable_summary, enable_undercut, batch_threshold, created_at
                 ) = row
 
                 user_characters.append(Character(
@@ -580,6 +601,7 @@ def get_characters_for_user(telegram_user_id):
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
+                    enable_undercut_notifications=bool(enable_undercut),
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at
                 ))
@@ -599,7 +621,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, region_id, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
-                    enable_daily_summary, notification_batch_threshold, created_at
+                    enable_daily_summary, enable_undercut_notifications,
+                    notification_batch_threshold, created_at
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -609,7 +632,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
                     region_id, wallet_balance_threshold,
                     enable_sales, enable_buys,
-                    enable_summary, batch_threshold, created_at
+                    enable_summary, enable_undercut, batch_threshold, created_at
                 ) = row
 
                 character = Character(
@@ -621,6 +644,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
                     enable_daily_summary=bool(enable_summary),
+                    enable_undercut_notifications=bool(enable_undercut),
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at
                 )
@@ -658,7 +682,8 @@ def update_character_notification_setting(character_id: int, setting: str, value
     allowed_settings = {
         "sales": "enable_sales_notifications",
         "buys": "enable_buy_notifications",
-        "summary": "enable_daily_summary"
+        "summary": "enable_daily_summary",
+        "undercut": "enable_undercut_notifications"
     }
     if setting not in allowed_settings:
         logging.error(f"Attempted to update an invalid notification setting: {setting}")
@@ -860,6 +885,61 @@ def delete_character(character_id: int):
     except Exception as e:
         conn.rollback()
         logging.error(f"Error deleting character {character_id}: {e}", exc_info=True)
+    finally:
+        database.release_db_connection(conn)
+
+
+def get_undercut_statuses(character_id: int) -> dict[int, bool]:
+    """Retrieves the last known undercut status for all of a character's orders."""
+    conn = database.get_db_connection()
+    statuses = {}
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT order_id, is_undercut FROM undercut_statuses WHERE character_id = %s",
+                (character_id,)
+            )
+            statuses = {row[0]: row[1] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
+    return statuses
+
+def update_undercut_statuses(character_id: int, statuses: list[dict]):
+    """Inserts or updates the undercut status for a list of orders."""
+    if not statuses:
+        return
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            data_to_insert = [
+                (s['order_id'], character_id, s['is_undercut']) for s in statuses
+            ]
+            upsert_query = """
+                INSERT INTO undercut_statuses (order_id, character_id, is_undercut)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (order_id, character_id) DO UPDATE
+                SET is_undercut = EXCLUDED.is_undercut;
+            """
+            cursor.executemany(upsert_query, data_to_insert)
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
+def remove_stale_undercut_statuses(character_id: int, current_order_ids: list[int]):
+    """Removes statuses for orders that are no longer open."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            if not current_order_ids:
+                # If there are no current orders, remove all statuses for that character
+                cursor.execute("DELETE FROM undercut_statuses WHERE character_id = %s", (character_id,))
+            else:
+                # Create a string of placeholders for the query
+                placeholders = ','.join(['%s'] * len(current_order_ids))
+                query = f"DELETE FROM undercut_statuses WHERE character_id = %s AND order_id NOT IN ({placeholders})"
+                # Note: The character_id must be passed as a tuple/list element
+                cursor.execute(query, [character_id] + current_order_ids)
+            conn.commit()
     finally:
         database.release_db_connection(conn)
 
@@ -1177,6 +1257,50 @@ def get_market_orders_history(character, return_headers=False, force_revalidate=
 
     if return_headers:
         return all_orders, first_page_headers
+    return all_orders
+
+
+def get_structure_market_orders(character: Character, structure_id: int, force_revalidate=False):
+    """
+    Fetches all pages of market orders for a specific structure from ESI.
+    Requires an authenticated character.
+    """
+    if not character:
+        return None
+
+    all_orders = []
+    page = 1
+    url = f"https://esi.evetech.net/v1/markets/structures/{structure_id}/"
+
+    while True:
+        params = {"datasource": "tranquility", "page": page}
+        # Only force revalidation on the first page.
+        revalidate_this_page = force_revalidate and page == 1
+        data, headers = make_esi_request(
+            url,
+            character=character,
+            params=params,
+            return_headers=True,
+            force_revalidate=revalidate_this_page
+        )
+
+        if data is None: # A None response indicates an error, not just an empty page
+            logging.error(f"Failed to fetch market orders for structure {structure_id} on page {page}.")
+            # Return None to indicate failure, as partial data could be misleading.
+            return None
+
+        if not data: # An empty list means we've reached the last page
+            break
+
+        all_orders.extend(data)
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1) # Be nice to ESI
+
     return all_orders
 
 
@@ -2222,6 +2346,146 @@ async def run_daily_summary_for_character(character: Character, context: Context
         logging.error(f"Failed to send daily summary for {character.name}: {e}", exc_info=True)
 
 
+async def master_undercut_poll(application: Application):
+    """
+    A single, continuous polling loop that checks for undercut orders
+    for all monitored characters.
+    """
+    context = ContextTypes.DEFAULT_TYPE(application=application)
+
+    while True:
+        logging.info("Starting master undercut polling cycle.")
+        characters_to_poll = [c for c in list(CHARACTERS) if c.enable_undercut_notifications]
+        min_delay = 300  # Default to 5 minutes
+
+        if not characters_to_poll:
+            logging.debug("No characters have undercut notifications enabled. Sleeping.")
+            await asyncio.sleep(min_delay)
+            continue
+
+        market_data_cache = {}
+
+        for character in characters_to_poll:
+            if get_character_deletion_status(character.id):
+                logging.info(f"Skipping undercut poll for {character.name} because they are pending deletion.")
+                continue
+
+            logging.debug(f"Polling for undercuts for {character.name}")
+            try:
+                open_orders, headers = await asyncio.to_thread(get_market_orders, character, return_headers=True, force_revalidate=True)
+                if open_orders is None:
+                    logging.error(f"Failed to fetch open orders for {character.name}. Skipping undercut check.")
+                    continue
+
+                char_delay = get_next_run_delay(headers)
+                min_delay = min(min_delay, char_delay)
+
+                current_order_ids = [o['order_id'] for o in open_orders]
+                await asyncio.to_thread(remove_stale_undercut_statuses, character.id, current_order_ids)
+
+                if not open_orders:
+                    continue
+
+                previous_statuses = await asyncio.to_thread(get_undercut_statuses, character.id)
+                new_statuses_to_update = []
+                notifications_to_send = []
+
+                station_orders_by_region = defaultdict(list)
+                structure_orders_by_id = defaultdict(list)
+                for order in open_orders:
+                    if order['location_id'] > 10000000000:
+                        structure_orders_by_id[order['location_id']].append(order)
+                    else:
+                        station_orders_by_region[character.region_id].append(order)
+
+                for region_id, orders in station_orders_by_region.items():
+                    type_ids_in_region = list(set(o['type_id'] for o in orders))
+                    if region_id not in market_data_cache:
+                        market_data_cache[region_id] = {}
+
+                    for type_id in type_ids_in_region:
+                        if type_id not in market_data_cache[region_id]:
+                            regional_market_orders = await asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True)
+                            if regional_market_orders:
+                                buy_prices = [o['price'] for o in regional_market_orders if o.get('is_buy_order')]
+                                sell_prices = [o['price'] for o in regional_market_orders if not o.get('is_buy_order')]
+                                market_data_cache[region_id][type_id] = {
+                                    'buy': max(buy_prices) if buy_prices else 0,
+                                    'sell': min(sell_prices) if sell_prices else float('inf')
+                                }
+
+                for structure_id, orders in structure_orders_by_id.items():
+                    if structure_id not in market_data_cache:
+                        all_structure_orders = await asyncio.to_thread(get_structure_market_orders, character, structure_id, force_revalidate=True)
+                        if all_structure_orders:
+                            price_map = defaultdict(lambda: {'buy': [], 'sell': []})
+                            for o in all_structure_orders:
+                                if o.get('is_buy_order'):
+                                    price_map[o['type_id']]['buy'].append(o['price'])
+                                else:
+                                    price_map[o['type_id']]['sell'].append(o['price'])
+
+                            final_price_map = {}
+                            for type_id, prices in price_map.items():
+                                final_price_map[type_id] = {
+                                    'buy': max(prices['buy']) if prices['buy'] else 0,
+                                    'sell': min(prices['sell']) if prices['sell'] else float('inf')
+                                }
+                            market_data_cache[structure_id] = final_price_map
+
+                for order in open_orders:
+                    is_undercut = False
+                    market_location_id = order['location_id'] if order['location_id'] > 10000000000 else character.region_id
+
+                    market_prices_for_loc = market_data_cache.get(market_location_id)
+                    if market_prices_for_loc:
+                        prices_for_type = market_prices_for_loc.get(order['type_id'])
+                        if prices_for_type:
+                            if order['is_buy_order']:
+                                if prices_for_type['buy'] > order['price']:
+                                    is_undercut = True
+                            else:
+                                if prices_for_type['sell'] < order['price']:
+                                    is_undercut = True
+
+                    new_statuses_to_update.append({'order_id': order['order_id'], 'is_undercut': is_undercut})
+
+                    was_undercut = previous_statuses.get(order['order_id'], False)
+                    if is_undercut and not was_undercut:
+                        notifications_to_send.append(order)
+
+                if new_statuses_to_update:
+                    await asyncio.to_thread(update_undercut_statuses, character.id, new_statuses_to_update)
+
+                if notifications_to_send:
+                    logging.info(f"Found {len(notifications_to_send)} new undercuts for {character.name}.")
+                    all_type_ids = [o['type_id'] for o in notifications_to_send]
+                    all_loc_ids = [o['location_id'] for o in notifications_to_send]
+                    id_to_name = await asyncio.to_thread(get_names_from_ids, list(set(all_type_ids + all_loc_ids)), character)
+
+                    for order in notifications_to_send:
+                        item_name = id_to_name.get(order['type_id'], f"TypeID {order['type_id']}")
+                        location_name = id_to_name.get(order['location_id'], "an unknown location")
+                        order_type = "Buy" if order['is_buy_order'] else "Sell"
+                        message = (
+                            f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
+                            f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
+                            f"  • **Quantity:** `{order['volume_remain']:,}` of `{order['volume_total']:,}`\n"
+                            f"  • **Your Price:** `{order['price']:,.2f}` ISK\n"
+                            f"  • **Location:** `{location_name}`"
+                        )
+                        await send_telegram_message(context, message, chat_id=character.telegram_user_id)
+                        await asyncio.sleep(1)
+
+            except Exception as e:
+                logging.error(f"Error in master_undercut_poll for character {character.name}: {e}", exc_info=True)
+            finally:
+                await asyncio.sleep(1)
+
+        logging.info(f"Master undercut polling cycle complete. Sleeping for {min_delay:.2f} seconds.")
+        await asyncio.sleep(min_delay)
+
+
 async def master_daily_summary_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Runs once per day and sends a summary to all characters who have it enabled.
@@ -3258,6 +3522,7 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton(f"Sales Notifications: {'✅ On' if character.enable_sales_notifications else '❌ Off'}", callback_data=f"toggle_sales_{character.id}")],
         [InlineKeyboardButton(f"Buy Notifications: {'✅ On' if character.enable_buy_notifications else '❌ Off'}", callback_data=f"toggle_buys_{character.id}")],
         [InlineKeyboardButton(f"Daily Summary: {'✅ On' if character.enable_daily_summary else '❌ Off'}", callback_data=f"toggle_summary_{character.id}")],
+        [InlineKeyboardButton(f"Undercut Notifications: {'✅ On' if character.enable_undercut_notifications else '❌ Off'}", callback_data=f"toggle_undercut_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3612,7 +3877,8 @@ async def post_init(application: Application):
     asyncio.create_task(master_wallet_journal_poll(application))
     asyncio.create_task(master_wallet_transaction_poll(application))
     asyncio.create_task(master_order_history_poll(application))
-    logging.info("Master polling loops for journal, transactions, and order history have been started.")
+    asyncio.create_task(master_undercut_poll(application))
+    logging.info("Master polling loops for journal, transactions, order history, and undercuts have been started.")
 
     # Schedule the job to check for new characters
     application.job_queue.run_repeating(check_for_new_characters_job, interval=10, first=10)
