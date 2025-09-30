@@ -3019,21 +3019,27 @@ async def master_orders_poll(application: Application):
                     required_markets[region_id].add(order['type_id'])
 
         logging.debug(f"Fetching market data for {len(required_markets)} regions and {sum(len(v) for v in required_markets.values())} unique type_ids...")
+
+        # Create a list of market contexts and a corresponding list of tasks
+        market_contexts = []
         market_tasks = []
         for region_id, type_ids in required_markets.items():
             for type_id in type_ids:
+                market_contexts.append({'region_id': region_id, 'type_id': type_id})
                 market_tasks.append(asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True))
 
         market_results = await asyncio.gather(*market_tasks, return_exceptions=True)
 
-        # Process market results into a usable cache
+        # Process market results into a usable cache, using the context list
         market_data_cache = defaultdict(dict)
-        for result in market_results:
+        for i, result in enumerate(market_results):
             if isinstance(result, Exception) or not result:
                 continue
-            # All orders in the result are for the same region and type
-            region_id = result[0]['region_id']
-            type_id = result[0]['type_id']
+
+            # Get the context for this result
+            context = market_contexts[i]
+            region_id = context['region_id']
+            type_id = context['type_id']
 
             buy_orders = [o for o in result if o.get('is_buy_order')]
             sell_orders = [o for o in result if not o.get('is_buy_order')]
@@ -5309,9 +5315,11 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             required_markets[region_id].add(order['type_id'])
 
     # 3. Fetch market data and other info concurrently
+    market_contexts = []
     market_tasks = []
     for region_id, type_ids in required_markets.items():
         for type_id in type_ids:
+            market_contexts.append({'region_id': region_id, 'type_id': type_id})
             market_tasks.append(asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True))
 
     other_tasks = {
@@ -5324,9 +5332,11 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     # 4. Process results
     market_data_cache = defaultdict(dict)
     market_results = all_task_results[:len(market_tasks)]
-    for result in market_results:
+    for i, result in enumerate(market_results):
         if isinstance(result, Exception) or not result: continue
-        region_id, type_id = result[0]['region_id'], result[0]['type_id']
+        context = market_contexts[i]
+        region_id = context['region_id']
+        type_id = context['type_id']
         buy_orders = [o for o in result if o.get('is_buy_order')]
         sell_orders = [o for o in result if not o.get('is_buy_order')]
         market_data_cache[region_id][type_id] = {
