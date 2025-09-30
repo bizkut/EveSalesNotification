@@ -2620,8 +2620,8 @@ async def master_undercut_poll(application: Application):
                             f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
                             f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
                             f"  • **Your Location:** `{my_location_name}`\n"
-                            f"  • **Competitor's Price:** `{competitor['price']:,.2f}` ISK\n"
-                            f"  • **Competitor's Location:** `{competitor_loc_name}`\n\n"
+                            f"  • **Best Market Price:** `{competitor['price']:,.2f}` ISK\n"
+                            f"  • **Best Price Location:** `{competitor_loc_name}`\n\n"
                             f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`"
                         )
                         await send_telegram_message(context, message, chat_id=character.telegram_user_id)
