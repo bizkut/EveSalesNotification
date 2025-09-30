@@ -1665,6 +1665,18 @@ def get_alliance_info(alliance_id: int):
     return make_esi_request(url)
 
 
+def get_station_info(station_id: int):
+    """Fetches public station information from ESI."""
+    url = f"https://esi.evetech.net/v2/universe/stations/{station_id}/"
+    return make_esi_request(url)
+
+
+def get_system_info(system_id: int):
+    """Fetches public solar system information from ESI."""
+    url = f"https://esi.evetech.net/v4/universe/systems/{system_id}/"
+    return make_esi_request(url)
+
+
 def get_cached_chart(chart_key: str):
     """Retrieves a cached chart from the database."""
     conn = database.get_db_connection()
@@ -2287,39 +2299,42 @@ async def master_wallet_transaction_poll(application: Application):
                                     profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
                                     fees_line = f"**Total Fees:** `{total_fees:,.2f} ISK`"
 
-                                    # --- Dynamic Region ID for Price Comparison ---
-                                    open_orders = get_tracked_market_orders(character.id)
+                                    # --- Dynamic Price Comparison Logic ---
                                     sale_location_id = tx_group[0]['location_id']
-                                    region_id_for_sale = None
                                     price_comparison_line = "" # Default to empty
 
-                                    # 1. Try to find region from an open order in the same station
-                                    if open_orders:
-                                        for order in open_orders:
-                                            if order['location_id'] == sale_location_id and 'region_id' in order:
-                                                region_id_for_sale = order['region_id']
-                                                break
+                                    # Check if the location is a player-owned structure
+                                    if sale_location_id > 10000000000:
+                                        structure_orders = get_structure_market_orders(character, sale_location_id, force_revalidate=True)
+                                        if structure_orders:
+                                            # Find the best buy order for the specific item type in the structure
+                                            best_buy_order_price = max([o['price'] for o in structure_orders if o.get('is_buy_order') and o.get('type_id') == type_id], default=0)
+                                            location_name = id_to_name.get(sale_location_id, "Structure")
+                                            price_comparison_line = f"**{location_name} Best Buy:** `N/A`"
+                                            if best_buy_order_price > 0:
+                                                price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
+                                                price_comparison_line = f"**{location_name} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
 
-                                        # 2. Fallback to most common region if no direct match
-                                        if not region_id_for_sale:
-                                            all_region_ids = [o['region_id'] for o in open_orders if 'region_id' in o]
-                                            if all_region_ids:
-                                                region_id_for_sale = max(set(all_region_ids), key=all_region_ids.count)
+                                    # Otherwise, it's an NPC station, so we find the region
+                                    else:
+                                        station_info = get_station_info(sale_location_id)
+                                        if station_info and 'system_id' in station_info:
+                                            system_info = get_system_info(station_info['system_id'])
+                                            if system_info and 'region_id' in system_info:
+                                                region_id = system_info['region_id']
+                                                # Resolve region name if not already done
+                                                if region_id not in id_to_name:
+                                                    resolved_name = get_names_from_ids([region_id])
+                                                    if resolved_name: id_to_name.update(resolved_name)
 
-                                    if region_id_for_sale:
-                                        # Resolve region name if not already done
-                                        if region_id_for_sale not in id_to_name:
-                                            resolved_name = get_names_from_ids([region_id_for_sale])
-                                            if resolved_name: id_to_name.update(resolved_name)
+                                                region_name = id_to_name.get(region_id, 'Region')
+                                                region_orders = get_region_market_orders(region_id, type_id, force_revalidate=True)
+                                                best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
 
-                                        region_orders = get_region_market_orders(region_id_for_sale, type_id, force_revalidate=True)
-                                        best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
-                                        region_name = id_to_name.get(region_id_for_sale, 'Region')
-
-                                        price_comparison_line = f"**{region_name} Best Buy:** `N/A`"
-                                        if best_buy_order_price > 0:
-                                            price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
-                                            price_comparison_line = f"**{region_name} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
+                                                price_comparison_line = f"**{region_name} Best Buy:** `N/A`"
+                                                if best_buy_order_price > 0:
+                                                    price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
+                                                    price_comparison_line = f"**{region_name} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
 
                                     message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
                                                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"

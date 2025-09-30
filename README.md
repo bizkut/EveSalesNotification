@@ -16,7 +16,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data & Undercut Alerts**:
   - **Accurate Profit Tracking (FIFO & Journal-Based)**: The bot uses the First-In, First-Out (FIFO) method to calculate the Cost of Goods Sold (COGS) for all sales. It then uses your character's actual wallet journal data for 100% accurate tax and broker fee calculations, providing a true financial record in all views.
-  - **Live Market Price Context**: For sales notifications, the bot dynamically determines the appropriate region for price comparison by looking at your character's other open orders. This keeps the context relevant without manual configuration.
+  - **Automatic & Accurate Market Context**: Sales notifications are compared against the best buy order in the *exact location* of the sale. The bot automatically determines if the sale was in an NPC station or a player-owned structure and fetches the correct market data. For stations, it finds the correct region by walking the ESI hierarchy (`station -> system -> region`), ensuring pinpoint accuracy without any user configuration.
   - **Accurate, Multi-Region Undercut Alerts**: When viewing open orders, the bot checks for undercuts in the *actual region of each order*, making it highly accurate for players who trade in multiple hubs simultaneously.
   - **Live Undercut Notifications**: Get notified the moment one of your orders is undercut. The bot monitors both regional markets and player-owned structures. To prevent spam, notifications are only sent once when an order's status changes from competitive to undercut. This can be toggled in the settings.
   - **Wallet Balance**: All notifications include your character's current wallet balance.
@@ -128,7 +128,7 @@ All interaction with the bot is handled through a clean, inline button-based men
     -   **🛒 View Buys**: Displays a detailed, paginated history of all buy transactions.
     -   **📝 View Contracts**: Shows a paginated list of all outstanding contracts.
     -   **📊 Request Summary**: Manually triggers the daily summary report, which includes on-demand performance charts.
-    -   **⚙️ Settings**: Configure per-character settings like your preferred trading region, wallet balance alerts, notification preferences, and view public character info.
+    -   **⚙️ Settings**: Configure per-character settings like wallet balance alerts, notification preferences, and view public character info.
     -   **➕ Add Character**: Starts the process of adding a new character.
     -   **🗑️ Remove Character**: Schedules a character and all their associated data for permanent deletion after a one-hour grace period. This action can be cancelled by re-adding the character within the hour.
 3.  **Character Selection**: If you have multiple characters, the bot will present you with a new inline menu to choose which character you want to interact with after you select an action.
