@@ -2441,7 +2441,7 @@ async def master_undercut_poll(application: Application):
                     if market_prices_for_loc:
                         prices_for_type = market_prices_for_loc.get(order['type_id'])
                         if prices_for_type:
-                            if order['is_buy_order']:
+                            if order.get('is_buy_order'):
                                 if prices_for_type['buy'] > order['price']:
                                     is_undercut = True
                             else:
@@ -2466,7 +2466,7 @@ async def master_undercut_poll(application: Application):
                     for order in notifications_to_send:
                         item_name = id_to_name.get(order['type_id'], f"TypeID {order['type_id']}")
                         location_name = id_to_name.get(order['location_id'], "an unknown location")
-                        order_type = "Buy" if order['is_buy_order'] else "Sell"
+                        order_type = "Buy" if order.get('is_buy_order') else "Sell"
                         message = (
                             f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
                             f"Your {order_type} order for **{item_name}** has been undercut.\n\n"
