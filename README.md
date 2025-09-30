@@ -16,8 +16,8 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data & Undercut Alerts**:
   - **Accurate Profit Tracking (FIFO & Journal-Based)**: The bot uses the First-In, First-Out (FIFO) method to calculate the Cost of Goods Sold (COGS) for all sales. It then uses your character's actual wallet journal data for 100% accurate tax and broker fee calculations, providing a true financial record in all views.
-  - **Live Market Price Context**: Sales notifications are compared against the current best buy order in your character's configured main trade hub.
-  - **Open Order Undercut Alerts**: When viewing open orders, the bot checks for undercuts in your configured region. It will warn you if a higher buy order or a lower sell order exists, helping you stay competitive.
+  - **Live Market Price Context**: For sales notifications, the bot dynamically determines the appropriate region for price comparison by looking at your character's other open orders. This keeps the context relevant without manual configuration.
+  - **Accurate, Multi-Region Undercut Alerts**: When viewing open orders, the bot checks for undercuts in the *actual region of each order*, making it highly accurate for players who trade in multiple hubs simultaneously.
   - **Live Undercut Notifications**: Get notified the moment one of your orders is undercut. The bot monitors both regional markets and player-owned structures. To prevent spam, notifications are only sent once when an order's status changes from competitive to undercut. This can be toggled in the settings.
   - **Wallet Balance**: All notifications include your character's current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
