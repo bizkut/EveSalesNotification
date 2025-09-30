@@ -1678,18 +1678,24 @@ def get_station_info(station_id: int):
     return make_esi_request(url)
 
 
+def get_system_info(system_id: int):
+    """Fetches public solar system information from ESI."""
+    url = f"https://esi.evetech.net/v4/universe/systems/{system_id}/"
+    return make_esi_request(url)
+
+
+def get_constellation_info(constellation_id: int):
+    """Fetches public constellation information from ESI."""
+    url = f"https://esi.evetech.net/latest/universe/constellations/{constellation_id}/"
+    return make_esi_request(url)
+
+
 def get_structure_info(character: Character, structure_id: int):
     """Fetches structure information from ESI, requires authentication."""
     if not character:
         return None
     url = f"https://esi.evetech.net/v2/universe/structures/{structure_id}/"
     return make_esi_request(url, character=character)
-
-
-def get_system_info(system_id: int):
-    """Fetches public solar system information from ESI."""
-    url = f"https://esi.evetech.net/v4/universe/systems/{system_id}/"
-    return make_esi_request(url)
 
 
 def get_cached_chart(chart_key: str):
@@ -2780,28 +2786,50 @@ async def master_orders_poll(application: Application):
 
                 orders_by_region = defaultdict(list)
                 for order in open_orders:
-                    # If the order is in a player-owned structure, resolve its region
+                    region_id = None
+                    # Resolve region for structures
                     if order['location_id'] > 10000000000:
                         structure_info = await asyncio.to_thread(get_structure_info, character, order['location_id'])
                         if structure_info and 'solar_system_id' in structure_info:
                             system_info = await asyncio.to_thread(get_system_info, structure_info['solar_system_id'])
-                            if system_info and 'region_id' in system_info:
-                                order['region_id'] = system_info['region_id'] # Augment the order with its region
-                    # Group all orders by their region ID
-                    if 'region_id' in order:
-                        orders_by_region[order['region_id']].append(order)
+                            if system_info and 'constellation_id' in system_info:
+                                constellation_info = await asyncio.to_thread(get_constellation_info, system_info['constellation_id'])
+                                if constellation_info and 'region_id' in constellation_info:
+                                    region_id = constellation_info['region_id']
+                    # Resolve region for NPC stations
+                    else:
+                        station_info = await asyncio.to_thread(get_station_info, order['location_id'])
+                        if station_info and 'system_id' in station_info:
+                            system_info = await asyncio.to_thread(get_system_info, station_info['system_id'])
+                            if system_info and 'constellation_id' in system_info:
+                                constellation_info = await asyncio.to_thread(get_constellation_info, system_info['constellation_id'])
+                                if constellation_info and 'region_id' in constellation_info:
+                                    region_id = constellation_info['region_id']
 
+                    # Augment the order with the resolved region and group it
+                    if region_id:
+                        order['region_id'] = region_id
+                        orders_by_region[region_id].append(order)
+                    else:
+                        logging.warning(f"Could not resolve region for order {order['order_id']} at location {order['location_id']}.")
+
+                # Step 1: Pre-fetch all required regional market data
                 for region_id, orders in orders_by_region.items():
+                    # Get unique type IDs for the orders in this region
                     type_ids_in_region = list(set(o['type_id'] for o in orders))
+
+                    # Ensure cache structure exists
                     if region_id not in market_data_cache:
                         market_data_cache[region_id] = {}
 
+                    # For each type, fetch the regional market data if not already cached
                     for type_id in type_ids_in_region:
                         if type_id not in market_data_cache[region_id]:
                             regional_market_orders = await asyncio.to_thread(get_region_market_orders, region_id, type_id, force_revalidate=True)
                             if regional_market_orders:
                                 buy_orders = [o for o in regional_market_orders if o.get('is_buy_order')]
                                 sell_orders = [o for o in regional_market_orders if not o.get('is_buy_order')]
+                                # Find the best buy and sell prices in the entire region
                                 best_buy = max(buy_orders, key=lambda x: x['price']) if buy_orders else None
                                 best_sell = min(sell_orders, key=lambda x: x['price']) if sell_orders else None
                                 market_data_cache[region_id][type_id] = {
@@ -2809,25 +2837,30 @@ async def master_orders_poll(application: Application):
                                     'sell': best_sell
                                 }
 
+                # Step 2: Iterate through all open orders and check for undercuts using the cached regional data
                 for order in open_orders:
                     is_undercut = False
                     competitor_order = None
-                    market_location_id = order.get('region_id')
+                    region_id = order.get('region_id') # This was added in the universal lookup step
 
-                    market_prices_for_loc = market_data_cache.get(market_location_id)
-                    if market_prices_for_loc:
-                        prices_for_type = market_prices_for_loc.get(order['type_id'])
-                        if prices_for_type:
-                            if order.get('is_buy_order'):
-                                best_buy_order = prices_for_type.get('buy')
-                                if best_buy_order and best_buy_order['price'] > order['price']:
-                                    is_undercut = True
-                                    competitor_order = best_buy_order
-                            else: # Sell order
-                                best_sell_order = prices_for_type.get('sell')
-                                if best_sell_order and best_sell_order['price'] < order['price']:
-                                    is_undercut = True
-                                    competitor_order = best_sell_order
+                    if not region_id:
+                        continue # Skip orders where region could not be resolved
+
+                    # Get the regional market prices for this order's type
+                    regional_prices = market_data_cache.get(region_id, {}).get(order['type_id'])
+                    if regional_prices:
+                        if order.get('is_buy_order'):
+                            # My buy order is "undercut" if someone else has a higher buy price
+                            best_regional_buy = regional_prices.get('buy')
+                            if best_regional_buy and best_regional_buy['price'] > order['price']:
+                                is_undercut = True
+                                competitor_order = best_regional_buy
+                        else: # My sell order
+                            # My sell order is undercut if someone else has a lower sell price
+                            best_regional_sell = regional_prices.get('sell')
+                            if best_regional_sell and best_regional_sell['price'] < order['price']:
+                                is_undercut = True
+                                competitor_order = best_regional_sell
 
                     competitor_price = None
                     if is_undercut and competitor_order:
