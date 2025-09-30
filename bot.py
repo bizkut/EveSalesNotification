@@ -46,7 +46,6 @@ class Character:
     refresh_token: str
     telegram_user_id: int
     notifications_enabled: bool
-    region_id: int
     wallet_balance_threshold: int
     enable_sales_notifications: bool
     enable_buy_notifications: bool
@@ -69,7 +68,7 @@ def load_characters_from_db():
             cursor.execute("""
                 SELECT
                     character_id, character_name, refresh_token, telegram_user_id,
-                    notifications_enabled, region_id, wallet_balance_threshold,
+                    notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_summary, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at
@@ -88,7 +87,7 @@ def load_characters_from_db():
     for row in rows:
         (
             char_id, name, refresh_token, telegram_user_id, notifications_enabled,
-            region_id, wallet_balance_threshold,
+            wallet_balance_threshold,
             enable_sales, enable_buys,
             enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
         ) = row
@@ -101,7 +100,6 @@ def load_characters_from_db():
             id=char_id, name=name, refresh_token=refresh_token,
             telegram_user_id=telegram_user_id,
             notifications_enabled=bool(notifications_enabled),
-            region_id=region_id,
             wallet_balance_threshold=wallet_balance_threshold,
             enable_sales_notifications=bool(enable_sales),
             enable_buy_notifications=bool(enable_buys),
@@ -139,7 +137,6 @@ def setup_database():
                     refresh_token TEXT NOT NULL,
                     telegram_user_id BIGINT NOT NULL REFERENCES telegram_users(telegram_id),
                     notifications_enabled BOOLEAN DEFAULT TRUE,
-                    region_id INTEGER DEFAULT 10000002,
                     wallet_balance_threshold BIGINT DEFAULT 0,
                     enable_sales_notifications BOOLEAN DEFAULT TRUE,
                     enable_buy_notifications BOOLEAN DEFAULT TRUE,
@@ -736,7 +733,7 @@ def get_characters_for_user(telegram_user_id):
             cursor.execute("""
                 SELECT
                     character_id, character_name, refresh_token, telegram_user_id,
-                    notifications_enabled, region_id, wallet_balance_threshold,
+                    notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_summary, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at
@@ -746,7 +743,7 @@ def get_characters_for_user(telegram_user_id):
             for row in rows:
                 (
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
-                    region_id, wallet_balance_threshold,
+                    wallet_balance_threshold,
                     enable_sales, enable_buys,
                     enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
                 ) = row
@@ -755,7 +752,6 @@ def get_characters_for_user(telegram_user_id):
                     id=char_id, name=name, refresh_token=refresh_token,
                     telegram_user_id=telegram_user_id,
                     notifications_enabled=bool(notifications_enabled),
-                    region_id=region_id,
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
@@ -779,7 +775,7 @@ def get_character_by_id(character_id: int) -> Character | None:
             cursor.execute("""
                 SELECT
                     character_id, character_name, refresh_token, telegram_user_id,
-                    notifications_enabled, region_id, wallet_balance_threshold,
+                    notifications_enabled, wallet_balance_threshold,
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_summary, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at
@@ -790,7 +786,7 @@ def get_character_by_id(character_id: int) -> Character | None:
             if row:
                 (
                     char_id, name, refresh_token, telegram_user_id, notifications_enabled,
-                    region_id, wallet_balance_threshold,
+                    wallet_balance_threshold,
                     enable_sales, enable_buys,
                     enable_summary, enable_undercut, enable_contracts, batch_threshold, created_at
                 ) = row
@@ -799,7 +795,6 @@ def get_character_by_id(character_id: int) -> Character | None:
                     id=char_id, name=name, refresh_token=refresh_token,
                     telegram_user_id=telegram_user_id,
                     notifications_enabled=bool(notifications_enabled),
-                    region_id=region_id,
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
                     enable_buy_notifications=bool(enable_buys),
@@ -817,7 +812,7 @@ def get_character_by_id(character_id: int) -> Character | None:
 def update_character_setting(character_id: int, setting: str, value: any):
     """Updates a specific setting for a character in the database."""
     allowed_settings = [
-        "region_id", "wallet_balance_threshold"
+        "wallet_balance_threshold"
     ]
     if setting not in allowed_settings:
         logging.error(f"Attempted to update an invalid setting: {setting}")
@@ -2150,7 +2145,7 @@ async def master_wallet_transaction_poll(application: Application):
 
                     all_type_ids = list(sales.keys()) + list(buys.keys())
                     all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
-                    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids + [character.region_id])), character=character)
+                    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids)), character=character)
                     wallet_balance = get_wallet_balance(character, force_revalidate=True)
 
                     # --- Unconditional Data Processing ---
@@ -2292,17 +2287,44 @@ async def master_wallet_transaction_poll(application: Application):
                                     profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
                                     fees_line = f"**Total Fees:** `{total_fees:,.2f} ISK`"
 
-                                    region_orders = get_region_market_orders(character.region_id, type_id, force_revalidate=True)
-                                    best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
-                                    price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `N/A`"
-                                    if best_buy_order_price > 0:
-                                        price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
-                                        price_comparison_line = f"**{id_to_name.get(character.region_id, 'Region')} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
+                                    # --- Dynamic Region ID for Price Comparison ---
+                                    open_orders = get_tracked_market_orders(character.id)
+                                    sale_location_id = tx_group[0]['location_id']
+                                    region_id_for_sale = None
+                                    price_comparison_line = "" # Default to empty
+
+                                    # 1. Try to find region from an open order in the same station
+                                    if open_orders:
+                                        for order in open_orders:
+                                            if order['location_id'] == sale_location_id and 'region_id' in order:
+                                                region_id_for_sale = order['region_id']
+                                                break
+
+                                        # 2. Fallback to most common region if no direct match
+                                        if not region_id_for_sale:
+                                            all_region_ids = [o['region_id'] for o in open_orders if 'region_id' in o]
+                                            if all_region_ids:
+                                                region_id_for_sale = max(set(all_region_ids), key=all_region_ids.count)
+
+                                    if region_id_for_sale:
+                                        # Resolve region name if not already done
+                                        if region_id_for_sale not in id_to_name:
+                                            resolved_name = get_names_from_ids([region_id_for_sale])
+                                            if resolved_name: id_to_name.update(resolved_name)
+
+                                        region_orders = get_region_market_orders(region_id_for_sale, type_id, force_revalidate=True)
+                                        best_buy_order_price = max([o['price'] for o in region_orders if o.get('is_buy_order')], default=0)
+                                        region_name = id_to_name.get(region_id_for_sale, 'Region')
+
+                                        price_comparison_line = f"**{region_name} Best Buy:** `N/A`"
+                                        if best_buy_order_price > 0:
+                                            price_diff_str = f"({(avg_price / best_buy_order_price - 1):+.2%})"
+                                            price_comparison_line = f"**{region_name} Best Buy:** `{best_buy_order_price:,.2f} ISK` {price_diff_str}"
 
                                     message = (f"✅ *Market Sale ({character.name})* ✅\n\n"
                                                f"**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n"
                                                f"**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n"
-                                               f"{price_comparison_line}\n"
+                                               f"{price_comparison_line}\n" if price_comparison_line else ""
                                                f"{fees_line}{profit_line}\n\n"
                                                f"**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n"
                                                f"**Wallet:** `{wallet_balance:,.2f} ISK`")
@@ -2731,8 +2753,8 @@ async def master_orders_poll(application: Application):
                 for order in open_orders:
                     if order['location_id'] > 10000000000:
                         structure_orders_by_id[order['location_id']].append(order)
-                    else:
-                        station_orders_by_region[character.region_id].append(order)
+                    elif 'region_id' in order:
+                        station_orders_by_region[order['region_id']].append(order)
 
                 for region_id, orders in station_orders_by_region.items():
                     type_ids_in_region = list(set(o['type_id'] for o in orders))
@@ -2774,7 +2796,7 @@ async def master_orders_poll(application: Application):
                 for order in open_orders:
                     is_undercut = False
                     competitor_order = None
-                    market_location_id = order['location_id'] if order['location_id'] > 10000000000 else character.region_id
+                    market_location_id = order['location_id'] if order['location_id'] > 10000000000 else order.get('region_id')
 
                     market_prices_for_loc = market_data_cache.get(market_location_id)
                     if market_prices_for_loc:
@@ -4443,14 +4465,9 @@ def _build_settings_message_and_keyboard(character: Character):
     user_characters = get_characters_for_user(character.telegram_user_id)
     back_callback = "start_command" if len(user_characters) <= 1 else "settings"
 
-    # Resolve region name for the button
-    id_to_name = get_names_from_ids([character.region_id])
-    region_name = id_to_name.get(character.region_id, f"ID: {character.region_id}")
-
     keyboard = [
         [InlineKeyboardButton("ℹ️ Character Info", callback_data=f"character_info_{character.id}")],
         [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
-        [InlineKeyboardButton(f"Market Region: {region_name}", callback_data=f"set_region_{character.id}")],
         [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
@@ -4728,16 +4745,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     success = False
     error_message = ""
 
-    if action_type == 'set_region_value':
-        try:
-            new_region_id = int(text)
-            update_character_setting(character_id, 'region_id', new_region_id)
-            load_characters_from_db()
-            success = True
-        except ValueError:
-            error_message = "❌ Invalid input. Please enter a numeric Region ID. Try again or type `cancel`."
-
-    elif action_type == 'set_wallet_value':
+    if action_type == 'set_wallet_value':
         try:
             new_threshold = int(text.replace(',', '').replace('.', ''))
             update_character_setting(character_id, 'wallet_balance_threshold', new_threshold)
@@ -5458,13 +5466,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await _show_notification_settings(update, context, get_character_by_id(char_id)) # Refresh the menu
 
     # --- General Settings Value Input ---
-    elif data.startswith("set_region_"):
-        char_id = int(data.split('_')[-1])
-        context.user_data['next_action'] = ('set_region_value', char_id)
-        context.user_data['prompt_message_id'] = query.message.message_id
-        await query.edit_message_text("Please enter the new Region ID (e.g., 10000002 for The Forge).\n\nType `cancel` to go back.")
-
-    elif data.startswith("set_wallet_"):
+    if data.startswith("set_wallet_"):
         char_id = int(data.split('_')[-1])
         context.user_data['next_action'] = ('set_wallet_value', char_id)
         context.user_data['prompt_message_id'] = query.message.message_id
