@@ -335,6 +335,15 @@ def setup_database():
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS chart_cache (
+                    chart_key TEXT PRIMARY KEY,
+                    character_id INTEGER NOT NULL,
+                    chart_data BYTEA NOT NULL,
+                    generated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -885,6 +894,42 @@ def delete_character(character_id: int):
     except Exception as e:
         conn.rollback()
         logging.error(f"Error deleting character {character_id}: {e}", exc_info=True)
+    finally:
+        database.release_db_connection(conn)
+
+
+def get_cached_chart(chart_key: str):
+    """Retrieves a cached chart from the database."""
+    conn = database.get_db_connection()
+    chart_data = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT chart_data FROM chart_cache WHERE chart_key = %s", (chart_key,))
+            row = cursor.fetchone()
+            if row:
+                chart_data = row[0]
+    finally:
+        database.release_db_connection(conn)
+    return chart_data
+
+
+def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes):
+    """Saves or updates a chart in the database cache."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            binary_data = psycopg2.Binary(chart_data)
+            cursor.execute(
+                """
+                INSERT INTO chart_cache (chart_key, character_id, chart_data, generated_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (chart_key) DO UPDATE SET
+                    chart_data = EXCLUDED.chart_data,
+                    generated_at = EXCLUDED.generated_at;
+                """,
+                (chart_key, character_id, binary_data, datetime.now(timezone.utc))
+            )
+            conn.commit()
     finally:
         database.release_db_connection(conn)
 
@@ -3430,7 +3475,7 @@ def generate_all_time_chart(character_id: int):
 
 
 async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Job to generate and send a chart in the background."""
+    """Job to generate and send a chart in the background, with caching."""
     job = context.job
     chat_id = job.chat_id
     character_id = job.data['character_id']
@@ -3439,13 +3484,35 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     character = get_character_by_id(character_id)
     if not character:
-        await context.bot.edit_message_text(
-            text="Error: Could not find character for this chart.",
-            chat_id=chat_id,
-            message_id=generating_message_id
-        )
+        await context.bot.edit_message_text(text="Error: Could not find character for this chart.", chat_id=chat_id, message_id=generating_message_id)
         return
 
+    now = datetime.now(timezone.utc)
+    chart_key = f"chart:{character_id}:{chart_type}"
+    if chart_type == 'lastday':
+        chart_key += f":{now.strftime('%Y-%m-%d-%H')}"
+    elif chart_type in ['7days', '30days']:
+        chart_key += f":{now.strftime('%Y-%m-%d')}"
+
+    is_dirty = get_bot_state(f"chart_cache_dirty_{character_id}") == "true"
+
+    caption_map = {
+        'lastday': "Last Day", '7days': "Last 7 Days",
+        '30days': "Last 30 Days", 'alltime': "All Time"
+    }
+    caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
+    keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if not (chart_type == 'alltime' and is_dirty):
+        cached_chart_data = get_cached_chart(chart_key)
+        if cached_chart_data:
+            logging.info(f"Using cached chart for key: {chart_key}")
+            await context.bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
+            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(bytes(cached_chart_data)), caption=caption, reply_markup=reply_markup)
+            return
+
+    logging.info(f"Generating new chart for key: {chart_key} (All-Time Dirty: {is_dirty if chart_type == 'alltime' else 'N/A'})")
     chart_buffer = None
     try:
         if chart_type == 'lastday':
@@ -3458,45 +3525,19 @@ async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             chart_buffer = await asyncio.to_thread(generate_all_time_chart, character_id)
     except Exception as e:
         logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.edit_message_text(
-            text=f"An error occurred while generating the chart for {character.name}.",
-            chat_id=chat_id,
-            message_id=generating_message_id,
-            reply_markup=reply_markup
-        )
+        await context.bot.edit_message_text(text=f"An error occurred while generating the chart for {character.name}.", chat_id=chat_id, message_id=generating_message_id, reply_markup=reply_markup)
         return
 
-    # Delete the "Generating..." message first
     await context.bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
 
-    keyboard = [[InlineKeyboardButton("Back to Summary", callback_data=f"summary_back_{character_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    caption_map = {
-        'lastday': "Last Day",
-        '7days': "Last 7 Days",
-        '30days': "Last 30 Days",
-        'alltime': "All Time"
-    }
-    caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-
     if chart_buffer:
-        # Send the photo as a new message
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=chart_buffer,
-            caption=caption,
-            reply_markup=reply_markup
-        )
+        save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
+        if chart_type == 'alltime':
+            set_bot_state(f"chart_cache_dirty_{character_id}", "false")
+        chart_buffer.seek(0)
+        await context.bot.send_photo(chat_id=chat_id, photo=chart_buffer, caption=caption, reply_markup=reply_markup)
     else:
-        # Send a new message indicating no data was found
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"Could not generate chart for {character.name}. No data available for the period.",
-            reply_markup=reply_markup
-        )
+        await context.bot.send_message(chat_id=chat_id, text=f"Could not generate chart for {character.name}. No data available for the period.", reply_markup=reply_markup)
 
 
 async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
