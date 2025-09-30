@@ -24,7 +24,9 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot displays your character's current order capacity (e.g., "152 / 305 orders") and provides undercut alerts.
 - **Public Character Info**: View a summary of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
-- **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram. The summary now includes inline buttons to create an hourly (last 24h), daily (current month), and monthly (for all historical years) performance chart. After viewing a chart, you can easily return to the summary view using the "Back to Summary" button.
+- **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram with a single button press. The bot offers several timeframes: "Last Day," "Last 7 Days," "Last 30 Days," and "All Time."
+  - **Advanced Visualization**: Charts display profit as a cumulative area graph (showing gains and losses over the period) while sales and fees are shown as non-cumulative bar graphs for easy comparison.
+  - **Intelligent Caching**: Charts are cached intelligently to ensure fast delivery. "Last Day" charts are cached hourly, daily charts are cached for the day, and the "All Time" chart is only regenerated when new transaction data is detected.
 - **Highly Configurable**: All major settings (wallet alerts, notification types, etc.) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Uses a combination of an in-memory cache and a persistent PostgreSQL database to minimize API calls and prevent duplicate notifications.
 - **Intelligent Seeding & Backfill**: On first add, the bot intelligently seeds a character's entire transaction history to ensure profit calculations are accurate from day one. To prevent a flood of old alerts, a 1-hour grace period begins after the initial historical data sync is complete. During this time, no new notifications (sales, buys, cancellations, or expirations) will be sent. This ensures that only market activity occurring after the sync and grace period will trigger an alert.
@@ -141,22 +143,22 @@ All interaction with the bot is handled through a clean, inline button-based men
 
 **Daily Summary:**
 ```
-📊 *Daily Market Summary (Character Name)*
+📊 *Market Summary (Character Name)*
 _2025-09-26 18:00 UTC_
 
 *Wallet Balance:* `1,234,567,890.12 ISK`
 
-*Past 24 Hours:*
+*Last Day:*
   - Total Sales Value: `15,000,000.00 ISK`
   - Total Fees (Broker + Tax): `750,000.00 ISK`
   - **Profit (FIFO):** `3,500,000.00 ISK`
 
 ---
 
-🗓️ *Current Month Summary (September 2025):*
+🗓️ *Last 30 Days:*
   - Total Sales Value: `120,000,000.00 ISK`
   - Total Fees (Broker + Tax): `6,000,000.00 ISK`
-  - *Gross Revenue (Sales - Fees):* `114,000,000.00 ISK`
+  - **Profit (FIFO):** `25,000,000.00 ISK`
 ```
 
 ---
