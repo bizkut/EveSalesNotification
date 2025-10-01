@@ -2426,14 +2426,17 @@ def get_characters_to_purge():
 # --- Telegram Helpers ---
 
 def send_telegram_message_sync(bot: telegram.Bot, message: str, chat_id: int, reply_markup=None):
-    """Synchronously sends a message to a specific chat_id."""
+    """Synchronously sends a message to a specific chat_id by running the async method in a new event loop."""
     if not chat_id:
         logging.error("No chat_id provided. Cannot send message.")
         return
     try:
-        bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown', reply_markup=reply_markup)
+        # Since this is called from a sync task (Celery), we need to run the async `send_message`
+        # method in its own event loop.
+        asyncio.run(bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown', reply_markup=reply_markup))
         logging.info(f"Sent message to chat_id: {chat_id}.")
     except Exception as e:
+        # Catching a broad exception here because the async context can raise various errors.
         logging.error(f"Error sending Telegram message to {chat_id}: {e}", exc_info=True)
 
 # --- Celery Task Helpers & Logic ---
