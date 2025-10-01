@@ -82,3 +82,84 @@ def continue_backfill_character_history(self, character_id: int):
     # Celery's built-in retry mechanism will handle rate-limiting or other ESI errors.
     logging.info(f"Queueing next backfill task for character {character_id}, before_id {min_transaction_id}.")
     continue_backfill_character_history.apply_async(args=[character_id])
+
+
+@celery.task(
+    bind=True,
+    name='tasks.generate_chart_task',
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_kwargs={'max_retries': 3}
+)
+def generate_chart_task(self, character_id: int, chart_type: str, chat_id: int, generating_message_id: int):
+    """
+    Celery task to generate and send a chart image to the user.
+    """
+    import os
+    import io
+    from datetime import datetime, timezone
+    import telegram
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    import charts
+    import bot
+
+    # Initialize Telegram Bot
+    telegram_bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
+
+    character = bot.get_character_by_id(character_id)
+    if not character:
+        telegram_bot.edit_message_text(text="Error: Could not find character for this chart.", chat_id=chat_id, message_id=generating_message_id)
+        return
+
+    # Caching logic
+    now = datetime.now(timezone.utc)
+    chart_key = f"chart:{character_id}:{chart_type}"
+    if chart_type == 'lastday':
+        chart_key += f":{now.strftime('%Y-%m-%d-%H')}"
+    elif chart_type in ['7days', '30days']:
+        chart_key += f":{now.strftime('%Y-%m-%d')}"
+
+    is_dirty = bot.get_bot_state(f"chart_cache_dirty_{character_id}") == "true"
+
+    caption_map = {
+        'lastday': "Last Day", '7days': "Last 7 Days",
+        '30days': "Last 30 Days", 'alltime': "All Time"
+    }
+    caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
+    keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_back_{character_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if not (chart_type == 'alltime' and is_dirty):
+        cached_chart_data = bot.get_cached_chart(chart_key)
+        if cached_chart_data:
+            logging.info(f"Using cached chart for key: {chart_key}")
+            telegram_bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
+            telegram_bot.send_photo(chat_id=chat_id, photo=io.BytesIO(bytes(cached_chart_data)), caption=caption, reply_markup=reply_markup)
+            return
+
+    logging.info(f"Generating new chart for key: {chart_key} (All-Time Dirty: {is_dirty if chart_type == 'alltime' else 'N/A'})")
+    chart_buffer = None
+    try:
+        if chart_type == 'lastday':
+            chart_buffer = charts.generate_last_day_chart(character_id)
+        elif chart_type == '7days':
+            chart_buffer = charts.generate_last_7_days_chart(character_id)
+        elif chart_type == '30days':
+            chart_buffer = charts.generate_last_30_days_chart(character_id)
+        elif chart_type == 'alltime':
+            chart_buffer = charts.generate_all_time_chart(character_id)
+    except Exception as e:
+        logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
+        telegram_bot.edit_message_text(text=f"An error occurred while generating the chart for {character.name}.", chat_id=chat_id, message_id=generating_message_id, reply_markup=reply_markup)
+        return
+
+    telegram_bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
+
+    if chart_buffer:
+        bot.save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
+        if chart_type == 'alltime':
+            bot.set_bot_state(f"chart_cache_dirty_{character_id}", "false")
+        chart_buffer.seek(0)
+        telegram_bot.send_photo(chat_id=chat_id, photo=chart_buffer, caption=caption, reply_markup=reply_markup)
+    else:
+        telegram_bot.send_message(chat_id=chat_id, text=f"Could not generate chart for {character.name}. No data available for the period.", reply_markup=reply_markup)
