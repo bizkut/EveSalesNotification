@@ -2331,3 +2331,16 @@ def seed_data_for_character(character: Character) -> bool:
     success = backfill_all_character_history(character)
     logging.info(f"Finished checking/seeding data for {character.name}. Success: {success}")
     return success
+
+
+def get_contracts_from_db(character_id: int) -> list:
+    """Retrieves all cached contracts for a character from the local database."""
+    conn = database.get_db_connection()
+    contracts = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT contract_data FROM contracts WHERE character_id = %s", (character_id,))
+            contracts = [row[0] for row in cursor.fetchall()]
+    finally:
+        database.release_db_connection(conn)
+    return contracts
