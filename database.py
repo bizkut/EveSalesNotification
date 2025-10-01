@@ -1,59 +1,57 @@
 import os
 import logging
+import psycopg2
+from psycopg2 import pool
 
-# The pool is initialized to None at the module level.
-# Crucially, psycopg2 is NOT imported here.
-db_pool = None
+# Global connection pool variable
+connection_pool = None
 
-def _initialize_pool():
+def initialize_pool():
     """
-    Initializes the connection pool. This function is called lazily
-    by get_db_connection the first time a connection is requested in a process.
+    Initializes the PostgreSQL connection pool using environment variables.
     """
-    global db_pool
-    # Import psycopg2 here, inside the function, to ensure it's loaded after
-    # the worker process has forked.
-    from psycopg2 import pool
-
-    # Check again inside the function to handle race conditions if using threads.
-    if db_pool is None:
-        try:
-            db_pool = pool.SimpleConnectionPool(
-                1,  # minconn
-                20, # maxconn
-                user=os.getenv("POSTGRES_USER"),
-                password=os.getenv("POSTGRES_PASSWORD"),
-                host="db",
-                port="5432",
-                database=os.getenv("POSTGRES_DB")
-            )
-            logging.info("PostgreSQL connection pool initialized successfully in this process.")
-        except Exception as e:
-            logging.error(f"Failed to initialize PostgreSQL connection pool: {e}", exc_info=True)
-            # Ensure db_pool remains None on failure to prevent further attempts.
-            db_pool = None
+    global connection_pool
+    try:
+        connection_pool = psycopg2.pool.SimpleConnectionPool(
+            1,  # minconn
+            20, # maxconn
+            user=os.getenv("POSTGRES_USER"),
+            password=os.getenv("POSTGRES_PASSWORD"),
+            host=os.getenv("POSTGRES_HOST"),
+            port=os.getenv("POSTGRES_PORT"),
+            database=os.getenv("POSTGRES_DB")
+        )
+        logging.info("PostgreSQL connection pool initialized successfully.")
+    except (psycopg2.OperationalError, psycopg2.DatabaseError) as e:
+        logging.error(f"Error initializing PostgreSQL connection pool: {e}", exc_info=True)
+        # Handle the error appropriately, maybe exit the application
+        raise
 
 def get_db_connection():
     """
-    Gets a connection from the pool, initializing the pool if necessary.
+    Gets a connection from the pool.
     """
-    if db_pool is None:
-        _initialize_pool()
-
-    if db_pool:
-        return db_pool.getconn()
-    return None
+    if connection_pool is None:
+        logging.error("Connection pool is not initialized. Cannot get connection.")
+        raise Exception("Connection pool not initialized.")
+    return connection_pool.getconn()
 
 def release_db_connection(conn):
-    """Releases a connection back to the pool."""
-    if db_pool and conn:
-        try:
-            db_pool.putconn(conn)
-        except Exception as e:
-            logging.error(f"Error releasing DB connection: {e}", exc_info=True)
-            # In case of an error (e.g., pool is already closed),
-            # try to close the connection directly.
-            try:
-                conn.close()
-            except Exception as close_e:
-                logging.error(f"Failed to close connection after release error: {close_e}", exc_info=True)
+    """
+    Releases a connection back to the pool.
+    """
+    if connection_pool is None:
+        logging.error("Connection pool is not initialized. Cannot release connection.")
+        return
+    connection_pool.putconn(conn)
+
+def close_pool():
+    """
+    Closes all connections in the pool.
+    """
+    if connection_pool:
+        connection_pool.closeall()
+        logging.info("PostgreSQL connection pool closed.")
+
+# Initialize the pool when the module is imported
+initialize_pool()
