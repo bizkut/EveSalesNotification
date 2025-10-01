@@ -2769,7 +2769,6 @@ def process_character_orders(character_id: int) -> list[dict]:
                     sell_orders = [o for o in regional_orders if not o.get('is_buy_order')]
                     market_data_cache[region_id][order['type_id']] = sorted(sell_orders, key=lambda x: x['price'])
 
-
             is_undercut, competitor = False, None
             regional_prices = market_data_cache.get(region_id, {}).get(order['type_id'])
 
