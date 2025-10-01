@@ -2539,6 +2539,16 @@ def format_paginated_message(header: str, item_lines: list, footer: str, chat_id
                 message = "\n".join(chunk)
             notifications.append({'message': message, 'chat_id': chat_id})
 
+    # --- Prevent notifications for characters pending deletion ---
+    if get_character_deletion_status(character.id):
+        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} wallet notifications.")
+        return []
+
+    # --- Prevent notifications for characters pending deletion ---
+    if get_character_deletion_status(character.id):
+        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} order notifications.")
+        return []
+
     return notifications
 
 
@@ -2548,7 +2558,7 @@ def process_character_wallet(character_id: int) -> list[dict]:
     Returns a list of notification dictionaries to be sent.
     """
     character = get_character_by_id(character_id)
-    if not character or get_character_deletion_status(character.id):
+    if not character:
         return []
 
     notifications = []
@@ -2684,7 +2694,7 @@ def process_character_orders(character_id: int) -> list[dict]:
     Returns a list of notification dictionaries.
     """
     character = get_character_by_id(character_id)
-    if not character or get_character_deletion_status(character.id):
+    if not character:
         return []
 
     notifications = []
@@ -2832,7 +2842,7 @@ def process_character_contracts(character_id: int) -> list[dict]:
     Processes contracts for a single character and returns notifications.
     """
     character = get_character_by_id(character_id)
-    if not character or not character.enable_contract_notifications or get_character_deletion_status(character.id):
+    if not character or not character.enable_contract_notifications:
         return []
 
     notifications = []
@@ -2877,6 +2887,12 @@ def process_character_contracts(character_id: int) -> list[dict]:
             notifications.append({'message': "\n".join(lines), 'chat_id': character.telegram_user_id})
 
     add_processed_contracts(character.id, current_contract_ids)
+
+    # --- Prevent notifications for characters pending deletion ---
+    if get_character_deletion_status(character.id):
+        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} contract notifications.")
+        return []
+
     return notifications
 
 
