@@ -3368,7 +3368,7 @@ def generate_all_time_chart(character_id: int):
     return buf
 
 
-def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int):
+def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int, top_message: str = None):
     """Constructs and sends the main menu to a user, callable from a sync task."""
     user_characters = get_characters_for_user(telegram_user_id)
     if not user_characters:
@@ -3377,10 +3377,11 @@ def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int):
         logging.warning(f"send_main_menu_sync called for user {telegram_user_id} with no characters. Aborting.")
         return
 
-    message = (
+    base_message = (
         f"You have {len(user_characters)} character(s) registered. "
         "Please choose an option from the main menu:"
     )
+    message = f"{top_message}\n\n{base_message}" if top_message else base_message
     keyboard = [
         [
             InlineKeyboardButton("💰 View Balances", callback_data="balance"),
@@ -3404,17 +3405,18 @@ def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int):
     send_telegram_message_sync(bot, message, telegram_user_id, reply_markup=reply_markup)
 
 
-async def send_main_menu_async(bot: telegram.Bot, telegram_user_id: int):
+async def send_main_menu_async(bot: telegram.Bot, telegram_user_id: int, top_message: str = None):
     """Async version of sending the main menu, for use within an event loop."""
     user_characters = get_characters_for_user(telegram_user_id)
     if not user_characters:
         logging.warning(f"send_main_menu_async called for user {telegram_user_id} with no characters. Aborting.")
         return
 
-    message = (
+    base_message = (
         f"You have {len(user_characters)} character(s) registered. "
         "Please choose an option from the main menu:"
     )
+    message = f"{top_message}\n\n{base_message}" if top_message else base_message
     keyboard = [
         [
             InlineKeyboardButton("💰 View Balances", callback_data="balance"),

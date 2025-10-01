@@ -69,12 +69,9 @@ async def _send_welcome_sequence(bot: telegram.Bot, telegram_user_id: int, chara
             # Log error but don't stop the sequence
             logging.error(f"Error deleting 'add character' prompt for user {telegram_user_id}: {e}")
 
-    # 2. Send welcome message
+    # 2. Construct welcome message and send it with the main menu
     welcome_msg = f"✅ Character **{character_name}** added! Starting initial data sync in the background. This might take a few minutes."
-    await bot.send_message(chat_id=telegram_user_id, text=welcome_msg, parse_mode='Markdown')
-
-    # 3. Send main menu
-    await send_main_menu_async(bot, telegram_user_id)
+    await send_main_menu_async(bot, telegram_user_id, top_message=welcome_msg)
 
 
 @celery.task(name='tasks.send_welcome_and_menu')
@@ -109,11 +106,12 @@ def seed_character_data_task(character_id: int):
     seed_successful = seed_data_for_character(character)
 
     if seed_successful:
-        msg = f"✅ Sync complete for **{character.name}**! All historical data has been imported."
+        msg = "Sync complete\nAll historical data has been imported"
     else:
         msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
 
-    send_telegram_message_sync(bot, msg, character.telegram_user_id)
+    # Send the main menu with the status message at the top.
+    send_main_menu_sync(bot, character.telegram_user_id, top_message=msg)
 
 
 # --- Dispatcher Tasks (Triggered by Celery Beat) ---
