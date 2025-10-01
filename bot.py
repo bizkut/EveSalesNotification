@@ -25,6 +25,7 @@ from app_utils import (
     get_names_from_ids, calculate_cogs_and_update_lots, get_next_run_delay,
     add_processed_orders, get_processed_orders, add_processed_contracts,
     get_processed_contracts, update_contracts_cache, remove_stale_contracts,
+    add_wallet_journal_entries_to_db, add_historical_transactions_to_db,
     add_processed_journal_refs, get_ids_from_db,
     get_structure_market_orders, get_region_market_orders, get_station_info,
     get_system_info, get_character_location, get_character_online_status,
@@ -37,7 +38,8 @@ from app_utils import (
     seed_data_for_character, get_contracts_from_db, get_full_wallet_journal_from_db,
     get_historical_transactions_from_db, get_last_known_wallet_balance,
     add_purchase_lot, get_character_skills, _create_character_info_image,
-    _resolve_location_to_system_id, delete_character
+    _resolve_location_to_system_id, delete_character,
+    get_new_and_updated_character_info, get_characters_to_purge
 )
 
 
@@ -1261,16 +1263,7 @@ async def check_for_new_characters_job(context: ContextTypes.DEFAULT_TYPE):
     seeds their historical data, and adds/updates them in the live monitoring list.
     """
     logging.debug("Running job to check for new and updated characters.")
-    conn = database.get_db_connection()
-    db_chars_info = {}
-    try:
-        with conn.cursor() as cursor:
-            # Fetch all characters and their update status
-            cursor.execute("SELECT character_id, needs_update_notification FROM characters")
-            for row in cursor.fetchall():
-                db_chars_info[row[0]] = {'needs_update': row[1]}
-    finally:
-        database.release_db_connection(conn)
+    db_chars_info = get_new_and_updated_character_info()
 
     if not db_chars_info:
         return  # No characters in DB, nothing to do.
@@ -2815,37 +2808,23 @@ async def purge_deleted_characters_job(context: ContextTypes.DEFAULT_TYPE) -> No
     Periodically checks for and permanently deletes characters whose deletion grace period has expired.
     """
     logging.info("Running job to purge characters marked for deletion.")
-    conn = database.get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            # Find all characters whose deletion time is in the past
-            cursor.execute(
-                "SELECT character_id, character_name, telegram_user_id FROM characters WHERE deletion_scheduled_at IS NOT NULL AND deletion_scheduled_at <= %s",
-                (datetime.now(timezone.utc),)
-            )
-            characters_to_purge = cursor.fetchall()
+    characters_to_purge = get_characters_to_purge()
 
-            if not characters_to_purge:
-                logging.info("No characters found to purge.")
-                return
+    if not characters_to_purge:
+        logging.info("No characters found to purge.")
+        return
 
-            for char_id, char_name, telegram_user_id in characters_to_purge:
-                logging.warning(f"Purging character {char_name} ({char_id})...")
-                delete_character(char_id) # This function handles the actual deletion
+    for char_id, char_name, telegram_user_id in characters_to_purge:
+        logging.warning(f"Purging character {char_name} ({char_id})...")
+        delete_character(char_id)  # This function handles the actual deletion
 
-                # Remove the character from the global list to stop polling
-                global CHARACTERS
-                app_utils.CHARACTERS = [c for c in app_utils.CHARACTERS if c.id != char_id]
+        # Remove the character from the global list to stop polling
+        app_utils.CHARACTERS = [c for c in app_utils.CHARACTERS if c.id != char_id]
 
-                # Notify the user that the data has been permanently deleted
-                purge_message = f"🗑️ The one-hour grace period for **{char_name}** has expired, and all associated data has been permanently deleted."
-                await send_telegram_message(context, purge_message, chat_id=telegram_user_id)
-                logging.warning(f"Purge complete for character {char_name} ({char_id}).")
-
-    except Exception as e:
-        logging.error(f"Error in purge_deleted_characters_job: {e}", exc_info=True)
-    finally:
-        database.release_db_connection(conn)
+        # Notify the user that the data has been permanently deleted
+        purge_message = f"🗑️ The one-hour grace period for **{char_name}** has expired, and all associated data has been permanently deleted."
+        await send_telegram_message(context, purge_message, chat_id=telegram_user_id)
+        logging.warning(f"Purge complete for character {char_name} ({char_id}).")
 
 
 def main() -> None:

@@ -2355,3 +2355,39 @@ def _create_character_info_image(character_id, corporation_id, alliance_id=None)
     except Exception as e:
         logging.error(f"Failed to create character info image: {e}", exc_info=True)
         return None
+
+
+def get_new_and_updated_character_info():
+    """
+    Fetches information about new and updated characters from the database.
+    Returns a dictionary mapping character_id to their update status.
+    """
+    conn = database.get_db_connection()
+    db_chars_info = {}
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT character_id, needs_update_notification FROM characters")
+            for row in cursor.fetchall():
+                db_chars_info[row[0]] = {'needs_update': row[1]}
+    finally:
+        database.release_db_connection(conn)
+    return db_chars_info
+
+
+def get_characters_to_purge():
+    """
+    Fetches characters whose deletion grace period has expired.
+    Returns a list of tuples with (character_id, character_name, telegram_user_id).
+    """
+    conn = database.get_db_connection()
+    characters_to_purge = []
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT character_id, character_name, telegram_user_id FROM characters WHERE deletion_scheduled_at IS NOT NULL AND deletion_scheduled_at <= %s",
+                (datetime.now(timezone.utc),)
+            )
+            characters_to_purge = cursor.fetchall()
+    finally:
+        database.release_db_connection(conn)
+    return characters_to_purge
