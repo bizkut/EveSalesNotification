@@ -24,8 +24,6 @@ from app_utils import (
     update_character_notification_setting,
     cancel_character_deletion,
     schedule_character_deletion,
-    get_contracts_from_db,
-    get_names_from_ids,
     get_tracked_market_orders,
     get_character_skills,
     get_undercut_statuses,

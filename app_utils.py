@@ -981,6 +981,20 @@ def get_character_deletion_status(character_id: int):
     return deletion_time
 
 
+def get_contracts_from_db(character_id: int) -> list:
+    """Retrieves all cached contracts for a character from the database."""
+    conn = database.get_db_connection()
+    contracts = []
+    try:
+        with conn.cursor() as cursor:
+            # The contract_data column is of type JSONB, so psycopg2 will automatically parse it into a dict.
+            cursor.execute("SELECT contract_data FROM contracts WHERE character_id = %s", (character_id,))
+            contracts = [row[0] for row in cursor.fetchall()]
+    finally:
+        database.release_db_connection(conn)
+    return contracts
+
+
 def get_contract_profits_from_db(character_id: int) -> list:
     """Retrieves all contract profits for a character."""
     conn = database.get_db_connection()
@@ -2333,6 +2347,60 @@ def seed_data_for_character(character: Character) -> bool:
     success = backfill_all_character_history(character)
     logging.info(f"Finished checking/seeding data for {character.name}. Success: {success}")
     return success
+
+def _create_character_info_image(character_id: int, corporation_id: int, alliance_id: int | None) -> io.BytesIO | None:
+    """
+    Creates a composite image with character, corp, and alliance portraits.
+    Returns a BytesIO buffer with the PNG image, or None on failure.
+    """
+    try:
+        # Define image URLs
+        char_portrait_url = f"https://images.evetech.net/characters/{character_id}/portrait?size=256"
+        corp_logo_url = f"https://images.evetech.net/corporations/{corporation_id}/logo?size=128"
+        alliance_logo_url = f"https://images.evetech.net/alliances/{alliance_id}/logo?size=128" if alliance_id else None
+
+        # Download images
+        char_img_data = get_cached_image(char_portrait_url)
+        corp_img_data = get_cached_image(corp_logo_url)
+        alliance_img_data = get_cached_image(alliance_logo_url) if alliance_logo_url else None
+
+        if not char_img_data:
+            logging.error(f"Could not download character portrait for {character_id}.")
+            return None
+
+        # Open images
+        char_img = Image.open(io.BytesIO(char_img_data)).convert("RGBA")
+        corp_img = Image.open(io.BytesIO(corp_img_data)).convert("RGBA") if corp_img_data else None
+        alliance_img = Image.open(io.BytesIO(alliance_img_data)).convert("RGBA") if alliance_img_data else None
+
+        # Create base image
+        base_width = 256
+        base_height = 256
+        base_img = Image.new('RGBA', (base_width, base_height), (0, 0, 0, 0))
+
+        # Paste character portrait
+        base_img.paste(char_img, (0, 0))
+
+        # Paste corporation logo (bottom left)
+        if corp_img:
+            corp_img.thumbnail((64, 64))
+            base_img.paste(corp_img, (5, base_height - 64 - 5), corp_img)
+
+        # Paste alliance logo (bottom right)
+        if alliance_img:
+            alliance_img.thumbnail((96, 96))
+            base_img.paste(alliance_img, (base_width - 96 - 5, base_height - 96 - 5), alliance_img)
+
+        # Save to buffer
+        img_buffer = io.BytesIO()
+        base_img.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+        return img_buffer
+
+    except Exception as e:
+        logging.error(f"Error creating character info image for {character_id}: {e}", exc_info=True)
+        return None
+
 
 def resolve_location_to_region(location_id, character):
     return 10000002 # The Forge, for now
