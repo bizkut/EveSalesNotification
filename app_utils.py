@@ -2201,6 +2201,10 @@ def backfill_all_character_history(character: Character) -> bool:
     update_tracked_market_orders(character.id, open_orders)
     logging.info(f"Cached {len(open_orders)} open orders for {character.name}.")
 
+    # After caching the open orders, immediately fetch the regional data for them.
+    if open_orders:
+        _trigger_regional_market_data_fetch(character, open_orders)
+
     logging.warning(f"Initial fast sync for {character.name} is complete. Full history will be retrieved in the background.")
     return True
 
@@ -2227,19 +2231,19 @@ def get_contracts_from_db(character_id: int) -> list:
         database.release_db_connection(conn)
     return contracts
 
-def _resolve_location_to_system_id(location_id: int, character: Character) -> int | None:
+def _resolve_location(location_id: int, character: Character) -> dict | None:
     """
-    Resolves a location_id (station or structure) to a solar_system_id.
-    Uses the database cache first, then falls back to ESI.
+    Resolves a location_id (station or structure) to its constituent parts (system_id, region_id).
+    Uses the database cache first, then falls back to ESI. Returns a dict.
     """
     # 1. Check our own location_cache first
     cached_location = get_location_from_cache(location_id)
-    if cached_location and cached_location.get('system_id'):
-        return cached_location['system_id']
+    if cached_location and cached_location.get('system_id') and cached_location.get('region_id'):
+        return cached_location
 
     # 2. If not in cache, resolve via ESI
     system_id = None
-    region_id = None # We'll try to get this to populate the cache fully
+    region_id = None
 
     # Resolve for structures (requires auth)
     if location_id > 10000000000:
@@ -2265,8 +2269,21 @@ def _resolve_location_to_system_id(location_id: int, character: Character) -> in
     # 3. Save to cache if we successfully resolved everything
     if location_id and system_id and region_id:
         save_location_to_cache(location_id, system_id, region_id)
+        return {'system_id': system_id, 'region_id': region_id}
 
-    return system_id
+    return None
+
+
+def _resolve_location_to_system_id(location_id: int, character: Character) -> int | None:
+    """Wrapper around _resolve_location to get just the system_id."""
+    location_details = _resolve_location(location_id, character)
+    return location_details.get('system_id') if location_details else None
+
+
+def _resolve_location_to_region_id(location_id: int, character: Character) -> int | None:
+    """Wrapper around _resolve_location to get just the region_id."""
+    location_details = _resolve_location(location_id, character)
+    return location_details.get('region_id') if location_details else None
 
 
 def get_jump_distance(origin_location_id: int, destination_location_id: int, character: Character) -> int | None:
@@ -2307,6 +2324,36 @@ def get_jump_distance(origin_location_id: int, destination_location_id: int, cha
     logging.info(f"Calculated and cached {jumps} jumps from {origin_system_id} to {destination_system_id}.")
 
     return jumps
+
+
+def _trigger_regional_market_data_fetch(character: Character, open_orders: list):
+    """
+    Given a character and their open orders, fetches the regional market data
+    for each unique region/type pair to warm up the cache for undercut checks.
+    """
+    if not open_orders:
+        return
+
+    unique_region_types = set()
+    for order in open_orders:
+        # We only care about sell orders, as those are the ones we check for undercuts.
+        if not order.get('is_buy_order'):
+            region_id = _resolve_location_to_region_id(order['location_id'], character)
+            if region_id:
+                unique_region_types.add((region_id, order['type_id']))
+
+    if not unique_region_types:
+        return
+
+    logging.info(f"Warming up regional market data cache for {len(unique_region_types)} region/type pairs for character {character.name}.")
+    for region_id, type_id in unique_region_types:
+        # We call this function for its side effect: caching the data.
+        # We force revalidation to ensure the data is fresh.
+        get_region_market_orders(region_id, type_id, force_revalidate=True)
+        # Small sleep to be polite to ESI, although caching should handle most of this.
+        time.sleep(0.1)
+    logging.info(f"Regional market data cache warmup complete for character {character.name}.")
+
 
 def _create_character_info_image(character_id, corporation_id, alliance_id=None):
     """
@@ -2704,33 +2751,35 @@ def process_character_orders(character_id: int) -> list[dict]:
         market_data_cache = {}
 
         for order in open_orders:
-            system_id = _resolve_location_to_system_id(order['location_id'], character)
-            if not system_id: continue
-            system_info = get_system_info(system_id)
-            if not system_info: continue
-            region_id = get_constellation_info(system_info['constellation_id'])['region_id']
-            order['region_id'] = region_id
+            region_id = _resolve_location_to_region_id(order['location_id'], character)
+            if not region_id:
+                logging.warning(f"Could not resolve region for location {order['location_id']} on order {order['order_id']}. Skipping undercut check for this order.")
+                continue
+
+            # Skip buy orders for now, as we only care about our sell orders being undercut.
+            if order.get('is_buy_order'):
+                continue
 
             if region_id not in market_data_cache: market_data_cache[region_id] = {}
             if order['type_id'] not in market_data_cache[region_id]:
+                # Fetch all sell orders for this item in the region
                 regional_orders = get_region_market_orders(region_id, order['type_id'], force_revalidate=True)
                 if regional_orders:
-                    market_data_cache[region_id][order['type_id']] = {
-                        'buy': max([o for o in regional_orders if o.get('is_buy_order')], key=lambda x: x['price'], default=None),
-                        'sell': min([o for o in regional_orders if not o.get('is_buy_order')], key=lambda x: x['price'], default=None)
-                    }
+                    # We only care about sell orders for undercut checks
+                    sell_orders = [o for o in regional_orders if not o.get('is_buy_order')]
+                    market_data_cache[region_id][order['type_id']] = sorted(sell_orders, key=lambda x: x['price'])
+
 
             is_undercut, competitor = False, None
             regional_prices = market_data_cache.get(region_id, {}).get(order['type_id'])
+
             if regional_prices:
-                if order.get('is_buy_order'):
-                    best_buy = regional_prices.get('buy')
-                    if best_buy and best_buy['price'] > order['price']:
-                        is_undercut, competitor = True, best_buy
-                else:
-                    best_sell = regional_prices.get('sell')
-                    if best_sell and best_sell['price'] < order['price']:
-                        is_undercut, competitor = True, best_sell
+                # Find the best price that isn't our own order
+                for best_sell in regional_prices:
+                    if best_sell['order_id'] != order['order_id']:
+                        if best_sell['price'] < order['price']:
+                            is_undercut, competitor = True, best_sell
+                        break # We only need to compare against the very best competitor
 
             new_statuses.append({'order_id': order['order_id'], 'is_undercut': is_undercut, 'competitor_price': competitor['price'] if competitor else None, 'competitor_location_id': competitor['location_id'] if competitor else None})
             if is_undercut and not previous_statuses.get(order['order_id'], {}).get('is_undercut', False):
