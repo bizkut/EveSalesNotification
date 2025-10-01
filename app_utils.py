@@ -2417,9 +2417,11 @@ def get_new_and_updated_character_info():
     db_chars_info = {}
     try:
         with conn.cursor() as cursor:
-            # Get all characters that aren't marked for deletion, including their backfill status
+            # Get all characters, including their backfill status.
+            # We no longer filter out characters pending deletion, so the check_new_characters
+            # task can correctly identify and process them if they are re-authenticated.
             cursor.execute(
-                "SELECT character_id, needs_update_notification, is_backfilling FROM characters WHERE deletion_scheduled_at IS NULL"
+                "SELECT character_id, needs_update_notification, is_backfilling FROM characters"
             )
             all_chars = cursor.fetchall()
             if not all_chars:
