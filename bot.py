@@ -33,7 +33,7 @@ from app_utils import (
     get_character_public_info, get_corporation_info, get_alliance_info,
     get_structure_info, get_constellation_info, get_route,
     get_jump_distance_from_db, save_jump_distance_to_db,
-    get_jump_distance, get_cached_chart, save_chart_to_cache,
+    get_jump_distance,
     get_undercut_statuses, update_undercut_statuses, remove_stale_undercut_statuses,
     get_tracked_market_orders, remove_tracked_market_orders, update_tracked_market_orders,
     seed_data_for_character, get_contracts_from_db, get_full_wallet_journal_from_db,
@@ -219,11 +219,18 @@ async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFA
     message_id = None
 
     if query:
-        # If we came from a button, edit that message.
-        await query.edit_message_text(text=f"⏳ Generating overview for {character.name}...")
-        message_id = query.message.message_id
+        # If the original message was a photo (i.e., we're coming back from a chart),
+        # we must delete it and send a new message.
+        if query.message.photo:
+            await query.message.delete()
+            sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating overview for {character.name}...")
+            message_id = sent_message.message_id
+        else:
+            # Otherwise, we can just edit the existing text message.
+            await query.edit_message_text(text=f"⏳ Generating overview for {character.name}...")
+            message_id = query.message.message_id
     else:
-        # Otherwise, send a new message (e.g., for scheduled overviews).
+        # This case is for scheduled overviews, which always send a new message.
         sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating overview for {character.name}...")
         message_id = sent_message.message_id
 
@@ -480,511 +487,12 @@ async def overview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
-
-
-def format_isk(value):
-    """Formats a number into a human-readable ISK string."""
-    if abs(value) >= 1_000_000_000:
-        return f"{value / 1_000_000_000:.2f}b"
-    if abs(value) >= 1_000_000:
-        return f"{value / 1_000_000:.2f}m"
-    if abs(value) >= 1_000:
-        return f"{value / 1_000:.2f}k"
-    return f"{value:.2f}"
-
-
-def generate_hourly_chart(character_id: int):
-    """
-    Generates a chart with cumulative profit (area) and hourly sales/fees (bars)
-    for the last 24 hours, optimized with daily profit summaries.
-    """
-    import matplotlib
-    matplotlib.use('Agg')  # Use a non-interactive backend
-    import matplotlib.pyplot as plt
-    character = get_character_by_id(character_id)
-    if not character: return None
-
-    now = datetime.now(timezone.utc)
-    start_of_period = now - timedelta(days=1)
-
-    accumulated_profit, inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
-    cumulative_profit_over_time = [accumulated_profit]
-
-    hours = [(start_of_period + timedelta(hours=i)) for i in range(24)]
-    bar_labels = [h.strftime('%H:00') for h in hours]
-    hourly_sales = {label: 0 for label in bar_labels}
-    hourly_fees = {label: 0 for label in bar_labels}
-
-    for i in range(24):
-        hour_start = start_of_period + timedelta(hours=i)
-        hour_end = hour_start + timedelta(hours=1)
-        hour_label = hour_start.strftime('%H:00')
-
-        sales_in_hour = [e['data'] for e in events_in_period if e['type'] == 'tx' and not e['data'].get('is_buy') and hour_start <= e['date'] < hour_end]
-        fees_in_hour = [e['data'] for e in events_in_period if e['type'] == 'fee' and hour_start <= e['date'] < hour_end]
-
-        hourly_sales[hour_label] = sum(s['quantity'] * s['unit_price'] for s in sales_in_hour)
-        hourly_fees[hour_label] = sum(abs(f['amount']) for f in fees_in_hour)
-
-        profit_this_hour = -hourly_fees[hour_label]
-        for sale in sales_in_hour:
-            sale_value = sale['quantity'] * sale['unit_price']
-            cogs = 0
-            remaining_to_sell = sale['quantity']
-            lots = inventory.get(sale['type_id'], [])
-            if lots:
-                consumed_count = 0
-                for lot in lots:
-                    if remaining_to_sell <= 0: break
-                    take = min(remaining_to_sell, lot['quantity'])
-                    cogs += take * lot['price']
-                    remaining_to_sell -= take
-                    lot['quantity'] -= take
-                    if lot['quantity'] == 0: consumed_count += 1
-                inventory[sale['type_id']] = lots[consumed_count:]
-            profit_this_hour += sale_value - cogs
-
-        accumulated_profit += profit_this_hour
-        cumulative_profit_over_time.append(accumulated_profit)
-
-    if not any(hourly_sales.values()) and not any(hourly_fees.values()): return None
-
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(12, 7))
-    fig.patch.set_facecolor('#1c1c1c')
-    ax.set_facecolor('#282828')
-    bar_width = 0.4
-    r1 = range(len(bar_labels))
-    r2 = [x + bar_width for x in r1]
-    ax.bar(r1, list(hourly_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
-    ax.bar(r2, list(hourly_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
-    ax2 = ax.twinx()
-    ax2.fill_between(range(25), cumulative_profit_over_time, color="lime", alpha=0.3, zorder=1)
-    ax2.plot(range(25), cumulative_profit_over_time, label='Accumulated Profit', color='lime', marker='o', linestyle='-', zorder=3)
-    ax.set_title(f'Hourly Performance for {character.name} (Last 24h)', color='white', fontsize=16)
-    ax.set_xlabel('Hour (UTC)', color='white', fontsize=12)
-    ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
-    ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
-    ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
-    lines, labels = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc=0)
-    plt.xticks([r + bar_width/2 for r in range(len(bar_labels))], bar_labels, rotation=45, ha='right')
-    ax.tick_params(axis='x', colors='white')
-    ax.tick_params(axis='y', colors='white')
-    ax2.tick_params(axis='y', colors='white')
-    plt.setp(ax.spines.values(), color='gray')
-    plt.setp(ax2.spines.values(), color='gray')
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-def generate_last_day_chart(character_id: int):
-    """
-    Generates a chart for the last 24 hours, processing events chronologically to ensure accuracy.
-    """
-    import matplotlib
-    matplotlib.use('Agg')  # Use a non-interactive backend
-    import matplotlib.pyplot as plt
-    character = get_character_by_id(character_id)
-    if not character: return None
-
-    now = datetime.now(timezone.utc)
-    start_of_period = now - timedelta(days=1)
-
-    # Get initial inventory state and all events within the period, sorted chronologically.
-    inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
-
-    # If there are no events, there's nothing to chart.
-    if not any(e['type'] == 'tx' and not e['data'].get('is_buy') for e in events_in_period) and \
-       not any(e['type'] == 'fee' for e in events_in_period):
-        return None
-
-    # --- Data Preparation ---
-    hour_labels = [(start_of_period + timedelta(hours=i)).strftime('%H:00') for i in range(24)]
-    hourly_sales = {label: 0 for label in hour_labels}
-    hourly_fees = {label: 0 for label in hour_labels}
-
-    hourly_cumulative_profit = []
-    accumulated_profit = 0
-    event_idx = 0
-
-    # --- Chronological Event Processing ---
-    for i in range(24):
-        hour_start = start_of_period + timedelta(hours=i)
-        hour_end = hour_start + timedelta(hours=1)
-        hour_label = hour_start.strftime('%H:00')
-
-        # Process all events that fall within this hour, in order.
-        while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < hour_end:
-            event = events_in_period[event_idx]
-            event_type = event['type']
-            data = event['data']
-
-            if event_type == 'tx':
-                if data.get('is_buy'):
-                    inventory[data['type_id']].append({'quantity': data['quantity'], 'price': data['unit_price']})
-                else:  # Sale
-                    sale_value = data['quantity'] * data['unit_price']
-                    hourly_sales[hour_label] += sale_value
-
-                    cogs = 0
-                    remaining_to_sell = data['quantity']
-                    lots = inventory.get(data['type_id'], [])
-                    if lots:
-                        consumed_count = 0
-                        for lot in lots:
-                            if remaining_to_sell <= 0: break
-                            take = min(remaining_to_sell, lot['quantity'])
-                            cogs += take * lot['price']
-                            remaining_to_sell -= take
-                            lot['quantity'] -= take
-                            if lot['quantity'] == 0: consumed_count += 1
-                        inventory[data['type_id']] = lots[consumed_count:]
-                    accumulated_profit += sale_value - cogs
-            elif event_type == 'fee':
-                fee_amount = abs(data['amount'])
-                hourly_fees[hour_label] += fee_amount
-                accumulated_profit -= fee_amount
-
-            event_idx += 1
-
-        hourly_cumulative_profit.append(accumulated_profit)
-
-    # --- Plotting ---
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(12, 7))
-    fig.patch.set_facecolor('#1c1c1c')
-    ax.set_facecolor('#282828')
-    bar_width = 0.4
-    r1 = range(len(hour_labels))
-    r2 = [x + bar_width for x in r1]
-    ax.bar(r1, list(hourly_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
-    ax.bar(r2, list(hourly_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
-
-    ax2 = ax.twinx()
-    # Prepend the starting profit (0) for the line plot
-    final_profit_line = [0] + hourly_cumulative_profit
-    ax2.plot(range(25), final_profit_line, label='Accumulated Profit', color='lime', linestyle='-', zorder=3)
-    ax2.fill_between(range(25), final_profit_line, color="lime", alpha=0.3, zorder=1)
-
-    ax.set_title(f'Performance for {character.name} (Last 24 Hours)', color='white', fontsize=16)
-    ax.set_xlabel('Hour (UTC)', color='white', fontsize=12)
-    ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
-    ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
-    ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
-    lines, labels = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc=0)
-    plt.xticks([r + bar_width/2 for r in r1], hour_labels, rotation=45, ha='right')
-    ax.tick_params(axis='x', colors='white')
-    ax.tick_params(axis='y', colors='white')
-    ax2.tick_params(axis='y', colors='white')
-    plt.setp(ax.spines.values(), color='gray')
-    plt.setp(ax2.spines.values(), color='gray')
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
-    """Helper to generate charts with a daily breakdown (last 7/30 days)."""
-    import matplotlib
-    matplotlib.use('Agg')  # Use a non-interactive backend
-    import matplotlib.pyplot as plt
-    character = get_character_by_id(character_id)
-    if not character: return None
-
-    now = datetime.now(timezone.utc)
-    start_of_period = (now - timedelta(days=days_to_show-1)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-    inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
-
-    if not any(e['type'] == 'tx' and not e['data'].get('is_buy') for e in events_in_period) and \
-       not any(e['type'] == 'fee' for e in events_in_period):
-        return None
-
-    # --- Data Preparation ---
-    days = [(start_of_period + timedelta(days=i)) for i in range(days_to_show)]
-    label_format = '%d' if days_to_show == 30 else '%m-%d'
-    bar_labels = [d.strftime(label_format) for d in days]
-    daily_sales = {label: 0 for label in bar_labels}
-    daily_fees = {label: 0 for label in bar_labels}
-
-    daily_cumulative_profit = []
-    accumulated_profit = 0
-    event_idx = 0
-
-    # --- Chronological Event Processing ---
-    for day_start in days:
-        day_end = day_start + timedelta(days=1)
-        day_label = day_start.strftime(label_format)
-
-        while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < day_end:
-            event = events_in_period[event_idx]
-            event_type = event['type']
-            data = event['data']
-
-            if event_type == 'tx':
-                if data.get('is_buy'):
-                    inventory[data['type_id']].append({'quantity': data['quantity'], 'price': data['unit_price']})
-                else:  # Sale
-                    sale_value = data['quantity'] * data['unit_price']
-                    daily_sales[day_label] += sale_value
-                    cogs = 0
-                    remaining_to_sell = data['quantity']
-                    lots = inventory.get(data['type_id'], [])
-                    if lots:
-                        consumed_count = 0
-                        for lot in lots:
-                            if remaining_to_sell <= 0: break
-                            take = min(remaining_to_sell, lot['quantity'])
-                            cogs += take * lot['price']
-                            remaining_to_sell -= take
-                            lot['quantity'] -= take
-                            if lot['quantity'] == 0: consumed_count += 1
-                        inventory[data['type_id']] = lots[consumed_count:]
-                    accumulated_profit += sale_value - cogs
-            elif event_type == 'fee':
-                fee_amount = abs(data['amount'])
-                daily_fees[day_label] += fee_amount
-                accumulated_profit -= fee_amount
-
-            event_idx += 1
-
-        daily_cumulative_profit.append(accumulated_profit)
-
-    # --- Plotting ---
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(12, 7))
-    fig.patch.set_facecolor('#1c1c1c')
-    ax.set_facecolor('#282828')
-    bar_width = 0.4
-    r1 = range(len(bar_labels))
-    r2 = [x + bar_width for x in r1]
-    ax.bar(r1, list(daily_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
-    ax.bar(r2, list(daily_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
-
-    ax2 = ax.twinx()
-    final_profit_line = [0] + daily_cumulative_profit
-    ax2.plot(range(days_to_show + 1), final_profit_line, label='Accumulated Profit', color='lime', linestyle='-', zorder=3)
-    ax2.fill_between(range(days_to_show + 1), final_profit_line, color="lime", alpha=0.3, zorder=1)
-
-    ax.set_title(f'Performance for {character.name} (Last {days_to_show} Days)', color='white', fontsize=16)
-    ax.set_xlabel('Date', color='white', fontsize=12)
-    ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
-    ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
-    ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
-    lines, labels = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc=0)
-    plt.xticks([r + bar_width/2 for r in r1], bar_labels, rotation=45, ha='right')
-    ax.tick_params(axis='x', colors='white')
-    ax.tick_params(axis='y', colors='white')
-    ax2.tick_params(axis='y', colors='white')
-    plt.setp(ax.spines.values(), color='gray')
-    plt.setp(ax2.spines.values(), color='gray')
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-def generate_last_7_days_chart(character_id: int):
-    """Generates a chart for the last 7 days."""
-    return _generate_daily_breakdown_chart(character_id, 7)
-
-def generate_last_30_days_chart(character_id: int):
-    """Generates a chart for the last 30 days."""
-    return _generate_daily_breakdown_chart(character_id, 30)
-
-def generate_all_time_chart(character_id: int):
-    """Generates a monthly breakdown chart for the character's entire history."""
-    import matplotlib
-    matplotlib.use('Agg')  # Use a non-interactive backend
-    import matplotlib.pyplot as plt
-    character = get_character_by_id(character_id)
-    if not character: return None
-
-    inventory, events_in_period = _prepare_chart_data(character_id, datetime.min.replace(tzinfo=timezone.utc))
-    if not events_in_period: return None
-
-    # --- Data Preparation ---
-    start_date = events_in_period[0]['date']
-    end_date = datetime.now(timezone.utc)
-    months = []
-    current_month = start_date.replace(day=1)
-    while current_month <= end_date:
-        months.append(current_month)
-        next_month_val = current_month.month + 1
-        next_year_val = current_month.year
-        if next_month_val > 12:
-            next_month_val = 1
-            next_year_val += 1
-        current_month = current_month.replace(year=next_year_val, month=next_month_val)
-
-    bar_labels = [m.strftime('%Y-%m') for m in months]
-    monthly_sales = {label: 0 for label in bar_labels}
-    monthly_fees = {label: 0 for label in bar_labels}
-    monthly_cumulative_profit = []
-    accumulated_profit = 0
-    event_idx = 0
-
-    # --- Chronological Event Processing ---
-    for month_start in months:
-        month_label = month_start.strftime('%Y-%m')
-        next_month_start = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-        while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < next_month_start:
-            event = events_in_period[event_idx]
-            event_type = event['type']
-            data = event['data']
-
-            if event_type == 'tx':
-                if data.get('is_buy'):
-                    inventory[data['type_id']].append({'quantity': data['quantity'], 'price': data['unit_price']})
-                else: # Sale
-                    sale_value = data['quantity'] * data['unit_price']
-                    monthly_sales[month_label] += sale_value
-                    cogs = 0
-                    remaining_to_sell = data['quantity']
-                    lots = inventory.get(data['type_id'], [])
-                    if lots:
-                        consumed_count = 0
-                        for lot in lots:
-                            if remaining_to_sell <= 0: break
-                            take = min(remaining_to_sell, lot['quantity'])
-                            cogs += take * lot['price']
-                            remaining_to_sell -= take
-                            lot['quantity'] -= take
-                            if lot['quantity'] == 0: consumed_count += 1
-                        inventory[data['type_id']] = lots[consumed_count:]
-                    accumulated_profit += sale_value - cogs
-            elif event_type == 'fee':
-                fee_amount = abs(data['amount'])
-                monthly_fees[month_label] += fee_amount
-                accumulated_profit -= fee_amount
-
-            event_idx += 1
-
-        monthly_cumulative_profit.append(accumulated_profit)
-
-    # --- Plotting ---
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(12, 7))
-    fig.patch.set_facecolor('#1c1c1c')
-    ax.set_facecolor('#282828')
-    bar_width = 0.4
-    r1 = range(len(bar_labels))
-    r2 = [x + bar_width for x in r1]
-    ax.bar(r1, list(monthly_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
-    ax.bar(r2, list(monthly_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
-
-    ax2 = ax.twinx()
-    final_profit_line = [0] + monthly_cumulative_profit
-    ax2.plot(range(len(months) + 1), final_profit_line, label='Accumulated Profit', color='lime', linestyle='-', zorder=3)
-    ax2.fill_between(range(len(months) + 1), final_profit_line, color="lime", alpha=0.3, zorder=1)
-
-    ax.set_title(f'Performance for {character.name} (All Time)', color='white', fontsize=16)
-    ax.set_xlabel('Month', color='white', fontsize=12)
-    ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
-    ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
-    ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
-    lines, labels = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines + lines2, labels + labels2, loc=0)
-    plt.xticks([r + bar_width/2 for r in r1], bar_labels, rotation=45, ha='right')
-    ax.tick_params(axis='x', colors='white')
-    ax.tick_params(axis='y', colors='white')
-    ax2.tick_params(axis='y', colors='white')
-    plt.setp(ax.spines.values(), color='gray')
-    plt.setp(ax2.spines.values(), color='gray')
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format_isk(x)))
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-async def generate_chart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Job to generate and send a chart in the background, with caching."""
-    job = context.job
-    chat_id = job.chat_id
-    character_id = job.data['character_id']
-    chart_type = job.data['chart_type']
-    generating_message_id = job.data['generating_message_id']
-
-    character = get_character_by_id(character_id)
-    if not character:
-        await context.bot.edit_message_text(text="Error: Could not find character for this chart.", chat_id=chat_id, message_id=generating_message_id)
-        return
-
-    now = datetime.now(timezone.utc)
-    chart_key = f"chart:{character_id}:{chart_type}"
-    if chart_type == 'lastday':
-        chart_key += f":{now.strftime('%Y-%m-%d-%H')}"
-    elif chart_type in ['7days', '30days']:
-        chart_key += f":{now.strftime('%Y-%m-%d')}"
-
-    is_dirty = get_bot_state(f"chart_cache_dirty_{character_id}") == "true"
-
-    caption_map = {
-        'lastday': "Last Day", '7days': "Last 7 Days",
-        '30days': "Last 30 Days", 'alltime': "All Time"
-    }
-    caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-    keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_back_{character_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if not (chart_type == 'alltime' and is_dirty):
-        cached_chart_data = get_cached_chart(chart_key)
-        if cached_chart_data:
-            logging.info(f"Using cached chart for key: {chart_key}")
-            await context.bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
-            await context.bot.send_photo(chat_id=chat_id, photo=io.BytesIO(bytes(cached_chart_data)), caption=caption, reply_markup=reply_markup)
-            return
-
-    logging.info(f"Generating new chart for key: {chart_key} (All-Time Dirty: {is_dirty if chart_type == 'alltime' else 'N/A'})")
-    chart_buffer = None
-    try:
-        if chart_type == 'lastday':
-            chart_buffer = await asyncio.to_thread(generate_last_day_chart, character_id)
-        elif chart_type == '7days':
-            chart_buffer = await asyncio.to_thread(generate_last_7_days_chart, character_id)
-        elif chart_type == '30days':
-            chart_buffer = await asyncio.to_thread(generate_last_30_days_chart, character_id)
-        elif chart_type == 'alltime':
-            chart_buffer = await asyncio.to_thread(generate_all_time_chart, character_id)
-    except Exception as e:
-        logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
-        await context.bot.edit_message_text(text=f"An error occurred while generating the chart for {character.name}.", chat_id=chat_id, message_id=generating_message_id, reply_markup=reply_markup)
-        return
-
-    await context.bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
-
-    if chart_buffer:
-        save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
-        if chart_type == 'alltime':
-            set_bot_state(f"chart_cache_dirty_{character_id}", "false")
-        chart_buffer.seek(0)
-        await context.bot.send_photo(chat_id=chat_id, photo=chart_buffer, caption=caption, reply_markup=reply_markup)
-    else:
-        await context.bot.send_message(chat_id=chat_id, text=f"Could not generate chart for {character.name}. No data available for the period.", reply_markup=reply_markup)
-
+from tasks import generate_chart_task
 
 async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles callbacks from the chart buttons by scheduling a background job."""
+    """
+    Handles callbacks from the chart buttons by dispatching a Celery task.
+    """
     query = update.callback_query
     await query.answer()
 
@@ -996,7 +504,6 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         if action != 'chart':
             return
-
     except (IndexError, ValueError):
         await query.edit_message_text(text="Invalid chart request.")
         return
@@ -1006,7 +513,7 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text="Error: Could not find character for this chart.")
         return
 
-    # Delete the summary message and send a new "generating" message.
+    # Delete the overview message to clean up the chat interface
     await query.message.delete()
 
     caption_map = {
@@ -1017,41 +524,19 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     }
     chart_name = caption_map.get(chart_type, chart_type.capitalize())
 
+    # Send a new "generating" message that the Celery task can then update/delete
     generating_message = await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=f"⏳ Generating {chart_name} chart for {character.name}. This may take a moment..."
     )
 
-    job_data = {
-        'character_id': character_id,
-        'chart_type': chart_type,
-        'generating_message_id': generating_message.message_id
-    }
-    context.job_queue.run_once(generate_chart_job, when=1, data=job_data, chat_id=query.message.chat_id)
-
-
-async def back_to_overview_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Back to Overview' button press by deleting the chart and regenerating the overview."""
-    query = update.callback_query
-    await query.answer()
-
-    try:
-        character_id = int(query.data.split('_')[2])
-    except (IndexError, ValueError):
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Invalid request.")
-        return
-
-    character = get_character_by_id(character_id)
-    if not character:
-        await context.bot.send_message(chat_id=query.message.chat_id, text="Error: Could not find character.")
-        return
-
-    # Delete the chart message, as we cannot edit a media message into a text message.
-    await query.message.delete()
-
-    # Regenerate the overview as a new message.
-    # We create a new Update object without a callback_query to force sending a new message.
-    await _generate_and_send_overview(Update(update.update_id, message=query.message), context, character)
+    # Dispatch the background task via Celery
+    generate_chart_task.delay(
+        character_id=character_id,
+        chart_type=chart_type,
+        chat_id=query.message.chat_id,
+        generating_message_id=generating_message.message_id
+    )
 
 
 async def _select_character_for_historical_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2306,11 +1791,9 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     # --- Charting Callbacks ---
     elif data.startswith("chart_"):
         await chart_callback_handler(update, context)
-    elif data.startswith("overview_back_"):
-        await back_to_overview_handler(update, context)
 
     elif data == "noop":
-        return # Do nothing, it's just a label
+        return  # Do nothing, it's just a label
 
 
 if __name__ == "__main__":
