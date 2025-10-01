@@ -1,3 +1,5 @@
+import nest_asyncio
+nest_asyncio.apply()
 import os
 import sys
 from celery import Celery
