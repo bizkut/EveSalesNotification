@@ -1,7 +1,10 @@
 import logging
 import os
 import telegram
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import asyncio
+import io
+from datetime import datetime, timezone
 from celery_app import celery
 
 # These imports anticipate the refactoring of bot.py into app_utils.py in the next step.
@@ -30,7 +33,13 @@ from app_utils import (
     send_daily_overview_for_character,
     send_main_menu_sync,
     send_main_menu_async,
-    send_telegram_message_sync
+    send_telegram_message_sync,
+    get_cached_chart,
+    save_chart_to_cache,
+    generate_last_day_chart,
+    generate_last_7_days_chart,
+    generate_last_30_days_chart,
+    generate_all_time_chart
 )
 
 # --- Telegram Bot Initialization & Helper ---
@@ -287,3 +296,80 @@ def continue_backfill_character_history(self, character_id: int):
 
     update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
     continue_backfill_character_history.apply_async(args=[character_id])
+
+
+@celery.task(name='tasks.generate_chart_task')
+def generate_chart_task(character_id: int, chart_type: str, chat_id: int, generating_message_id: int):
+    """
+    Celery task to generate and send a chart in the background, with caching.
+    This replaces the bot's internal JobQueue for better scalability.
+    """
+    bot = get_bot()
+    character = get_character_by_id(character_id)
+
+    async def run_async_chart_logic():
+        if not character:
+            await bot.edit_message_text(text="Error: Could not find character for this chart.", chat_id=chat_id, message_id=generating_message_id)
+            return
+
+        now = datetime.now(timezone.utc)
+        chart_key = f"chart:{character_id}:{chart_type}"
+        if chart_type == 'lastday':
+            chart_key += f":{now.strftime('%Y-%m-%d-%H')}"
+        elif chart_type in ['7days', '30days']:
+            chart_key += f":{now.strftime('%Y-%m-%d')}"
+
+        is_dirty = get_bot_state(f"chart_cache_dirty_{character_id}") == "true"
+
+        caption_map = {
+            'lastday': "Last Day", '7days': "Last 7 Days",
+            '30days': "Last 30 Days", 'alltime': "All Time"
+        }
+        caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
+        # The back button now goes to the overview command, which will regenerate the overview message
+        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Check for cached chart first
+        if not (chart_type == 'alltime' and is_dirty):
+            cached_chart_data = get_cached_chart(chart_key)
+            if cached_chart_data:
+                logging.info(f"Using cached chart for key: {chart_key}")
+                await bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
+                await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(bytes(cached_chart_data)), caption=caption, reply_markup=reply_markup)
+                return
+
+        logging.info(f"Generating new chart for key: {chart_key} (All-Time Dirty: {is_dirty if chart_type == 'alltime' else 'N/A'})")
+        chart_buffer = None
+        try:
+            # These chart generation functions are synchronous and CPU-bound,
+            # so they are fine to call directly from a Celery task.
+            if chart_type == 'lastday':
+                chart_buffer = generate_last_day_chart(character_id)
+            elif chart_type == '7days':
+                chart_buffer = generate_last_7_days_chart(character_id)
+            elif chart_type == '30days':
+                chart_buffer = generate_last_30_days_chart(character_id)
+            elif chart_type == 'alltime':
+                chart_buffer = generate_all_time_chart(character_id)
+        except Exception as e:
+            logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
+            await bot.edit_message_text(text=f"An error occurred while generating the chart for {character.name}.", chat_id=chat_id, message_id=generating_message_id, reply_markup=reply_markup)
+            return
+
+        # Delete the "Generating..." message
+        await bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
+
+        if chart_buffer:
+            save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
+            if chart_type == 'alltime':
+                set_bot_state(f"chart_cache_dirty_{character_id}", "false")
+            chart_buffer.seek(0)
+            await bot.send_photo(chat_id=chat_id, photo=chart_buffer, caption=caption, reply_markup=reply_markup)
+        else:
+            await bot.send_message(chat_id=chat_id, text=f"Could not generate chart for {character.name}. No data available for the period.", reply_markup=reply_markup)
+
+    try:
+        asyncio.run(run_async_chart_logic())
+    except Exception as e:
+        logging.error(f"Error in generate_chart_task for character {character_id}: {e}", exc_info=True)
