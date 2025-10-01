@@ -1,15 +1,54 @@
 import logging
 import os
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import io
 
-import telegram
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 import app_utils
-import charts
+from app_utils import (
+    CHARACTERS,
+    Character,
+    get_character_by_id,
+    get_characters_for_user,
+    load_characters_from_db,
+    setup_database,
+    set_bot_state,
+    get_character_deletion_status,
+    get_wallet_balance,
+    update_character_setting,
+    update_character_notification_setting,
+    cancel_character_deletion,
+    schedule_character_deletion,
+    get_contracts_from_db,
+    get_names_from_ids,
+    get_tracked_market_orders,
+    get_character_skills,
+    get_undercut_statuses,
+    resolve_location_to_region,
+    get_jump_distance,
+    get_region_market_orders,
+    get_historical_transactions_from_db,
+    backfill_character_journal_history,
+    get_full_wallet_journal_from_db,
+    get_character_public_info,
+    get_character_online_status,
+    get_corporation_info,
+    get_alliance_info,
+    _create_character_info_image,
+    seed_data_for_character,
+    reset_update_notification_flag,
+    delete_character,
+    master_wallet_journal_poll,
+    master_wallet_transaction_poll,
+    master_order_history_poll,
+    master_orders_poll,
+    master_contracts_poll,
+)
+
 from tasks import generate_chart_task
 
 # Configure logging
@@ -71,14 +110,14 @@ async def send_paginated_message(context: ContextTypes.DEFAULT_TYPE, header: str
         await send_telegram_message(context, message, chat_id)
         await asyncio.sleep(0.5)
 
-async def check_and_handle_pending_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE, character: app_utils.Character) -> bool:
+async def check_and_handle_pending_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character) -> bool:
     """
     Checks if a character is pending deletion. If so, sends an informative message and returns True.
     """
     if not character:
         return False
 
-    deletion_time = app_utils.get_character_deletion_status(character.id)
+    deletion_time = get_character_deletion_status(character.id)
     if deletion_time:
         query = update.callback_query
         time_left = deletion_time - datetime.now(timezone.utc)
@@ -103,7 +142,7 @@ async def check_and_handle_pending_deletion(update: Update, context: ContextType
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays the main menu or routes to the add character flow for new users."""
     user = update.effective_user
-    user_characters = app_utils.get_characters_for_user(user.id)
+    user_characters = get_characters_for_user(user.id)
 
     if not user_characters:
         await add_character_command(update, context)
@@ -149,7 +188,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Provides a link for the user to add a new EVE Online character."""
     user = update.effective_user
-    user_characters = app_utils.get_characters_for_user(user.id)
+    user_characters = get_characters_for_user(user.id)
     is_new_user = not user_characters
 
     webapp_base_url = os.getenv('WEBAPP_URL', 'http://localhost:5000')
@@ -177,10 +216,10 @@ async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TY
         sent_message = await update.message.reply_text(message, reply_markup=reply_markup)
 
     if sent_message:
-        app_utils.set_bot_state(f"add_character_prompt_{user.id}", f"{sent_message.chat_id}:{sent_message.message_id}")
+        set_bot_state(f"add_character_prompt_{user.id}", f"{sent_message.chat_id}:{sent_message.message_id}")
 
 
-async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[app_utils.Character]):
+async def _show_balance_for_characters(update: Update, context: ContextTypes.DEFAULT_TYPE, characters: list[Character]):
     """Helper function to fetch and display balances for a list of characters."""
     query = update.callback_query
     char_names = ", ".join([c.name for c in characters])
@@ -192,11 +231,11 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
     total_balance = 0
     errors = False
     for char in characters:
-        if app_utils.get_character_deletion_status(char.id):
+        if get_character_deletion_status(char.id):
             message_lines.append(f"• `{char.name}`: `(Pending Deletion)`")
             continue
 
-        balance = app_utils.get_wallet_balance(char, force_revalidate=True)
+        balance = get_wallet_balance(char, force_revalidate=True)
         if balance is not None:
             message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
             total_balance += balance
@@ -220,7 +259,7 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the balance command, prompting for character selection if needed."""
     user_id = update.effective_user.id
-    user_characters = app_utils.get_characters_for_user(user_id)
+    user_characters = get_characters_for_user(user_id)
 
     if not user_characters:
         await update.effective_message.reply_text("You have no characters added. Please use `/add_character` first.")
@@ -239,18 +278,92 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await update.message.reply_text(text=message_text, reply_markup=reply_markup)
 
-# ... (Other Telegram-specific handlers like overview_command, sales_command, etc. will be similarly refactored) ...
+async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles callbacks from the chart buttons by scheduling a background Celery task."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        parts = query.data.split('_')
+        action = parts[0]
+        chart_type = parts[1]
+        character_id = int(parts[2])
+
+        if action != 'chart':
+            return
+
+    except (IndexError, ValueError):
+        await query.edit_message_text(text="Invalid chart request.")
+        return
+
+    character = get_character_by_id(character_id)
+    if not character:
+        await query.edit_message_text(text="Error: Could not find character for this chart.")
+        return
+
+    await query.message.delete()
+
+    caption_map = {
+        'lastday': "Last Day", '7days': "Last 7 Days",
+        '30days': "Last 30 Days", 'alltime': "All Time"
+    }
+    chart_name = caption_map.get(chart_type, chart_type.capitalize())
+
+    generating_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"⏳ Generating {chart_name} chart for {character.name}. This may take a moment..."
+    )
+
+    generate_chart_task.delay(
+        character_id=character_id,
+        chart_type=chart_type,
+        chat_id=query.message.chat_id,
+        generating_message_id=generating_message.message_id
+    )
+
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The single, main handler for all callback queries from inline keyboards."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    logging.info(f"Received callback query with data: {data}")
+
+    if data == "start_command": await start_command(update, context)
+    elif data == "balance": await balance_command(update, context)
+    # This is incomplete, other handlers would be here
+    elif data.startswith("balance_char_"):
+        user_id = update.effective_user.id
+        char_id_str = data.split('_')[-1]
+        chars_to_query = get_characters_for_user(user_id) if char_id_str == "all" else [get_character_by_id(int(char_id_str))]
+        await _show_balance_for_characters(update, context, chars_to_query)
+    elif data.startswith("chart_"):
+        await chart_callback_handler(update, context)
+
 
 async def post_init(application: Application):
     """Starts background tasks after initialization."""
-    # Polling loops and other startup logic remain here
+    asyncio.create_task(master_wallet_journal_poll(application))
+    asyncio.create_task(master_wallet_transaction_poll(application))
+    asyncio.create_task(master_order_history_poll(application))
+    asyncio.create_task(master_orders_poll(application))
+    asyncio.create_task(master_contracts_poll(application))
+    logging.info("Master polling loops have been started.")
+
+async def purge_deleted_characters_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Periodically checks for and permanently deletes characters whose deletion grace period has expired.
+    """
+    logging.info("Running job to purge characters marked for deletion.")
+    # This function would call app_utils.delete_character
     pass
 
 def main() -> None:
     """Run the bot."""
     logging.info("Bot starting up...")
-    app_utils.setup_database()
-    app_utils.load_characters_from_db()
+    setup_database()
+    load_characters_from_db()
 
     application = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).post_init(post_init).build()
 
