@@ -39,13 +39,6 @@ from app_utils import (
     seed_data_for_character,
     reset_update_notification_flag,
     delete_character,
-    master_wallet_journal_poll,
-    master_wallet_transaction_poll,
-    master_order_history_poll,
-    master_orders_poll,
-    master_contracts_poll,
-    _calculate_overview_data,
-    _format_overview_message,
     resolve_location_to_region,
 )
 
@@ -297,8 +290,8 @@ async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFA
 
     try:
         # Run the synchronous data calculation in a thread to avoid blocking
-        overview_data = await asyncio.to_thread(_calculate_overview_data, character)
-        message, reply_markup = _format_overview_message(overview_data, character)
+        overview_data = await asyncio.to_thread(app_utils._calculate_overview_data, character)
+        message, reply_markup = app_utils._format_overview_message(overview_data, character)
 
         # Add a contextual back button based on how many characters the user has
         user_characters = get_characters_for_user(update.effective_user.id)
@@ -895,11 +888,11 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def post_init(application: Application):
     """Starts background tasks after initialization."""
-    asyncio.create_task(master_wallet_journal_poll(application))
-    asyncio.create_task(master_wallet_transaction_poll(application))
-    asyncio.create_task(master_order_history_poll(application))
-    asyncio.create_task(master_orders_poll(application))
-    asyncio.create_task(master_contracts_poll(application))
+    asyncio.create_task(app_utils.master_wallet_journal_poll(application))
+    asyncio.create_task(app_utils.master_wallet_transaction_poll(application))
+    asyncio.create_task(app_utils.master_order_history_poll(application))
+    asyncio.create_task(app_utils.master_orders_poll(application))
+    asyncio.create_task(app_utils.master_contracts_poll(application))
     logging.info("Master polling loops have been started.")
 
 async def purge_deleted_characters_job(context: ContextTypes.DEFAULT_TYPE) -> None:

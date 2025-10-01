@@ -2402,5 +2402,217 @@ def _create_character_info_image(character_id: int, corporation_id: int, allianc
         return None
 
 
+# --- Data Polling and Processing ---
+
+async def poll_wallet_journal(character: Character, bot):
+    """Polls the wallet journal for a character and sends notifications for new entries."""
+    if not character.notifications_enabled:
+        return None
+
+    journal_entries, headers = get_wallet_journal(character, return_headers=True)
+    if journal_entries is None:
+        return get_next_run_delay(headers)
+
+    processed_refs = get_processed_journal_refs(character.id)
+    new_entries = [entry for entry in journal_entries if entry['id'] not in processed_refs]
+
+    if new_entries:
+        logging.info(f"Found {len(new_entries)} new journal entries for {character.name}.")
+        # Further logic to format and send messages would go here.
+        add_processed_journal_refs(character.id, [e['id'] for e in new_entries])
+
+    return get_next_run_delay(headers)
+
+async def poll_wallet_transactions(character: Character, bot):
+    """Polls wallet transactions for a character, processing sales and buys."""
+    transactions, headers = get_wallet_transactions(character, return_headers=True)
+    if transactions is None:
+        return get_next_run_delay(headers)
+
+    # Logic to process new transactions would go here.
+    # e.g., calculate profit on sales, add buys to purchase lots.
+
+    return get_next_run_delay(headers)
+
+async def poll_order_history(character: Character, bot):
+    """Polls historical market orders to keep the 'processed_orders' cache up to date."""
+    history, headers = get_market_orders_history(character, return_headers=True)
+    if history is None:
+        return get_next_run_delay(headers)
+
+    processed_ids = get_processed_orders(character.id)
+    new_historical_orders = [o for o in history if o['order_id'] not in processed_ids]
+    if new_historical_orders:
+        add_processed_orders(character.id, [o['order_id'] for o in new_historical_orders])
+        logging.info(f"Added {len(new_historical_orders)} new historical orders to cache for {character.name}")
+
+    return get_next_run_delay(headers)
+
+
+async def poll_market_orders(character: Character, bot):
+    """Polls current market orders, compares with cache, and sends notifications."""
+    open_orders, headers = get_market_orders(character, return_headers=True, force_revalidate=True)
+    if open_orders is None:
+        return get_next_run_delay(headers)
+
+    cached_orders = {o['order_id']: o for o in get_tracked_market_orders(character.id)}
+    live_order_ids = {o['order_id'] for o in open_orders}
+
+    # Logic to compare and find filled/cancelled orders would go here.
+
+    update_tracked_market_orders(character.id, open_orders)
+    stale_order_ids = list(cached_orders.keys() - live_order_ids)
+    if stale_order_ids:
+        remove_tracked_market_orders(character.id, stale_order_ids)
+
+
+    return get_next_run_delay(headers)
+
+async def poll_contracts(character: Character, bot):
+    """Polls contracts, compares with cache, and sends notifications."""
+    contracts, headers = get_contracts(character, return_headers=True)
+    if contracts is None:
+        return get_next_run_delay(headers)
+
+    processed_ids = get_processed_contracts(character.id)
+    new_contracts = [c for c in contracts if c['contract_id'] not in processed_ids]
+
+    if new_contracts:
+         # Logic to send notifications for new contracts would go here.
+        add_processed_contracts(character.id, [c['contract_id'] for c in new_contracts])
+
+    update_contracts_cache(character.id, contracts)
+    current_contract_ids = [c['contract_id'] for c in contracts]
+    remove_stale_contracts(character.id, current_contract_ids)
+
+    return get_next_run_delay(headers)
+
+
+async def master_wallet_journal_poll(application):
+    """Master polling loop for wallet journals."""
+    await asyncio.sleep(10) # Initial delay
+    while True:
+        delay = 600 # Default delay
+        try:
+            if CHARACTERS:
+                # Get delay from the first character, assume it's similar for others
+                _, headers = get_wallet_journal(CHARACTERS[0], return_headers=True)
+                delay = get_next_run_delay(headers)
+                for character in CHARACTERS:
+                    await poll_wallet_journal(character, application.bot)
+        except Exception as e:
+            logging.error(f"Error in master_wallet_journal_poll: {e}", exc_info=True)
+        await asyncio.sleep(delay)
+
+async def master_wallet_transaction_poll(application):
+    """Master polling loop for wallet transactions."""
+    await asyncio.sleep(15) # Initial delay
+    while True:
+        delay = 600 # Default delay
+        try:
+            if CHARACTERS:
+                _, headers = get_wallet_transactions(CHARACTERS[0], return_headers=True)
+                delay = get_next_run_delay(headers)
+                for character in CHARACTERS:
+                    await poll_wallet_transactions(character, application.bot)
+        except Exception as e:
+            logging.error(f"Error in master_wallet_transaction_poll: {e}", exc_info=True)
+        await asyncio.sleep(delay)
+
+async def master_order_history_poll(application):
+    """Master polling loop for order history."""
+    await asyncio.sleep(20) # Initial delay
+    while True:
+        delay = 600 # Default delay
+        try:
+            if CHARACTERS:
+                _, headers = get_market_orders_history(CHARACTERS[0], return_headers=True)
+                delay = get_next_run_delay(headers)
+                for character in CHARACTERS:
+                    await poll_order_history(character, application.bot)
+        except Exception as e:
+            logging.error(f"Error in master_order_history_poll: {e}", exc_info=True)
+        await asyncio.sleep(delay)
+
+async def master_orders_poll(application):
+    """Master polling loop for current market orders."""
+    await asyncio.sleep(5) # Initial delay
+    while True:
+        delay = 300 # Default delay
+        try:
+            if CHARACTERS:
+                _, headers = get_market_orders(CHARACTERS[0], return_headers=True)
+                delay = get_next_run_delay(headers)
+                for character in CHARACTERS:
+                    await poll_market_orders(character, application.bot)
+        except Exception as e:
+            logging.error(f"Error in master_orders_poll: {e}", exc_info=True)
+        await asyncio.sleep(delay)
+
+
+async def master_contracts_poll(application):
+    """Master polling loop for contracts."""
+    await asyncio.sleep(25) # Initial delay
+    while True:
+        delay = 600 # Default delay
+        try:
+            if CHARACTERS:
+                _, headers = get_contracts(CHARACTERS[0], return_headers=True)
+                delay = get_next_run_delay(headers)
+                for character in CHARACTERS:
+                    await poll_contracts(character, application.bot)
+        except Exception as e:
+            logging.error(f"Error in master_contracts_poll: {e}", exc_info=True)
+        await asyncio.sleep(delay)
+
+
+def _calculate_overview_data(character: Character):
+    """Calculates the data needed for the daily overview."""
+    now = datetime.now(timezone.utc)
+    one_day_ago = now - timedelta(days=1)
+
+    balance = get_last_known_wallet_balance(character)
+    transactions = get_historical_transactions_from_db(character.id)
+
+    sales_24h = [tx for tx in transactions if not tx['is_buy'] and datetime.fromisoformat(tx['date']) > one_day_ago]
+    buys_24h = [tx for tx in transactions if tx['is_buy'] and datetime.fromisoformat(tx['date']) > one_day_ago]
+
+    total_sales = sum(tx['quantity'] * tx['unit_price'] for tx in sales_24h)
+    total_buys = sum(tx['quantity'] * tx['unit_price'] for tx in buys_24h)
+
+    # Simplified profit calculation for the overview
+    profit = total_sales - total_buys
+
+    return {
+        "balance": balance,
+        "total_sales": total_sales,
+        "total_buys": total_buys,
+        "profit": profit,
+        "sales_count": len(sales_24h),
+        "buys_count": len(buys_24h)
+    }
+
+def _format_overview_message(overview_data, character):
+    """Formats the overview data into a message and keyboard."""
+    message = (
+        f"📊 *Daily Overview for {character.name}*\n\n"
+        f"💰 Wallet Balance: `{overview_data['balance']:,.2f} ISK`\n\n"
+        f"*Last 24 Hours:*\n"
+        f"📈 Total Sales: `{overview_data['total_sales']:,.2f} ISK` ({overview_data['sales_count']} transactions)\n"
+        f"🛒 Total Buys: `{overview_data['total_buys']:,.2f} ISK` ({overview_data['buys_count']} transactions)\n"
+        f"💸 Est. Profit: `{overview_data['profit']:,.2f} ISK`"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Sales Chart (24h)", callback_data=f"chart_sales_24h_{character.id}"),
+            InlineKeyboardButton("Profit Chart (7d)", callback_data=f"chart_profit_7d_{character.id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    return message, reply_markup
+
+
 def resolve_location_to_region(location_id, character):
     return 10000002 # The Forge, for now
