@@ -41,6 +41,58 @@ def get_bot():
         raise ValueError("Missing TELEGRAM_BOT_TOKEN")
     return telegram.Bot(token=token)
 
+# --- New Tasks (Triggered by Webapp) ---
+
+@celery.task(name='tasks.send_welcome_and_menu')
+def send_welcome_and_menu(telegram_user_id: int, character_name: str):
+    """
+    Sends the initial welcome message and main menu to a new user.
+    Also cleans up the original "add character" prompt.
+    """
+    logging.info(f"Sending welcome message for new character {character_name} to user {telegram_user_id}.")
+    bot = get_bot()
+
+    # Clean up the initial "Add Character" prompt
+    prompt_key = f"add_character_prompt_{telegram_user_id}"
+    prompt_message_info = get_bot_state(prompt_key)
+    if prompt_message_info:
+        try:
+            chat_id_str, message_id_str = prompt_message_info.split(':')
+            bot.delete_message(chat_id=int(chat_id_str), message_id=int(message_id_str))
+            logging.info(f"Deleted 'add character' prompt for user {telegram_user_id}")
+            set_bot_state(prompt_key, "") # Clear the state
+        except Exception as e:
+            logging.error(f"Error deleting 'add character' prompt for user {telegram_user_id}: {e}")
+
+    # Send welcome message and main menu
+    welcome_msg = f"✅ Character **{character_name}** added! Starting initial data sync in the background. This might take a few minutes."
+    send_telegram_message_sync(bot, welcome_msg, telegram_user_id)
+    send_main_menu_sync(bot, telegram_user_id)
+
+
+@celery.task(name='tasks.seed_character_data_task')
+def seed_character_data_task(character_id: int):
+    """
+    Task to seed initial data for a new character in the background.
+    Notifies the user upon completion.
+    """
+    logging.info(f"Starting background data seed for character_id: {character_id}")
+    character = get_character_by_id(character_id)
+    if not character:
+        logging.error(f"Cannot seed data: Character {character_id} not found.")
+        return
+
+    bot = get_bot()
+    seed_successful = seed_data_for_character(character)
+
+    if seed_successful:
+        msg = f"✅ Sync complete for **{character.name}**! All historical data has been imported."
+    else:
+        msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
+
+    send_telegram_message_sync(bot, msg, character.telegram_user_id)
+
+
 # --- Dispatcher Tasks (Triggered by Celery Beat) ---
 
 @celery.task(name='tasks.dispatch_character_polls')
@@ -113,33 +165,14 @@ def send_daily_overview(character_id: int):
 
 # --- Maintenance Tasks (Triggered by Celery Beat) ---
 
-@celery.task(name='tasks.seed_character_data_task')
-def seed_character_data_task(character_id: int):
-    """
-    Task to seed initial data for a new character in the background.
-    Notifies the user upon completion.
-    """
-    logging.info(f"Starting background data seed for character_id: {character_id}")
-    character = get_character_by_id(character_id)
-    if not character:
-        logging.error(f"Cannot seed data: Character {character_id} not found.")
-        return
-
-    bot = get_bot()
-    seed_successful = seed_data_for_character(character)
-
-    if seed_successful:
-        msg = f"✅ Sync complete for **{character.name}**! All historical data has been imported."
-        send_telegram_message_sync(bot, msg, character.telegram_user_id)
-    else:
-        msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
-        send_telegram_message_sync(bot, msg, character.telegram_user_id)
-
-
 @celery.task(name='tasks.check_new_characters')
 def check_new_characters():
-    """Periodically checks for new or updated characters, seeds their data, and notifies the user."""
-    logging.info("Running job to check for new and updated characters.")
+    """
+    Periodically checks for characters that have been re-authenticated
+    (to update permissions) and notifies the user. The initial creation
+    of new characters is now handled by tasks triggered from the webapp.
+    """
+    logging.info("Running job to check for updated characters.")
     # Force a reload of characters from the DB to ensure this worker has the latest data.
     load_characters_from_db()
     try:
@@ -149,47 +182,27 @@ def check_new_characters():
 
         bot = get_bot()
         for char_id, info in db_chars_info.items():
+            # This task now only cares about characters that need an update notification.
+            if not info.get('needs_update'):
+                continue
+
             character = get_character_by_id(char_id)
             if not character:
                 logging.error(f"Could not find details for character ID {char_id} in the database.")
                 continue
 
-            # --- Clean up the initial "Add Character" prompt ---
-            prompt_key = f"add_character_prompt_{character.telegram_user_id}"
-            prompt_message_info = get_bot_state(prompt_key)
-            if prompt_message_info:
-                try:
-                    chat_id_str, message_id_str = prompt_message_info.split(':')
-                    bot.delete_message(chat_id=int(chat_id_str), message_id=int(message_id_str))
-                    logging.info(f"Deleted 'add character' prompt for user {character.telegram_user_id}")
-                    # Clear the state so we don't try to delete it again
-                    set_bot_state(prompt_key, "")
-                except Exception as e:
-                    logging.error(f"Error deleting 'add character' prompt for user {character.telegram_user_id}: {e}")
-            # --- End prompt cleanup ---
+            logging.info(f"Processing updated character: {character.name} ({char_id})")
+            if get_character_deletion_status(char_id):
+                cancel_character_deletion(char_id)
+                msg = f"✅ Deletion cancelled for **{character.name}**. Welcome back!"
+            else:
+                msg = f"✅ Successfully updated permissions for character **{character.name}**."
 
-            if info.get('is_new'):
-                logging.info(f"Processing new character: {character.name} ({char_id})")
-                # 1. Send welcome message and show main menu immediately.
-                welcome_msg = f"✅ Character **{character.name}** added! Starting initial data sync in the background. This might take a few minutes."
-                send_telegram_message_sync(bot, welcome_msg, character.telegram_user_id)
-                send_main_menu_sync(bot, character.telegram_user_id)
+            send_telegram_message_sync(bot, msg, character.telegram_user_id)
+            reset_update_notification_flag(char_id)
 
-                # 2. Start the data seeding in the background.
-                seed_character_data_task.delay(char_id)
-
-            elif info.get('needs_update'):
-                logging.info(f"Processing updated character: {character.name} ({char_id})")
-                if get_character_deletion_status(char_id):
-                    cancel_character_deletion(char_id)
-                    msg = f"✅ Deletion cancelled for **{character.name}**. Welcome back!"
-                else:
-                    msg = f"✅ Successfully updated permissions for character **{character.name}**."
-                send_telegram_message_sync(bot, msg, character.telegram_user_id)
-                reset_update_notification_flag(char_id)
-
-                # After sending the status, show the main menu
-                send_main_menu_sync(bot, character.telegram_user_id)
+            # After sending the status, show the main menu
+            send_main_menu_sync(bot, character.telegram_user_id)
     except Exception as e:
         logging.error(f"Error in check_new_characters task: {e}", exc_info=True)
 
