@@ -89,6 +89,10 @@ def get_character_details_from_token(access_token):
         return None, None
 
 
+# --- Database Initialization ---
+# This is crucial and must be done before any database operations are attempted.
+database.initialize_pool()
+
 # --- Flask Web Application ---
 app = Flask(__name__)
 
