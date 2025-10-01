@@ -1,5 +1,245 @@
 import logging
+import os
+import telegram
+import asyncio
 from celery_app import celery
+
+# These imports anticipate the refactoring of bot.py into app_utils.py in the next step.
+# These functions will be made synchronous and moved to app_utils.
+from app_utils import (
+    load_characters_from_db,
+    get_character_by_id,
+    update_character_backfill_state,
+    get_wallet_transactions,
+    add_historical_transactions_to_db,
+    add_purchase_lot,
+    get_bot_state,
+    set_bot_state,
+    get_all_character_ids,
+    process_character_wallet,
+    process_character_orders,
+    process_character_contracts,
+    get_new_and_updated_character_info,
+    seed_data_for_character,
+    get_character_deletion_status,
+    cancel_character_deletion,
+    reset_update_notification_flag,
+    get_characters_to_purge,
+    delete_character,
+    get_characters_with_daily_overview_enabled,
+    send_daily_overview_for_character,
+    send_main_menu_sync,
+    send_main_menu_async,
+    send_telegram_message_sync
+)
+
+# --- Telegram Bot Initialization & Helper ---
+
+def get_bot():
+    """Initializes and returns a telegram.Bot instance for use in tasks."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logging.error("TELEGRAM_BOT_TOKEN environment variable not set.")
+        raise ValueError("Missing TELEGRAM_BOT_TOKEN")
+    return telegram.Bot(token=token)
+
+# --- New Tasks (Triggered by Webapp) ---
+
+async def _send_welcome_sequence(bot: telegram.Bot, telegram_user_id: int, character_name: str):
+    """A helper coroutine to run all async Telegram calls in one event loop."""
+    # 1. Clean up the initial "Add Character" prompt
+    prompt_key = f"add_character_prompt_{telegram_user_id}"
+    prompt_message_info = get_bot_state(prompt_key)
+    if prompt_message_info:
+        try:
+            chat_id_str, message_id_str = prompt_message_info.split(':')
+            await bot.delete_message(chat_id=int(chat_id_str), message_id=int(message_id_str))
+            logging.info(f"Deleted 'add character' prompt for user {telegram_user_id}")
+            set_bot_state(prompt_key, "")  # Clear the state
+        except Exception as e:
+            # Log error but don't stop the sequence
+            logging.error(f"Error deleting 'add character' prompt for user {telegram_user_id}: {e}")
+
+    # 2. Send welcome message
+    welcome_msg = f"✅ Character **{character_name}** added! Starting initial data sync in the background. This might take a few minutes."
+    await bot.send_message(chat_id=telegram_user_id, text=welcome_msg, parse_mode='Markdown')
+
+    # 3. Send main menu
+    await send_main_menu_async(bot, telegram_user_id)
+
+
+@celery.task(name='tasks.send_welcome_and_menu')
+def send_welcome_and_menu(telegram_user_id: int, character_name: str):
+    """
+    Sends the initial welcome message and main menu to a new user by running
+    an async sequence in a single event loop.
+    """
+    logging.info(f"Sending welcome message for new character {character_name} to user {telegram_user_id}.")
+    bot = get_bot()
+    try:
+        # Run the entire async sequence in a single event loop.
+        asyncio.run(_send_welcome_sequence(bot, telegram_user_id, character_name))
+        logging.info(f"Successfully sent welcome sequence to user {telegram_user_id}.")
+    except Exception as e:
+        logging.error(f"Error running welcome sequence for user {telegram_user_id}: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.seed_character_data_task')
+def seed_character_data_task(character_id: int):
+    """
+    Task to seed initial data for a new character in the background.
+    Notifies the user upon completion.
+    """
+    logging.info(f"Starting background data seed for character_id: {character_id}")
+    character = get_character_by_id(character_id)
+    if not character:
+        logging.error(f"Cannot seed data: Character {character_id} not found.")
+        return
+
+    bot = get_bot()
+    seed_successful = seed_data_for_character(character)
+
+    if seed_successful:
+        msg = f"✅ Sync complete for **{character.name}**! All historical data has been imported."
+    else:
+        msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
+
+    send_telegram_message_sync(bot, msg, character.telegram_user_id)
+
+
+# --- Dispatcher Tasks (Triggered by Celery Beat) ---
+
+@celery.task(name='tasks.dispatch_character_polls')
+def dispatch_character_polls():
+    """Fetches all active character IDs and dispatches individual polling tasks for each."""
+    logging.info("Dispatching character polls...")
+    try:
+        character_ids = get_all_character_ids()
+        for char_id in character_ids:
+            logging.debug(f"Queueing polling tasks for character_id: {char_id}")
+            poll_wallet.delay(char_id)
+            poll_orders.delay(char_id)
+            poll_contracts.delay(char_id)
+        logging.info(f"Dispatched polls for {len(character_ids)} characters.")
+    except Exception as e:
+        logging.error(f"Error in dispatch_character_polls: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.dispatch_daily_overviews')
+def dispatch_daily_overviews():
+    """Dispatches a daily overview task for each character that has it enabled."""
+    logging.info("Dispatching daily overviews...")
+    try:
+        character_ids = get_characters_with_daily_overview_enabled()
+        for char_id in character_ids:
+            logging.debug(f"Queueing daily overview for character_id: {char_id}")
+            send_daily_overview.delay(char_id)
+        logging.info(f"Dispatched daily overviews for {len(character_ids)} characters.")
+    except Exception as e:
+        logging.error(f"Error in dispatch_daily_overviews: {e}", exc_info=True)
+
+# --- Individual Character Tasks (Triggered by Dispatchers) ---
+
+@celery.task(name='tasks.poll_wallet', autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def poll_wallet(character_id: int):
+    """Polls wallet transactions and journal for a single character and sends notifications."""
+    logging.info(f"Polling wallet for character_id: {character_id}")
+    notifications = process_character_wallet(character_id)
+    if notifications:
+        bot = get_bot()
+        for notification in notifications:
+            send_telegram_message_sync(bot, **notification)
+
+@celery.task(name='tasks.poll_orders', autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def poll_orders(character_id: int):
+    """Polls market orders (open, undercut, history) for a single character."""
+    logging.info(f"Polling orders for character_id: {character_id}")
+    notifications = process_character_orders(character_id)
+    if notifications:
+        bot = get_bot()
+        for notification in notifications:
+            send_telegram_message_sync(bot, **notification)
+
+@celery.task(name='tasks.poll_contracts', autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def poll_contracts(character_id: int):
+    """Polls contracts for a single character and sends notifications."""
+    logging.info(f"Polling contracts for character_id: {character_id}")
+    notifications = process_character_contracts(character_id)
+    if notifications:
+        bot = get_bot()
+        for notification in notifications:
+            send_telegram_message_sync(bot, **notification)
+
+@celery.task(name='tasks.send_daily_overview', autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def send_daily_overview(character_id: int):
+    """Generates and sends the daily overview for a single character."""
+    logging.info(f"Sending daily overview for character_id: {character_id}")
+    bot = get_bot()
+    send_daily_overview_for_character(character_id, bot)
+
+# --- Maintenance Tasks (Triggered by Celery Beat) ---
+
+@celery.task(name='tasks.check_new_characters')
+def check_new_characters():
+    """
+    Periodically checks for characters that have been re-authenticated
+    (to update permissions) and notifies the user. The initial creation
+    of new characters is now handled by tasks triggered from the webapp.
+    """
+    logging.info("Running job to check for updated characters.")
+    # Force a reload of characters from the DB to ensure this worker has the latest data.
+    load_characters_from_db()
+    try:
+        db_chars_info = get_new_and_updated_character_info()
+        if not db_chars_info:
+            return
+
+        bot = get_bot()
+        for char_id, info in db_chars_info.items():
+            # This task now only cares about characters that need an update notification.
+            if not info.get('needs_update'):
+                continue
+
+            character = get_character_by_id(char_id)
+            if not character:
+                logging.error(f"Could not find details for character ID {char_id} in the database.")
+                continue
+
+            logging.info(f"Processing updated character: {character.name} ({char_id})")
+            if get_character_deletion_status(char_id):
+                cancel_character_deletion(char_id)
+                msg = f"✅ Deletion cancelled for **{character.name}**. Welcome back!"
+            else:
+                msg = f"✅ Successfully updated permissions for character **{character.name}**."
+
+            send_telegram_message_sync(bot, msg, character.telegram_user_id)
+            reset_update_notification_flag(char_id)
+
+            # After sending the status, show the main menu
+            send_main_menu_sync(bot, character.telegram_user_id)
+    except Exception as e:
+        logging.error(f"Error in check_new_characters task: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.purge_deleted_characters')
+def purge_deleted_characters():
+    """Periodically purges characters whose deletion grace period has expired."""
+    logging.info("Running job to purge deleted characters.")
+    try:
+        characters_to_purge = get_characters_to_purge()
+        if not characters_to_purge:
+            return
+
+        bot = get_bot()
+        for char_id, char_name, telegram_user_id in characters_to_purge:
+            logging.warning(f"Purging character {char_name} ({char_id})...")
+            delete_character(char_id)
+            msg = f"🗑️ The one-hour grace period for **{char_name}** has expired, and all associated data has been permanently deleted."
+            send_telegram_message_sync(bot, msg, chat_id=telegram_user_id)
+            logging.warning(f"Purge complete for character {char_name} ({char_id}).")
+    except Exception as e:
+        logging.error(f"Error in purge_deleted_characters task: {e}", exc_info=True)
+
 
 @celery.task(
     bind=True,
@@ -10,75 +250,40 @@ from celery_app import celery
 )
 def continue_backfill_character_history(self, character_id: int):
     """
-    Celery task to gradually backfill transaction history for a character, using the last transaction ID as a cursor.
+    Celery task to gradually backfill transaction history for a character.
+    This function now uses app_utils instead of bot.
     """
-    # Import bot functions locally to avoid circular dependencies
-    import bot
-
     logging.info(f"Starting background backfill task for character_id: {character_id}")
-
-    # It's crucial to get the most up-to-date character object from the DB
-    character = bot.get_character_by_id(character_id)
-    if not character:
-        logging.error(f"Backfill task failed: Could not find character with ID {character_id}.")
+    character = get_character_by_id(character_id)
+    if not character or not character.is_backfilling:
+        logging.warning(f"Backfill task for character {character_id} stopping (is_backfilling is False or char not found).")
         return
 
-    # If the character is no longer marked for backfilling, stop the chain.
-    if not character.is_backfilling:
-        logging.warning(f"Backfill task for character {character_id} is stopping because is_backfilling is False.")
-        return
-
-    # The current 'before_id' is our cursor for the ESI call.
     before_id = character.backfill_before_id
-
     logging.info(f"Fetching transaction history for {character.name} before transaction_id: {before_id or 'latest'}...")
 
-    # Fetch the next batch of transactions.
-    transactions = bot.get_wallet_transactions(character, before_id=before_id)
+    transactions = get_wallet_transactions(character, before_id=before_id)
 
     if transactions is None:
-        # This indicates an ESI error. The task will retry automatically.
-        logging.error(f"ESI request failed for character {character_id}, before_id {before_id}. Task will be retried.")
         raise Exception(f"ESI fetch failed for char {character_id} before_id {before_id}")
 
     if not transactions:
-        # This is the end of the history. The backfill is complete.
-        logging.info(f"Backfill complete for character {character.name}. No more transactions found.")
-        bot.update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
-        # Also update the main history backfilled flag to remove the 1-hour grace period for notifications.
-        bot.set_bot_state(f"history_backfilled_{character.id}", "true")
-        logging.info(f"Finalized backfill status for {character.name}.")
+        logging.info(f"Backfill complete for character {character.name}.")
+        update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
+        set_bot_state(f"history_backfilled_{character.id}", "true")
         return
 
-    # We got transactions, so save them to the historical table.
-    logging.info(f"Found {len(transactions)} transactions for {character.name}. Saving to DB.")
-    bot.add_historical_transactions_to_db(character_id, transactions)
-
-    # Also add any buys to the purchase lots table for future FIFO tracking.
+    add_historical_transactions_to_db(character_id, transactions)
     buy_transactions = [tx for tx in transactions if tx.get('is_buy')]
-    if buy_transactions:
-        for tx in buy_transactions:
-            bot.add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
-        logging.info(f"Seeded {len(buy_transactions)} historical buy transactions from this batch for {character.name}.")
+    for tx in buy_transactions:
+        add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
 
-    # Find the oldest transaction ID from this batch to use as the next cursor.
     min_transaction_id = min(tx['transaction_id'] for tx in transactions)
-    logging.info(f"Oldest transaction ID in this batch is {min_transaction_id}.")
-
-    # Update the character's backfill cursor in the database.
-    bot.update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
-
-    # Check for a stuck loop. This should ideally never happen.
     if before_id is not None and min_transaction_id >= before_id:
-        logging.critical(
-            f"Backfill for character {character_id} is stuck. "
-            f"The next 'before_id' ({min_transaction_id}) is not less than the previous one ({before_id}). "
-            f"Stopping backfill to prevent an infinite loop."
-        )
-        bot.update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
+        logging.warning(f"Backfill for character {character_id} reached the end (min_transaction_id {min_transaction_id} >= before_id {before_id}). Finalizing.")
+        update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
+        set_bot_state(f"history_backfilled_{character.id}", "true") # Explicitly mark as complete
         return
 
-    # Re-queue the task for the next batch immediately.
-    # Celery's built-in retry mechanism will handle rate-limiting or other ESI errors.
-    logging.info(f"Queueing next backfill task for character {character_id}, before_id {min_transaction_id}.")
+    update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
     continue_backfill_character_history.apply_async(args=[character_id])

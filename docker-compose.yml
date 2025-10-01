@@ -60,8 +60,12 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   redis:
@@ -79,6 +83,31 @@ services:
     container_name: eve-market-celery
     restart: unless-stopped
     command: ["celery", "-A", "celery_app.celery", "worker", "--loglevel=info"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ESI_CLIENT_ID=${ESI_CLIENT_ID}
+      - ESI_SECRET_KEY=${ESI_SECRET_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WEBAPP_URL=${WEBAPP_URL}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_beat:
+    build: .
+    container_name: eve-market-beat
+    restart: unless-stopped
+    command: ["celery", "-A", "celery_app.celery", "beat", "--loglevel=info"]
     environment:
       - PYTHONUNBUFFERED=1
       - ESI_CLIENT_ID=${ESI_CLIENT_ID}

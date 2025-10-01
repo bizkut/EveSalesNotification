@@ -3,6 +3,7 @@ import database
 import logging
 import requests
 from flask import Flask, request, redirect, render_template_string
+from tasks import seed_character_data_task, send_welcome_and_menu
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -22,8 +23,12 @@ logger.addHandler(handler)
 
 # --- Database Functions ---
 def add_character_to_db(character_id, character_name, refresh_token, telegram_user_id):
-    """Adds or updates a character in the PostgreSQL database."""
+    """
+    Adds or updates a character in the PostgreSQL database.
+    Returns a tuple: (success: bool, is_new: bool)
+    """
     conn = database.get_db_connection()
+    is_new = False
     try:
         with conn.cursor() as cursor:
             # First, ensure the telegram user exists.
@@ -32,7 +37,9 @@ def add_character_to_db(character_id, character_name, refresh_token, telegram_us
                 (telegram_user_id,)
             )
 
-            # Now, "upsert" the character.
+            # Now, "upsert" the character and check if it was a new insert.
+            # The RETURNING clause with xmax is a PostgreSQL-specific way to check
+            # if the row was inserted (xmax=0) or updated (xmax!=0).
             cursor.execute(
                 """
                 INSERT INTO characters (character_id, character_name, refresh_token, telegram_user_id)
@@ -42,16 +49,21 @@ def add_character_to_db(character_id, character_name, refresh_token, telegram_us
                     refresh_token = EXCLUDED.refresh_token,
                     telegram_user_id = EXCLUDED.telegram_user_id,
                     needs_update_notification = TRUE
+                RETURNING (xmax = 0) AS is_new;
                 """,
                 (character_id, character_name, refresh_token, telegram_user_id)
             )
+            result = cursor.fetchone()
+            if result:
+                is_new = result[0]
+
             conn.commit()
-        logging.info(f"Successfully added/updated character {character_name} ({character_id}) for user {telegram_user_id}.")
-        return True
+        logging.info(f"Successfully added/updated character {character_name} ({character_id}) for user {telegram_user_id}. New: {is_new}")
+        return True, is_new
     except Exception as e:
         logging.error(f"Database error while adding character: {e}", exc_info=True)
         conn.rollback() # Rollback on error
-        return False
+        return False, False
     finally:
         database.release_db_connection(conn)
 
@@ -88,6 +100,10 @@ def get_character_details_from_token(access_token):
         logging.error(f"Error getting character details from access token: {e}")
         return None, None
 
+
+# --- Database Initialization ---
+# This is crucial and must be done before any database operations are attempted.
+database.initialize_pool()
 
 # --- Flask Web Application ---
 app = Flask(__name__)
@@ -215,8 +231,16 @@ def callback():
         return render_template_string(ERROR_TEMPLATE, message="Failed to verify token and get character details."), 500
 
     # 3. Save the character to the database
-    if add_character_to_db(character_id, character_name, refresh_token, telegram_user_id):
-        # Check if the bot username is configured for automatic redirection
+    success, is_new = add_character_to_db(character_id, character_name, refresh_token, telegram_user_id)
+    if success:
+        # 4. If the character is brand new, trigger the welcome message and background sync
+        if is_new:
+            logging.info(f"Triggering welcome message and data seed for new character {character_name} ({character_id}).")
+            send_welcome_and_menu.delay(telegram_user_id, character_name)
+            # Add a small delay to ensure the welcome message appears before the "sync complete" message if seeding is very fast.
+            seed_character_data_task.apply_async(args=[character_id], countdown=5)
+
+        # 5. Show the success page to the user
         bot_username = os.getenv("TELEGRAM_BOT_USERNAME")
         if bot_username:
             telegram_url = f"https://t.me/{bot_username}"
