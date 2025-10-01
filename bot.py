@@ -1752,10 +1752,10 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             if competitor_price and competitor_location_id:
                 competitor_loc_name = id_to_name.get(competitor_location_id, "Unknown Location")
                 jumps_str = ""
-                if character_location_id:
-                    jumps = await get_jump_distance(character_location_id, competitor_location_id, character)
-                    if jumps is not None:
-                        jumps_str = f" ({jumps}j)"
+                # Calculate jumps from the order's location, not the character's current location
+                jumps = await get_jump_distance(order['location_id'], competitor_location_id, character)
+                if jumps is not None:
+                    jumps_str = f" ({jumps}j)"
 
                 if is_buy:
                     alert_line = f"❗️ Outbid! Highest bid: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}"
