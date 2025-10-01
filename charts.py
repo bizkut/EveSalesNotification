@@ -24,9 +24,9 @@ def _prepare_chart_data(character_id, start_of_period):
     2. Builds the inventory state up to the start of the chart period.
     3. Returns the initial inventory state and all events within the period.
     """
-    import bot
-    all_transactions = bot.get_historical_transactions_from_db(character_id)
-    full_journal = bot.get_full_wallet_journal_from_db(character_id)
+    import app_utils
+    all_transactions = app_utils.get_historical_transactions_from_db(character_id)
+    full_journal = app_utils.get_full_wallet_journal_from_db(character_id)
     fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
 
     all_events = []
@@ -69,8 +69,8 @@ def generate_last_day_chart(character_id: int):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import bot
-    character = bot.get_character_by_id(character_id)
+    import app_utils
+    character = app_utils.get_character_by_id(character_id)
     if not character: return None
 
     now = datetime.now(timezone.utc)
@@ -166,8 +166,8 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import bot
-    character = bot.get_character_by_id(character_id)
+    import app_utils
+    character = app_utils.get_character_by_id(character_id)
     if not character: return None
 
     now = datetime.now(timezone.utc)
@@ -272,8 +272,8 @@ def generate_all_time_chart(character_id: int):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import bot
-    character = bot.get_character_by_id(character_id)
+    import app_utils
+    character = app_utils.get_character_by_id(character_id)
     if not character: return None
 
     inventory, events_in_period = _prepare_chart_data(character_id, datetime.min.replace(tzinfo=timezone.utc))

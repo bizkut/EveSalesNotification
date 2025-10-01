@@ -12,13 +12,13 @@ def continue_backfill_character_history(self, character_id: int):
     """
     Celery task to gradually backfill transaction history for a character, using the last transaction ID as a cursor.
     """
-    # Import bot functions locally to avoid circular dependencies
-    import bot
+    # Import utility functions locally to avoid circular dependencies
+    import app_utils
 
     logging.info(f"Starting background backfill task for character_id: {character_id}")
 
     # It's crucial to get the most up-to-date character object from the DB
-    character = bot.get_character_by_id(character_id)
+    character = app_utils.get_character_by_id(character_id)
     if not character:
         logging.error(f"Backfill task failed: Could not find character with ID {character_id}.")
         return
@@ -34,7 +34,7 @@ def continue_backfill_character_history(self, character_id: int):
     logging.info(f"Fetching transaction history for {character.name} before transaction_id: {before_id or 'latest'}...")
 
     # Fetch the next batch of transactions.
-    transactions = bot.get_wallet_transactions(character, before_id=before_id)
+    transactions = app_utils.get_wallet_transactions(character, before_id=before_id)
 
     if transactions is None:
         # This indicates an ESI error. The task will retry automatically.
@@ -44,21 +44,21 @@ def continue_backfill_character_history(self, character_id: int):
     if not transactions:
         # This is the end of the history. The backfill is complete.
         logging.info(f"Backfill complete for character {character.name}. No more transactions found.")
-        bot.update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
+        app_utils.update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
         # Also update the main history backfilled flag to remove the 1-hour grace period for notifications.
-        bot.set_bot_state(f"history_backfilled_{character.id}", "true")
+        app_utils.set_bot_state(f"history_backfilled_{character.id}", "true")
         logging.info(f"Finalized backfill status for {character.name}.")
         return
 
     # We got transactions, so save them to the historical table.
     logging.info(f"Found {len(transactions)} transactions for {character.name}. Saving to DB.")
-    bot.add_historical_transactions_to_db(character_id, transactions)
+    app_utils.add_historical_transactions_to_db(character_id, transactions)
 
     # Also add any buys to the purchase lots table for future FIFO tracking.
     buy_transactions = [tx for tx in transactions if tx.get('is_buy')]
     if buy_transactions:
         for tx in buy_transactions:
-            bot.add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+            app_utils.add_purchase_lot(character.id, tx['type_id'], tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
         logging.info(f"Seeded {len(buy_transactions)} historical buy transactions from this batch for {character.name}.")
 
     # Find the oldest transaction ID from this batch to use as the next cursor.
@@ -66,7 +66,7 @@ def continue_backfill_character_history(self, character_id: int):
     logging.info(f"Oldest transaction ID in this batch is {min_transaction_id}.")
 
     # Update the character's backfill cursor in the database.
-    bot.update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
+    app_utils.update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
 
     # Check for a stuck loop. This should ideally never happen.
     if before_id is not None and min_transaction_id >= before_id:
@@ -75,7 +75,7 @@ def continue_backfill_character_history(self, character_id: int):
             f"The next 'before_id' ({min_transaction_id}) is not less than the previous one ({before_id}). "
             f"Stopping backfill to prevent an infinite loop."
         )
-        bot.update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
+        app_utils.update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
         return
 
     # Re-queue the task for the next batch immediately.
@@ -101,12 +101,12 @@ def generate_chart_task(self, character_id: int, chart_type: str, chat_id: int, 
     import telegram
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     import charts
-    import bot
+    import app_utils
 
     # Initialize Telegram Bot
     telegram_bot = telegram.Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
 
-    character = bot.get_character_by_id(character_id)
+    character = app_utils.get_character_by_id(character_id)
     if not character:
         telegram_bot.edit_message_text(text="Error: Could not find character for this chart.", chat_id=chat_id, message_id=generating_message_id)
         return
@@ -119,7 +119,7 @@ def generate_chart_task(self, character_id: int, chart_type: str, chat_id: int, 
     elif chart_type in ['7days', '30days']:
         chart_key += f":{now.strftime('%Y-%m-%d')}"
 
-    is_dirty = bot.get_bot_state(f"chart_cache_dirty_{character_id}") == "true"
+    is_dirty = app_utils.get_bot_state(f"chart_cache_dirty_{character_id}") == "true"
 
     caption_map = {
         'lastday': "Last Day", '7days': "Last 7 Days",
@@ -130,7 +130,7 @@ def generate_chart_task(self, character_id: int, chart_type: str, chat_id: int, 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if not (chart_type == 'alltime' and is_dirty):
-        cached_chart_data = bot.get_cached_chart(chart_key)
+        cached_chart_data = app_utils.get_cached_chart(chart_key)
         if cached_chart_data:
             logging.info(f"Using cached chart for key: {chart_key}")
             telegram_bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
@@ -156,9 +156,9 @@ def generate_chart_task(self, character_id: int, chart_type: str, chat_id: int, 
     telegram_bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
 
     if chart_buffer:
-        bot.save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
+        app_utils.save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
         if chart_type == 'alltime':
-            bot.set_bot_state(f"chart_cache_dirty_{character_id}", "false")
+            app_utils.set_bot_state(f"chart_cache_dirty_{character_id}", "false")
         chart_buffer.seek(0)
         telegram_bot.send_photo(chat_id=chat_id, photo=chart_buffer, caption=caption, reply_markup=reply_markup)
     else:
