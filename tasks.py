@@ -113,6 +113,29 @@ def send_daily_overview(character_id: int):
 
 # --- Maintenance Tasks (Triggered by Celery Beat) ---
 
+@celery.task(name='tasks.seed_character_data_task')
+def seed_character_data_task(character_id: int):
+    """
+    Task to seed initial data for a new character in the background.
+    Notifies the user upon completion.
+    """
+    logging.info(f"Starting background data seed for character_id: {character_id}")
+    character = get_character_by_id(character_id)
+    if not character:
+        logging.error(f"Cannot seed data: Character {character_id} not found.")
+        return
+
+    bot = get_bot()
+    seed_successful = seed_data_for_character(character)
+
+    if seed_successful:
+        msg = f"✅ Sync complete for **{character.name}**! All historical data has been imported."
+        send_telegram_message_sync(bot, msg, character.telegram_user_id)
+    else:
+        msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
+        send_telegram_message_sync(bot, msg, character.telegram_user_id)
+
+
 @celery.task(name='tasks.check_new_characters')
 def check_new_characters():
     """Periodically checks for new or updated characters, seeds their data, and notifies the user."""
@@ -147,16 +170,13 @@ def check_new_characters():
 
             if info.get('is_new'):
                 logging.info(f"Processing new character: {character.name} ({char_id})")
-                seed_successful = seed_data_for_character(character)
-                if seed_successful:
-                    msg = f"✅ Sync complete for **{character.name}**! Monitoring has started."
-                    send_telegram_message_sync(bot, msg, character.telegram_user_id)
-                else:
-                    msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
-                    send_telegram_message_sync(bot, msg, character.telegram_user_id)
-
-                # After sending the status, show the main menu
+                # 1. Send welcome message and show main menu immediately.
+                welcome_msg = f"✅ Character **{character.name}** added! Starting initial data sync in the background. This might take a few minutes."
+                send_telegram_message_sync(bot, welcome_msg, character.telegram_user_id)
                 send_main_menu_sync(bot, character.telegram_user_id)
+
+                # 2. Start the data seeding in the background.
+                seed_character_data_task.delay(char_id)
 
             elif info.get('needs_update'):
                 logging.info(f"Processing updated character: {character.name} ({char_id})")
