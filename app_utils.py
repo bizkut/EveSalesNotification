@@ -2336,11 +2336,9 @@ def _trigger_regional_market_data_fetch(character: Character, open_orders: list)
 
     unique_region_types = set()
     for order in open_orders:
-        # We only care about sell orders, as those are the ones we check for undercuts.
-        if not order.get('is_buy_order'):
-            region_id = _resolve_location_to_region_id(order['location_id'], character)
-            if region_id:
-                unique_region_types.add((region_id, order['type_id']))
+        region_id = _resolve_location_to_region_id(order['location_id'], character)
+        if region_id:
+            unique_region_types.add((region_id, order['type_id']))
 
     if not unique_region_types:
         return
@@ -2756,32 +2754,43 @@ def process_character_orders(character_id: int) -> list[dict]:
                 logging.warning(f"Could not resolve region for location {order['location_id']} on order {order['order_id']}. Skipping undercut check for this order.")
                 continue
 
-            # Skip buy orders for now, as we only care about our sell orders being undercut.
-            if order.get('is_buy_order'):
-                continue
-
             if region_id not in market_data_cache: market_data_cache[region_id] = {}
             if order['type_id'] not in market_data_cache[region_id]:
-                # Fetch all sell orders for this item in the region
+                # Fetch all orders for this item in the region to handle both undercuts and outbids
                 regional_orders = get_region_market_orders(region_id, order['type_id'], force_revalidate=True)
                 if regional_orders:
-                    # We only care about sell orders for undercut checks
-                    sell_orders = [o for o in regional_orders if not o.get('is_buy_order')]
-                    market_data_cache[region_id][order['type_id']] = sorted(sell_orders, key=lambda x: x['price'])
+                    sell_orders = sorted([o for o in regional_orders if not o.get('is_buy_order')], key=lambda x: x['price'])
+                    buy_orders = sorted([o for o in regional_orders if o.get('is_buy_order')], key=lambda x: x['price'], reverse=True)
+                    market_data_cache[region_id][order['type_id']] = {
+                        'sell': sell_orders,
+                        'buy': buy_orders
+                    }
 
-            is_undercut, competitor = False, None
-            regional_prices = market_data_cache.get(region_id, {}).get(order['type_id'])
+            is_outbid_or_undercut, competitor = False, None
+            regional_market_orders = market_data_cache.get(region_id, {}).get(order['type_id'])
 
-            if regional_prices:
-                # Find the best price that isn't our own order
-                for best_sell in regional_prices:
-                    if best_sell['order_id'] != order['order_id']:
-                        if best_sell['price'] < order['price']:
-                            is_undercut, competitor = True, best_sell
-                        break # We only need to compare against the very best competitor
+            if regional_market_orders:
+                if order.get('is_buy_order'):
+                    # This is a buy order, check for outbids (someone buying for more)
+                    buy_orders = regional_market_orders.get('buy', [])
+                    for best_buy in buy_orders:
+                        if best_buy['order_id'] != order['order_id']:
+                            if best_buy['price'] > order['price']:
+                                is_outbid_or_undercut, competitor = True, best_buy
+                            # Since the list is sorted descending, the first one is the best competitor
+                            break
+                else:
+                    # This is a sell order, check for undercuts (someone selling for less)
+                    sell_orders = regional_market_orders.get('sell', [])
+                    for best_sell in sell_orders:
+                        if best_sell['order_id'] != order['order_id']:
+                            if best_sell['price'] < order['price']:
+                                is_outbid_or_undercut, competitor = True, best_sell
+                            # Since the list is sorted ascending, the first one is the best competitor
+                            break
 
-            new_statuses.append({'order_id': order['order_id'], 'is_undercut': is_undercut, 'competitor_price': competitor['price'] if competitor else None, 'competitor_location_id': competitor['location_id'] if competitor else None})
-            if is_undercut and not previous_statuses.get(order['order_id'], {}).get('is_undercut', False):
+            new_statuses.append({'order_id': order['order_id'], 'is_undercut': is_outbid_or_undercut, 'competitor_price': competitor['price'] if competitor else None, 'competitor_location_id': competitor['location_id'] if competitor else None})
+            if is_outbid_or_undercut and not previous_statuses.get(order['order_id'], {}).get('is_undercut', False):
                 notifications_to_send.append({'my_order': order, 'competitor': competitor})
 
         if new_statuses:
@@ -2794,12 +2803,24 @@ def process_character_orders(character_id: int) -> list[dict]:
                 my_order, competitor = notif['my_order'], notif['competitor']
                 jumps = get_jump_distance(my_order['location_id'], competitor['location_id'], character)
                 location_line = f"`{id_to_name.get(competitor['location_id'], 'Unknown')}`" + (f" ({jumps} jumps)" if jumps is not None else "")
-                msg = (f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
-                       f"Your {'Buy' if my_order.get('is_buy_order') else 'Sell'} order for **{id_to_name.get(my_order['type_id'])}** has been undercut.\n\n"
+
+                if my_order.get('is_buy_order'):
+                    title = f"❗️ *Buy Order Outbid ({character.name})* ❗️"
+                    body = f"Your buy order for **{id_to_name.get(my_order['type_id'])}** has been outbid."
+                    competitor_price_label = "Highest Bid"
+                    competitor_location_label = "Highest Bid Location"
+                else:
+                    title = f"❗️ *Sell Order Undercut ({character.name})* ❗️"
+                    body = f"Your sell order for **{id_to_name.get(my_order['type_id'])}** has been undercut."
+                    competitor_price_label = "Lowest Price"
+                    competitor_location_label = "Lowest Price Location"
+
+                msg = (f"{title}\n\n"
+                       f"{body}\n\n"
                        f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
                        f"  • **Your Location:** `{id_to_name.get(my_order['location_id'])}`\n"
-                       f"  • **Best Market Price:** `{competitor['price']:,.2f}` ISK\n"
-                       f"  • **Best Price Location:** {location_line}\n\n"
+                       f"  • **{competitor_price_label}:** `{competitor['price']:,.2f}` ISK\n"
+                       f"  • **{competitor_location_label}:** {location_line}\n\n"
                        f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`")
                 notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
 
