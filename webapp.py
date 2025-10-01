@@ -3,11 +3,7 @@ import database
 import logging
 import requests
 from flask import Flask, request, redirect, render_template_string
-from tasks import (
-    seed_character_data_task,
-    send_welcome_and_menu,
-    check_new_characters,
-)
+from tasks import seed_character_data_task, send_welcome_and_menu
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -243,11 +239,6 @@ def callback():
             send_welcome_and_menu.delay(telegram_user_id, character_name)
             # Add a small delay to ensure the welcome message appears before the "sync complete" message if seeding is very fast.
             seed_character_data_task.apply_async(args=[character_id], countdown=5)
-        else:
-            # If the character is not new, it's a re-authentication.
-            # Trigger the task that handles "welcome back" messages and permission updates.
-            logging.info(f"Triggering check_new_characters task for re-authenticated character {character_name} ({character_id}).")
-            check_new_characters.delay()
 
         # 5. Show the success page to the user
         bot_username = os.getenv("TELEGRAM_BOT_USERNAME")
