@@ -29,6 +29,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram with a single button press. The bot offers several timeframes: "Last Day," "Last 7 Days," "Last 30 Days," and "All Time."
   - **Advanced Visualization**: Charts display profit as a cumulative area graph (showing gains and losses over the period) while sales and fees are shown as non-cumulative bar graphs for easy comparison.
   - **Intelligent Caching**: Charts are cached intelligently to ensure fast delivery. "Last Day" charts are cached hourly, daily charts are cached for the day, and the "All Time" chart is only regenerated when new transaction data is detected.
+  - **Top Profitable Items**: Each chart is accompanied by a list of the top 5 most profitable items sold during that period, showing their net profit.
 - **Highly Configurable**: All major settings (wallet alerts, notification types, etc.) are configurable on a per-character basis via the bot's menu.
 - **Robust & Persistent**: Employs a sophisticated caching strategy using a PostgreSQL database. Background polling tasks continuously fetch data from ESI, and user-facing commands read from this fast, local cache. This minimizes API calls, prevents duplicate notifications, and ensures the bot remains responsive even during ESI slowdowns.
 - **Non-Blocking History Backfill**: To provide an excellent user experience, the bot uses a two-phase backfill process for characters with large transaction histories.
