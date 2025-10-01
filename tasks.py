@@ -226,8 +226,9 @@ def continue_backfill_character_history(self, character_id: int):
 
     min_transaction_id = min(tx['transaction_id'] for tx in transactions)
     if before_id is not None and min_transaction_id >= before_id:
-        logging.critical(f"Backfill for character {character_id} is stuck. Halting.")
+        logging.warning(f"Backfill for character {character_id} reached the end (min_transaction_id {min_transaction_id} >= before_id {before_id}). Finalizing.")
         update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
+        set_bot_state(f"history_backfilled_{character.id}", "true") # Explicitly mark as complete
         return
 
     update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
