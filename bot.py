@@ -15,7 +15,6 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 import io
 import calendar
 from PIL import Image
-import psycopg2
 
 # Configure logging
 log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
@@ -1097,6 +1096,7 @@ def get_full_wallet_journal_from_db(character_id: int):
     It would need to be filled by a backfill and continuous polling of the
     /characters/{character_id}/wallet/journal ESI endpoint.
     """
+    import psycopg2
     conn = database.get_db_connection()
     processed_entries = []
     try:
@@ -1194,6 +1194,7 @@ def get_cached_chart(chart_key: str):
 
 def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes):
     """Saves or updates a chart in the database cache."""
+    import psycopg2
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
@@ -1987,6 +1988,7 @@ def get_image_from_cache(url: str):
 
 def save_image_to_cache(url: str, etag: str, data: bytes):
     """Saves or updates an image in the database cache."""
+    import psycopg2
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
