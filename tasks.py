@@ -1,6 +1,7 @@
 import logging
 import os
 import telegram
+import asyncio
 from celery_app import celery
 
 # These imports anticipate the refactoring of bot.py into app_utils.py in the next step.
@@ -28,6 +29,7 @@ from app_utils import (
     get_characters_with_daily_overview_enabled,
     send_daily_overview_for_character,
     send_main_menu_sync,
+    send_main_menu_async,
     send_telegram_message_sync
 )
 
@@ -43,31 +45,43 @@ def get_bot():
 
 # --- New Tasks (Triggered by Webapp) ---
 
-@celery.task(name='tasks.send_welcome_and_menu')
-def send_welcome_and_menu(telegram_user_id: int, character_name: str):
-    """
-    Sends the initial welcome message and main menu to a new user.
-    Also cleans up the original "add character" prompt.
-    """
-    logging.info(f"Sending welcome message for new character {character_name} to user {telegram_user_id}.")
-    bot = get_bot()
-
-    # Clean up the initial "Add Character" prompt
+async def _send_welcome_sequence(bot: telegram.Bot, telegram_user_id: int, character_name: str):
+    """A helper coroutine to run all async Telegram calls in one event loop."""
+    # 1. Clean up the initial "Add Character" prompt
     prompt_key = f"add_character_prompt_{telegram_user_id}"
     prompt_message_info = get_bot_state(prompt_key)
     if prompt_message_info:
         try:
             chat_id_str, message_id_str = prompt_message_info.split(':')
-            bot.delete_message(chat_id=int(chat_id_str), message_id=int(message_id_str))
+            await bot.delete_message(chat_id=int(chat_id_str), message_id=int(message_id_str))
             logging.info(f"Deleted 'add character' prompt for user {telegram_user_id}")
-            set_bot_state(prompt_key, "") # Clear the state
+            set_bot_state(prompt_key, "")  # Clear the state
         except Exception as e:
+            # Log error but don't stop the sequence
             logging.error(f"Error deleting 'add character' prompt for user {telegram_user_id}: {e}")
 
-    # Send welcome message and main menu
+    # 2. Send welcome message
     welcome_msg = f"✅ Character **{character_name}** added! Starting initial data sync in the background. This might take a few minutes."
-    send_telegram_message_sync(bot, welcome_msg, telegram_user_id)
-    send_main_menu_sync(bot, telegram_user_id)
+    await bot.send_message(chat_id=telegram_user_id, text=welcome_msg, parse_mode='Markdown')
+
+    # 3. Send main menu
+    await send_main_menu_async(bot, telegram_user_id)
+
+
+@celery.task(name='tasks.send_welcome_and_menu')
+def send_welcome_and_menu(telegram_user_id: int, character_name: str):
+    """
+    Sends the initial welcome message and main menu to a new user by running
+    an async sequence in a single event loop.
+    """
+    logging.info(f"Sending welcome message for new character {character_name} to user {telegram_user_id}.")
+    bot = get_bot()
+    try:
+        # Run the entire async sequence in a single event loop.
+        asyncio.run(_send_welcome_sequence(bot, telegram_user_id, character_name))
+        logging.info(f"Successfully sent welcome sequence to user {telegram_user_id}.")
+    except Exception as e:
+        logging.error(f"Error running welcome sequence for user {telegram_user_id}: {e}", exc_info=True)
 
 
 @celery.task(name='tasks.seed_character_data_task')
