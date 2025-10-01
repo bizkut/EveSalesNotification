@@ -1,8 +1,8 @@
 import os
 import logging
-from psycopg2 import pool
 
 # The pool is initialized to None at the module level.
+# Crucially, psycopg2 is NOT imported here.
 db_pool = None
 
 def _initialize_pool():
@@ -11,6 +11,10 @@ def _initialize_pool():
     by get_db_connection the first time a connection is requested in a process.
     """
     global db_pool
+    # Import psycopg2 here, inside the function, to ensure it's loaded after
+    # the worker process has forked.
+    from psycopg2 import pool
+
     # Check again inside the function to handle race conditions if using threads.
     if db_pool is None:
         try:
@@ -42,5 +46,14 @@ def get_db_connection():
 
 def release_db_connection(conn):
     """Releases a connection back to the pool."""
-    if db_pool:
-        db_pool.putconn(conn)
+    if db_pool and conn:
+        try:
+            db_pool.putconn(conn)
+        except Exception as e:
+            logging.error(f"Error releasing DB connection: {e}", exc_info=True)
+            # In case of an error (e.g., pool is already closed),
+            # try to close the connection directly.
+            try:
+                conn.close()
+            except Exception as close_e:
+                logging.error(f"Failed to close connection after release error: {close_e}", exc_info=True)
