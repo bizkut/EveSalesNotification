@@ -3,10 +3,6 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-import matplotlib
-matplotlib.use('Agg')  # Use a non-interactive backend
-import matplotlib.pyplot as plt
-
 # Local imports are used within functions to prevent circular dependencies
 # with the 'bot' module, which will be importing this one.
 
@@ -70,6 +66,9 @@ def generate_last_day_chart(character_id: int):
     """
     Generates a chart for the last 24 hours, processing events chronologically to ensure accuracy.
     """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
     import bot
     character = bot.get_character_by_id(character_id)
     if not character: return None
@@ -164,6 +163,9 @@ def generate_last_day_chart(character_id: int):
 
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     """Helper to generate charts with a daily breakdown (last 7/30 days)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
     import bot
     character = bot.get_character_by_id(character_id)
     if not character: return None
@@ -267,6 +269,9 @@ def generate_last_30_days_chart(character_id: int):
 
 def generate_all_time_chart(character_id: int):
     """Generates a monthly breakdown chart for the character's entire history."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
     import bot
     character = bot.get_character_by_id(character_id)
     if not character: return None
