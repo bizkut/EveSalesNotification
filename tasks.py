@@ -323,33 +323,36 @@ def generate_chart_task(character_id: int, chart_type: str, chat_id: int, genera
             'lastday': "Last Day", '7days': "Last 7 Days",
             '30days': "Last 30 Days", 'alltime': "All Time"
         }
-        caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-        # The back button now goes to the overview command, which will regenerate the overview message
+        base_caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
         keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Check for cached chart first
         if not (chart_type == 'alltime' and is_dirty):
-            cached_chart_data = get_cached_chart(chart_key)
-            if cached_chart_data:
+            cached_item = get_cached_chart(chart_key)
+            if cached_item:
                 logging.info(f"Using cached chart for key: {chart_key}")
+                cached_chart_data = cached_item.get('chart_data')
+                cached_caption_suffix = cached_item.get('caption_suffix', "")
+                full_caption = base_caption + (cached_caption_suffix or "")
+
                 await bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
-                await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(bytes(cached_chart_data)), caption=caption, reply_markup=reply_markup)
+                await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(bytes(cached_chart_data)), caption=full_caption, parse_mode='Markdown', reply_markup=reply_markup)
                 return
 
         logging.info(f"Generating new chart for key: {chart_key} (All-Time Dirty: {is_dirty if chart_type == 'alltime' else 'N/A'})")
-        chart_buffer = None
+        chart_buffer, caption_suffix = None, None
         try:
             # These chart generation functions are synchronous and CPU-bound,
             # so they are fine to call directly from a Celery task.
             if chart_type == 'lastday':
-                chart_buffer = generate_last_day_chart(character_id)
+                chart_buffer, caption_suffix = generate_last_day_chart(character_id)
             elif chart_type == '7days':
-                chart_buffer = generate_last_7_days_chart(character_id)
+                chart_buffer, caption_suffix = generate_last_7_days_chart(character_id)
             elif chart_type == '30days':
-                chart_buffer = generate_last_30_days_chart(character_id)
+                chart_buffer, caption_suffix = generate_last_30_days_chart(character_id)
             elif chart_type == 'alltime':
-                chart_buffer = generate_all_time_chart(character_id)
+                chart_buffer, caption_suffix = generate_all_time_chart(character_id)
         except Exception as e:
             logging.error(f"Error generating chart for char {character_id}: {e}", exc_info=True)
             await bot.edit_message_text(text=f"An error occurred while generating the chart for {character.name}.", chat_id=chat_id, message_id=generating_message_id, reply_markup=reply_markup)
@@ -359,11 +362,14 @@ def generate_chart_task(character_id: int, chart_type: str, chat_id: int, genera
         await bot.delete_message(chat_id=chat_id, message_id=generating_message_id)
 
         if chart_buffer:
-            save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue())
+            # Save both the chart and the new caption suffix to the cache
+            save_chart_to_cache(chart_key, character_id, chart_buffer.getvalue(), caption_suffix)
             if chart_type == 'alltime':
                 set_bot_state(f"chart_cache_dirty_{character_id}", "false")
+
+            full_caption = base_caption + (caption_suffix or "")
             chart_buffer.seek(0)
-            await bot.send_photo(chat_id=chat_id, photo=chart_buffer, caption=caption, reply_markup=reply_markup)
+            await bot.send_photo(chat_id=chat_id, photo=chart_buffer, caption=full_caption, parse_mode='Markdown', reply_markup=reply_markup)
         else:
             await bot.send_message(chat_id=chat_id, text=f"Could not generate chart for {character.name}. No data available for the period.", reply_markup=reply_markup)
 

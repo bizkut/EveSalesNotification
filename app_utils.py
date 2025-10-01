@@ -345,6 +345,13 @@ def setup_database():
                 )
             """)
 
+            # Migration: Add caption_suffix to chart_cache table
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'chart_cache' AND column_name = 'caption_suffix'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'caption_suffix' column to chart_cache table...")
+                cursor.execute("ALTER TABLE chart_cache ADD COLUMN caption_suffix TEXT;")
+                logging.info("Migration for 'caption_suffix' complete.")
+
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS undercut_statuses (
                     order_id BIGINT NOT NULL,
@@ -1160,35 +1167,36 @@ def delete_character(character_id: int):
 
 
 def get_cached_chart(chart_key: str):
-    """Retrieves a cached chart from the database."""
+    """Retrieves a cached chart and its caption suffix from the database."""
     conn = database.get_db_connection()
-    chart_data = None
+    cached_data = None
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT chart_data FROM chart_cache WHERE chart_key = %s", (chart_key,))
+            cursor.execute("SELECT chart_data, caption_suffix FROM chart_cache WHERE chart_key = %s", (chart_key,))
             row = cursor.fetchone()
             if row:
-                chart_data = row[0]
+                cached_data = {'chart_data': row[0], 'caption_suffix': row[1]}
     finally:
         database.release_db_connection(conn)
-    return chart_data
+    return cached_data
 
 
-def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes):
-    """Saves or updates a chart in the database cache."""
+def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes, caption_suffix: str = None):
+    """Saves or updates a chart and its caption suffix in the database cache."""
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
             binary_data = psycopg2.Binary(chart_data)
             cursor.execute(
                 """
-                INSERT INTO chart_cache (chart_key, character_id, chart_data, generated_at)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO chart_cache (chart_key, character_id, chart_data, generated_at, caption_suffix)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (chart_key) DO UPDATE SET
                     chart_data = EXCLUDED.chart_data,
-                    generated_at = EXCLUDED.generated_at;
+                    generated_at = EXCLUDED.generated_at,
+                    caption_suffix = EXCLUDED.caption_suffix;
                 """,
-                (chart_key, character_id, binary_data, datetime.now(timezone.utc))
+                (chart_key, character_id, binary_data, datetime.now(timezone.utc), caption_suffix)
             )
             conn.commit()
     finally:
@@ -3034,15 +3042,84 @@ def format_isk(value):
     return f"{value:.2f}"
 
 
+def _calculate_top_profitable_items(events_in_period: list, initial_inventory: dict, character_id: int) -> str:
+    """
+    Calculates the top 5 most profitable items from a list of events and returns a formatted string.
+    This helper function is designed to be called by the various chart generation functions.
+    """
+    inventory = initial_inventory.copy()
+    item_profits = defaultdict(lambda: {'profit': 0, 'sales_value': 0})
+
+    # First, process all buys in the period to update the inventory
+    for event in events_in_period:
+        if event['type'] == 'tx' and event['data'].get('is_buy'):
+            tx = event['data']
+            inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+
+    # Then, process all sales and fees
+    for event in events_in_period:
+        if event['type'] == 'tx' and not event['data'].get('is_buy'):
+            tx = event['data']
+            sale_value = tx['quantity'] * tx['unit_price']
+
+            cogs = 0
+            remaining_to_sell = tx['quantity']
+            lots = inventory.get(tx['type_id'], [])
+            if lots:
+                consumed_count = 0
+                for lot in lots:
+                    if remaining_to_sell <= 0: break
+                    take = min(remaining_to_sell, lot['quantity'])
+                    cogs += take * lot['price']
+                    remaining_to_sell -= take
+                    lot['quantity'] -= take
+                    if lot['quantity'] == 0: consumed_count += 1
+                inventory[tx['type_id']] = lots[consumed_count:]
+
+            # Only track profit if COGS could be fully determined
+            if remaining_to_sell == 0:
+                net_profit = sale_value - cogs
+                item_profits[tx['type_id']]['profit'] += net_profit
+                item_profits[tx['type_id']]['sales_value'] += sale_value
+
+    if not item_profits:
+        return ""
+
+    # Sort items by profit in descending order
+    sorted_items = sorted(item_profits.items(), key=lambda item: item[1]['profit'], reverse=True)
+
+    # Get the top 5
+    top_5_items = sorted_items[:5]
+
+    if not top_5_items:
+        return ""
+
+    # Resolve names for the top 5 items
+    type_ids = [item_id for item_id, data in top_5_items]
+    character = get_character_by_id(character_id)
+    id_to_name = get_names_from_ids(type_ids, character)
+
+    # Format the output string
+    lines = ["\n\n*Top 5 Profitable Items (Net Profit):*"]
+    for item_id, data in top_5_items:
+        name = id_to_name.get(item_id, f"Unknown Item ID: {item_id}")
+        profit_in_millions = data['profit'] / 1_000_000
+        lines.append(f"  - `{name}`: `{profit_in_millions:,.2f}m ISK`")
+
+    return "\n".join(lines)
+
+
 def generate_last_day_chart(character_id: int):
     """
     Generates a chart for the last 24 hours, processing events chronologically to ensure accuracy.
+    Also calculates the top 5 profitable items for the period.
+    Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
     """
     import matplotlib
     matplotlib.use('Agg')  # Use a non-interactive backend
     import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
-    if not character: return None
+    if not character: return None, None
 
     now = datetime.now(timezone.utc)
     start_of_period = now - timedelta(days=1)
@@ -3053,9 +3130,17 @@ def generate_last_day_chart(character_id: int):
     # If there are no events, there's nothing to chart.
     if not any(e['type'] == 'tx' and not e['data'].get('is_buy') for e in events_in_period) and \
        not any(e['type'] == 'fee' for e in events_in_period):
-        return None
+        return None, None
 
-    # --- Data Preparation ---
+    # --- Top Items Calculation ---
+    # Create a deep copy of the inventory for the profit calculation to not interfere with the chart calculation
+    inventory_for_profit_calc = defaultdict(list)
+    for type_id, lots in inventory.items():
+        inventory_for_profit_calc[type_id] = [lot.copy() for lot in lots]
+    caption_suffix = _calculate_top_profitable_items(events_in_period, inventory_for_profit_calc, character_id)
+
+
+    # --- Data Preparation for Chart ---
     hour_labels = [(start_of_period + timedelta(hours=i)).strftime('%H:00') for i in range(24)]
     hourly_sales = {label: 0 for label in hour_labels}
     hourly_fees = {label: 0 for label in hour_labels}
@@ -3064,7 +3149,7 @@ def generate_last_day_chart(character_id: int):
     accumulated_profit = 0
     event_idx = 0
 
-    # --- Chronological Event Processing ---
+    # --- Chronological Event Processing for Chart ---
     for i in range(24):
         hour_start = start_of_period + timedelta(hours=i)
         hour_end = hour_start + timedelta(hours=1)
@@ -3143,15 +3228,19 @@ def generate_last_day_chart(character_id: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    return buf
+    return buf, caption_suffix
 
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
-    """Helper to generate charts with a daily breakdown (last 7/30 days)."""
+    """
+    Helper to generate charts with a daily breakdown (last 7/30 days).
+    Also calculates the top 5 profitable items for the period.
+    Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
+    """
     import matplotlib
     matplotlib.use('Agg')  # Use a non-interactive backend
     import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
-    if not character: return None
+    if not character: return None, None
 
     now = datetime.now(timezone.utc)
     start_of_period = (now - timedelta(days=days_to_show-1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -3160,9 +3249,15 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
 
     if not any(e['type'] == 'tx' and not e['data'].get('is_buy') for e in events_in_period) and \
        not any(e['type'] == 'fee' for e in events_in_period):
-        return None
+        return None, None
 
-    # --- Data Preparation ---
+    # --- Top Items Calculation ---
+    inventory_for_profit_calc = defaultdict(list)
+    for type_id, lots in inventory.items():
+        inventory_for_profit_calc[type_id] = [lot.copy() for lot in lots]
+    caption_suffix = _calculate_top_profitable_items(events_in_period, inventory_for_profit_calc, character_id)
+
+    # --- Data Preparation for Chart ---
     days = [(start_of_period + timedelta(days=i)) for i in range(days_to_show)]
     label_format = '%d' if days_to_show == 30 else '%m-%d'
     bar_labels = [d.strftime(label_format) for d in days]
@@ -3173,7 +3268,7 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     accumulated_profit = 0
     event_idx = 0
 
-    # --- Chronological Event Processing ---
+    # --- Chronological Event Processing for Chart ---
     for day_start in days:
         day_end = day_start + timedelta(days=1)
         day_label = day_start.strftime(label_format)
@@ -3248,7 +3343,7 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    return buf
+    return buf, caption_suffix
 
 def generate_last_7_days_chart(character_id: int):
     """Generates a chart for the last 7 days."""
@@ -3259,17 +3354,27 @@ def generate_last_30_days_chart(character_id: int):
     return _generate_daily_breakdown_chart(character_id, 30)
 
 def generate_all_time_chart(character_id: int):
-    """Generates a monthly breakdown chart for the character's entire history."""
+    """
+    Generates a monthly breakdown chart for the character's entire history.
+    Also calculates the top 5 profitable items for the period.
+    Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
+    """
     import matplotlib
     matplotlib.use('Agg')  # Use a non-interactive backend
     import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
-    if not character: return None
+    if not character: return None, None
 
     inventory, events_in_period = _prepare_chart_data(character_id, datetime.min.replace(tzinfo=timezone.utc))
-    if not events_in_period: return None
+    if not events_in_period: return None, None
 
-    # --- Data Preparation ---
+    # --- Top Items Calculation ---
+    inventory_for_profit_calc = defaultdict(list)
+    for type_id, lots in inventory.items():
+        inventory_for_profit_calc[type_id] = [lot.copy() for lot in lots]
+    caption_suffix = _calculate_top_profitable_items(events_in_period, inventory_for_profit_calc, character_id)
+
+    # --- Data Preparation for Chart ---
     start_date = events_in_period[0]['date']
     end_date = datetime.now(timezone.utc)
     months = []
@@ -3365,7 +3470,7 @@ def generate_all_time_chart(character_id: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    return buf
+    return buf, caption_suffix
 
 
 def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int, top_message: str = None):
