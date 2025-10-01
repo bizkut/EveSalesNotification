@@ -7,3 +7,4 @@ matplotlib
 Pillow
 celery
 redis
+nest_asyncio
