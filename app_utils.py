@@ -939,21 +939,6 @@ def get_characters_needing_update():
     return character_ids
 
 
-def get_characters_needing_update():
-    """Retrieves all characters that have been newly added or updated and need a notification."""
-    conn = database.get_db_connection()
-    character_ids = []
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT character_id FROM characters WHERE needs_update_notification = TRUE"
-            )
-            character_ids = [row[0] for row in cursor.fetchall()]
-    finally:
-        database.release_db_connection(conn)
-    return character_ids
-
-
 def reset_update_notification_flag(character_id: int):
     """Resets the needs_update_notification flag for a character to FALSE."""
     conn = database.get_db_connection()
@@ -2591,55 +2576,6 @@ async def master_orders_poll(application):
         except Exception as e:
             logging.error(f"Error in master_orders_poll: {e}", exc_info=True)
         await asyncio.sleep(delay)
-
-
-async def master_check_new_characters_poll(application):
-    """Periodically checks for newly added characters and sends them a welcome message."""
-    while True:
-        await asyncio.sleep(5)  # Check every 5 seconds
-        try:
-            new_character_ids = get_characters_needing_update()
-            if not new_character_ids:
-                continue
-
-            logging.info(f"Found {len(new_character_ids)} new character(s) to process.")
-            load_characters_from_db()  # Reload all characters to get the new ones
-
-            for char_id in new_character_ids:
-                character = get_character_by_id(char_id)
-                if not character:
-                    logging.error(f"Could not find new character {char_id} in memory after reloading.")
-                    continue
-
-                # Perform initial data seeding in a separate thread to avoid blocking
-                seed_success = await asyncio.to_thread(seed_data_for_character, character)
-
-                # Send welcome message
-                if seed_success:
-                    welcome_message = (
-                        f"🎉 Welcome, {character.name}! 🎉\n\n"
-                        "I've successfully added your character and performed an initial sync of your market data. "
-                        "You can now use the main menu to get started. Try /start"
-                    )
-                else:
-                    welcome_message = (
-                        f"⚠️ Welcome, {character.name}! ⚠️\n\n"
-                        "I've added your character, but encountered an error during the initial data sync. "
-                        "Some features may not work correctly. Please try again later or contact support."
-                    )
-
-                await application.bot.send_message(
-                    chat_id=character.telegram_user_id,
-                    text=welcome_message,
-                    parse_mode='Markdown'
-                )
-
-                # Reset the flag so we don't process them again
-                reset_update_notification_flag(character.id)
-                logging.info(f"Successfully processed and welcomed new character {character.name}.")
-
-        except Exception as e:
-            logging.error(f"Error in master_check_new_characters_poll: {e}", exc_info=True)
 
 
 async def master_check_new_characters_poll(application):
