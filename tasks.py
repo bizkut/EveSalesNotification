@@ -6,11 +6,13 @@ from celery_app import celery
 # These imports anticipate the refactoring of bot.py into app_utils.py in the next step.
 # These functions will be made synchronous and moved to app_utils.
 from app_utils import (
+    load_characters_from_db,
     get_character_by_id,
     update_character_backfill_state,
     get_wallet_transactions,
     add_historical_transactions_to_db,
     add_purchase_lot,
+    get_bot_state,
     set_bot_state,
     get_all_character_ids,
     process_character_wallet,
@@ -114,6 +116,8 @@ def send_daily_overview(character_id: int):
 def check_new_characters():
     """Periodically checks for new or updated characters, seeds their data, and notifies the user."""
     logging.info("Running job to check for new and updated characters.")
+    # Force a reload of characters from the DB to ensure this worker has the latest data.
+    load_characters_from_db()
     try:
         db_chars_info = get_new_and_updated_character_info()
         if not db_chars_info:
@@ -125,6 +129,20 @@ def check_new_characters():
             if not character:
                 logging.error(f"Could not find details for character ID {char_id} in the database.")
                 continue
+
+            # --- Clean up the initial "Add Character" prompt ---
+            prompt_key = f"add_character_prompt_{character.telegram_user_id}"
+            prompt_message_info = get_bot_state(prompt_key)
+            if prompt_message_info:
+                try:
+                    chat_id_str, message_id_str = prompt_message_info.split(':')
+                    bot.delete_message(chat_id=int(chat_id_str), message_id=int(message_id_str))
+                    logging.info(f"Deleted 'add character' prompt for user {character.telegram_user_id}")
+                    # Clear the state so we don't try to delete it again
+                    set_bot_state(prompt_key, "")
+                except Exception as e:
+                    logging.error(f"Error deleting 'add character' prompt for user {character.telegram_user_id}: {e}")
+            # --- End prompt cleanup ---
 
             if info.get('is_new'):
                 logging.info(f"Processing new character: {character.name} ({char_id})")
