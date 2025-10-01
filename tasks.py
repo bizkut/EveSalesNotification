@@ -27,6 +27,7 @@ from app_utils import (
     delete_character,
     get_characters_with_daily_overview_enabled,
     send_daily_overview_for_character,
+    send_main_menu_sync,
     send_telegram_message_sync
 )
 
@@ -154,6 +155,9 @@ def check_new_characters():
                     msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
                     send_telegram_message_sync(bot, msg, character.telegram_user_id)
 
+                # After sending the status, show the main menu
+                send_main_menu_sync(bot, character.telegram_user_id)
+
             elif info.get('needs_update'):
                 logging.info(f"Processing updated character: {character.name} ({char_id})")
                 if get_character_deletion_status(char_id):
@@ -163,6 +167,9 @@ def check_new_characters():
                     msg = f"✅ Successfully updated permissions for character **{character.name}**."
                 send_telegram_message_sync(bot, msg, character.telegram_user_id)
                 reset_update_notification_flag(char_id)
+
+                # After sending the status, show the main menu
+                send_main_menu_sync(bot, character.telegram_user_id)
     except Exception as e:
         logging.error(f"Error in check_new_characters task: {e}", exc_info=True)
 

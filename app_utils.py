@@ -2930,6 +2930,42 @@ def _format_overview_message(overview_data: dict, character: Character) -> tuple
     ]
     return message, InlineKeyboardMarkup(keyboard)
 
+def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int):
+    """Constructs and sends the main menu to a user, callable from a sync task."""
+    user_characters = get_characters_for_user(telegram_user_id)
+    if not user_characters:
+        # This function should only be called for users with characters,
+        # but as a safeguard, we'll log a warning and do nothing.
+        logging.warning(f"send_main_menu_sync called for user {telegram_user_id} with no characters. Aborting.")
+        return
+
+    message = (
+        f"You have {len(user_characters)} character(s) registered. "
+        "Please choose an option from the main menu:"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton("💰 View Balances", callback_data="balance"),
+            InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
+        ],
+        [
+            InlineKeyboardButton("📈 View Sales", callback_data="sales"),
+            InlineKeyboardButton("🛒 View Buys", callback_data="buys")
+        ],
+        [
+            InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
+            InlineKeyboardButton("📊 Request Overview", callback_data="overview")
+        ],
+        [
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+            InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
+            InlineKeyboardButton("🗑️ Remove", callback_data="remove")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    send_telegram_message_sync(bot, message, telegram_user_id, reply_markup=reply_markup)
+
+
 def send_daily_overview_for_character(character_id: int, bot):
     """Generates and sends the daily overview for a single character."""
     character = get_character_by_id(character_id)
