@@ -41,7 +41,8 @@ from app_utils import (
     add_purchase_lot, get_character_skills, _create_character_info_image,
     _resolve_location_to_system_id, delete_character,
     get_new_and_updated_character_info, get_characters_to_purge,
-    _calculate_overview_data, _format_overview_message
+    _calculate_overview_data, _format_overview_message,
+    backfill_character_journal_history, _prepare_chart_data
 )
 
 
@@ -506,7 +507,7 @@ def generate_hourly_chart(character_id: int):
     now = datetime.now(timezone.utc)
     start_of_period = now - timedelta(days=1)
 
-    accumulated_profit, inventory, events_in_period = _get_chart_data(character_id, start_of_period)
+    accumulated_profit, inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
     cumulative_profit_over_time = [accumulated_profit]
 
     hours = [(start_of_period + timedelta(hours=i)) for i in range(24)]
