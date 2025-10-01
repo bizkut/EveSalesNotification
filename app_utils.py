@@ -2363,15 +2363,42 @@ def _create_character_info_image(character_id, corporation_id, alliance_id=None)
 def get_new_and_updated_character_info():
     """
     Fetches information about new and updated characters from the database.
-    Returns a dictionary mapping character_id to their update status.
+    A character is 'new' if they do not have a 'history_backfilled' state.
+    Returns a dictionary mapping character_id to their status.
+    e.g., {123: {'is_new': True}, 456: {'needs_update': True}}
     """
     conn = database.get_db_connection()
     db_chars_info = {}
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT character_id, needs_update_notification FROM characters")
-            for row in cursor.fetchall():
-                db_chars_info[row[0]] = {'needs_update': row[1]}
+            # Get all characters that aren't marked for deletion
+            cursor.execute("SELECT character_id, needs_update_notification FROM characters WHERE deletion_scheduled_at IS NULL")
+            all_chars = cursor.fetchall()
+            if not all_chars:
+                return {}
+
+            all_char_ids = [row[0] for row in all_chars]
+
+            # Find which of these characters have the 'history_backfilled' state
+            state_keys = [f"history_backfilled_{char_id}" for char_id in all_char_ids]
+            placeholders = ','.join(['%s'] * len(state_keys))
+            cursor.execute(f"SELECT key FROM bot_state WHERE key IN ({placeholders})", state_keys)
+
+            backfilled_keys = {row[0] for row in cursor.fetchall()}
+
+            for char_id, needs_update in all_chars:
+                info = {}
+                # Check if the character is new
+                if f"history_backfilled_{char_id}" not in backfilled_keys:
+                    info['is_new'] = True
+
+                # Check if the character needs a credential update notification
+                if needs_update:
+                    info['needs_update'] = True
+
+                if info: # Only add to dict if there's something to do
+                    db_chars_info[char_id] = info
+
     finally:
         database.release_db_connection(conn)
     return db_chars_info
