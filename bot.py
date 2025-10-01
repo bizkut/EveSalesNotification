@@ -1089,7 +1089,14 @@ def main() -> None:
     setup_database()
     load_characters_from_db()
 
-    application = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    # Increase the timeout to handle slow network conditions
+    application = (
+        Application.builder()
+        .token(os.getenv("TELEGRAM_BOT_TOKEN"))
+        .connect_timeout(30)
+        .read_timeout(30)
+        .build()
+    )
 
     # --- Add command handlers ---
     application.add_handler(CommandHandler("start", start_command))
