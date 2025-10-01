@@ -893,6 +893,8 @@ async def post_init(application: Application):
     asyncio.create_task(app_utils.master_order_history_poll(application))
     asyncio.create_task(app_utils.master_orders_poll(application))
     asyncio.create_task(app_utils.master_contracts_poll(application))
+    asyncio.create_task(app_utils.master_check_new_characters_poll(application))
+    asyncio.create_task(app_utils.master_check_new_characters_poll(application))
     logging.info("Master polling loops have been started.")
 
 async def purge_deleted_characters_job(context: ContextTypes.DEFAULT_TYPE) -> None:
