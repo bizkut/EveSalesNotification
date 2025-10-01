@@ -26,6 +26,24 @@ celery.conf.update(
     result_serializer='json',
     timezone='UTC',
     enable_utc=True,
+    beat_schedule={
+        'dispatch-character-polls': {
+            'task': 'tasks.dispatch_character_polls',
+            'schedule': 120.0,  # Run every 2 minutes
+        },
+        'dispatch-daily-overviews': {
+            'task': 'tasks.dispatch_daily_overviews',
+            'schedule': 86400.0,  # Run once every 24 hours
+        },
+        'check-new-characters': {
+            'task': 'tasks.check_new_characters',
+            'schedule': 30.0,  # Run every 30 seconds
+        },
+        'purge-deleted-characters': {
+            'task': 'tasks.purge_deleted_characters',
+            'schedule': 300.0,  # Run every 5 minutes
+        },
+    }
 )
 
 if __name__ == '__main__':

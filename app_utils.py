@@ -11,6 +11,9 @@ from collections import defaultdict
 import asyncio
 import io
 from PIL import Image
+import telegram
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+import calendar
 
 # --- Character Dataclass and Global List ---
 
@@ -2224,13 +2227,13 @@ def get_contracts_from_db(character_id: int) -> list:
         database.release_db_connection(conn)
     return contracts
 
-async def _resolve_location_to_system_id(location_id: int, character: Character) -> int | None:
+def _resolve_location_to_system_id(location_id: int, character: Character) -> int | None:
     """
     Resolves a location_id (station or structure) to a solar_system_id.
     Uses the database cache first, then falls back to ESI.
     """
     # 1. Check our own location_cache first
-    cached_location = await asyncio.to_thread(get_location_from_cache, location_id)
+    cached_location = get_location_from_cache(location_id)
     if cached_location and cached_location.get('system_id'):
         return cached_location['system_id']
 
@@ -2240,40 +2243,40 @@ async def _resolve_location_to_system_id(location_id: int, character: Character)
 
     # Resolve for structures (requires auth)
     if location_id > 10000000000:
-        structure_info = await asyncio.to_thread(get_structure_info, character, location_id)
+        structure_info = get_structure_info(character, location_id)
         if structure_info:
             system_id = structure_info.get('solar_system_id')
     # Resolve for NPC stations (public)
     else:
-        station_info = await asyncio.to_thread(get_station_info, location_id)
+        station_info = get_station_info(location_id)
         if station_info:
             system_id = station_info.get('system_id')
 
     # Get region from system to fully populate the cache item
     if system_id:
-        system_info = await asyncio.to_thread(get_system_info, system_id)
+        system_info = get_system_info(system_id)
         if system_info:
             constellation_id = system_info.get('constellation_id')
             if constellation_id:
-                constellation_info = await asyncio.to_thread(get_constellation_info, constellation_id)
+                constellation_info = get_constellation_info(constellation_id)
                 if constellation_info:
                     region_id = constellation_info.get('region_id')
 
     # 3. Save to cache if we successfully resolved everything
     if location_id and system_id and region_id:
-        await asyncio.to_thread(save_location_to_cache, location_id, system_id, region_id)
+        save_location_to_cache(location_id, system_id, region_id)
 
     return system_id
 
 
-async def get_jump_distance(origin_location_id: int, destination_location_id: int, character: Character) -> int | None:
+def get_jump_distance(origin_location_id: int, destination_location_id: int, character: Character) -> int | None:
     """
     Calculates the jump distance between two locations (stations or structures).
     Uses a database cache to store and retrieve system-to-system jump counts.
     """
     # Step 1: Resolve both locations to their solar system IDs
-    origin_system_id = await _resolve_location_to_system_id(origin_location_id, character)
-    destination_system_id = await _resolve_location_to_system_id(destination_location_id, character)
+    origin_system_id = _resolve_location_to_system_id(origin_location_id, character)
+    destination_system_id = _resolve_location_to_system_id(destination_location_id, character)
 
     if not origin_system_id or not destination_system_id:
         logging.warning(f"Could not resolve one or both system IDs for jump calculation: {origin_location_id} -> {destination_location_id}")
@@ -2283,14 +2286,14 @@ async def get_jump_distance(origin_location_id: int, destination_location_id: in
         return 0
 
     # Step 2: Check the database cache for the jump distance
-    cached_jumps = await asyncio.to_thread(get_jump_distance_from_db, origin_system_id, destination_system_id)
+    cached_jumps = get_jump_distance_from_db(origin_system_id, destination_system_id)
     if cached_jumps is not None:
         logging.debug(f"Found cached jump distance from {origin_system_id} to {destination_system_id}: {cached_jumps} jumps.")
         return cached_jumps
 
     # Step 3: If not cached, calculate it via ESI
     logging.info(f"No cached jump distance found. Calculating route from {origin_system_id} to {destination_system_id} via ESI.")
-    route = await asyncio.to_thread(get_route, origin_system_id, destination_system_id)
+    route = get_route(origin_system_id, destination_system_id)
 
     if route is None:
         logging.error(f"Failed to get route from ESI for {origin_system_id} -> {destination_system_id}")
@@ -2300,7 +2303,7 @@ async def get_jump_distance(origin_location_id: int, destination_location_id: in
     jumps = len(route) - 1
 
     # Step 4: Save the newly calculated distance to the cache for future use
-    await asyncio.to_thread(save_jump_distance_to_db, origin_system_id, destination_system_id, jumps)
+    save_jump_distance_to_db(origin_system_id, destination_system_id, jumps)
     logging.info(f"Calculated and cached {jumps} jumps from {origin_system_id} to {destination_system_id}.")
 
     return jumps
@@ -2391,3 +2394,533 @@ def get_characters_to_purge():
     finally:
         database.release_db_connection(conn)
     return characters_to_purge
+
+# --- Telegram Helpers ---
+
+def send_telegram_message_sync(bot: telegram.Bot, message: str, chat_id: int, reply_markup=None):
+    """Synchronously sends a message to a specific chat_id."""
+    if not chat_id:
+        logging.error("No chat_id provided. Cannot send message.")
+        return
+    try:
+        bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown', reply_markup=reply_markup)
+        logging.info(f"Sent message to chat_id: {chat_id}.")
+    except Exception as e:
+        logging.error(f"Error sending Telegram message to {chat_id}: {e}", exc_info=True)
+
+# --- Celery Task Helpers & Logic ---
+
+def get_all_character_ids():
+    """Returns a list of all active character IDs from the database."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT character_id FROM characters WHERE deletion_scheduled_at IS NULL")
+            return [row[0] for row in cursor.fetchall()]
+    finally:
+        database.release_db_connection(conn)
+
+def get_characters_with_daily_overview_enabled():
+    """Returns a list of character IDs that have daily overviews enabled."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT character_id FROM characters WHERE enable_daily_overview = TRUE AND deletion_scheduled_at IS NULL")
+            return [row[0] for row in cursor.fetchall()]
+    finally:
+        database.release_db_connection(conn)
+
+def format_paginated_message(header: str, item_lines: list, footer: str, chat_id: int) -> list[dict]:
+    """
+    Splits a long message into chunks and returns a list of dictionaries,
+    each representing a message to be sent by a task.
+    """
+    CHUNK_SIZE = 30
+    notifications = []
+
+    if not item_lines:
+        message = header + "\n" + footer
+        notifications.append({'message': message, 'chat_id': chat_id})
+        return notifications
+
+    # First chunk with header
+    first_chunk = item_lines[:CHUNK_SIZE]
+    message = header + "\n" + "\n".join(first_chunk)
+
+    if len(item_lines) <= CHUNK_SIZE:
+        message += "\n" + footer
+        notifications.append({'message': message, 'chat_id': chat_id})
+    else:
+        notifications.append({'message': message, 'chat_id': chat_id})
+        # Intermediate chunks
+        remaining_lines = item_lines[CHUNK_SIZE:]
+        for i in range(0, len(remaining_lines), CHUNK_SIZE):
+            chunk = remaining_lines[i:i + CHUNK_SIZE]
+            if (i + CHUNK_SIZE) >= len(remaining_lines):
+                # Last chunk with footer
+                message = "\n".join(chunk) + "\n" + footer
+            else:
+                message = "\n".join(chunk)
+            notifications.append({'message': message, 'chat_id': chat_id})
+
+    return notifications
+
+
+def process_character_wallet(character_id: int) -> list[dict]:
+    """
+    Processes wallet journal and transactions for a single character.
+    Returns a list of notification dictionaries to be sent.
+    """
+    character = get_character_by_id(character_id)
+    if not character or get_character_deletion_status(character.id):
+        return []
+
+    notifications = []
+    grace_period_hours = 1
+    min_delay = 3600
+
+    # --- Wallet Journal Processing ---
+    history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+    if history_backfilled_at_str:
+        try:
+            history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+            if (datetime.now(timezone.utc) - history_backfilled_at) > timedelta(hours=grace_period_hours):
+                recent_journal, headers = get_wallet_journal(character, return_headers=True)
+                if recent_journal:
+                    journal_ref_ids = [j['id'] for j in recent_journal]
+                    existing_ref_ids = get_ids_from_db('historical_journal', 'ref_id', character.id, journal_ref_ids)
+                    new_journal_ref_ids = set(journal_ref_ids) - existing_ref_ids
+                    if new_journal_ref_ids:
+                        new_entries = [j for j in recent_journal if j['id'] in new_journal_ref_ids]
+                        add_wallet_journal_entries_to_db(character.id, new_entries)
+                        add_processed_journal_refs(character.id, list(new_journal_ref_ids))
+                        logging.info(f"Processed {len(new_entries)} new journal entries for {character.name}.")
+        except (ValueError, TypeError):
+            pass # Handle legacy or malformed timestamps
+
+    # --- Wallet Transaction Processing ---
+    if history_backfilled_at_str:
+        try:
+            history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+            if (datetime.now(timezone.utc) - history_backfilled_at) > timedelta(hours=grace_period_hours):
+                recent_tx, headers = get_wallet_transactions(character, return_headers=True)
+                if recent_tx:
+                    tx_ids_from_esi = [tx['transaction_id'] for tx in recent_tx]
+                    existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
+                    new_tx_ids = set(tx_ids_from_esi) - existing_tx_ids
+
+                    if new_tx_ids:
+                        set_bot_state(f"chart_cache_dirty_{character.id}", "true")
+                        new_transactions = [tx for tx in recent_tx if tx['transaction_id'] in new_tx_ids]
+                        add_historical_transactions_to_db(character.id, new_transactions)
+
+                        sales, buys = defaultdict(list), defaultdict(list)
+                        for tx in new_transactions:
+                            (buys if tx['is_buy'] else sales)[tx['type_id']].append(tx)
+
+                        all_type_ids = list(sales.keys()) + list(buys.keys())
+                        all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
+                        id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids)), character=character)
+                        wallet_balance = get_wallet_balance(character, force_revalidate=True)
+
+                        # Process Buys
+                        if buys:
+                            for type_id, tx_group in buys.items():
+                                for tx in tx_group:
+                                    add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+
+                        # Process Sales
+                        sales_details = []
+                        if sales:
+                            full_journal = get_full_wallet_journal_from_db(character.id)
+                            tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
+                            fee_journal_by_timestamp = defaultdict(list)
+                            for entry in full_journal:
+                                if entry['ref_type'] in {'transaction_tax', 'market_provider_tax'}:
+                                    fee_journal_by_timestamp[entry['date']].append(entry)
+
+                            for type_id, tx_group in sales.items():
+                                total_quantity = sum(t['quantity'] for t in tx_group)
+                                total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+                                cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
+                                total_fees = sum(abs(fee['amount']) for tx in tx_group if tx_id_to_journal_map.get(tx['transaction_id']) for fee in fee_journal_by_timestamp.get(tx_id_to_journal_map[tx['transaction_id']]['date'], []))
+                                net_profit = total_value - cogs - total_fees if cogs is not None else None
+                                sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs, 'total_fees': total_fees, 'net_profit': net_profit})
+
+                        # --- Create Notifications ---
+                        if not character.notifications_enabled:
+                            return []
+
+                        # Low Balance Alert
+                        if wallet_balance is not None and character.wallet_balance_threshold > 0:
+                            state_key = f"low_balance_alert_sent_at_{character.id}"
+                            last_alert_str = get_bot_state(state_key)
+                            if wallet_balance < character.wallet_balance_threshold and (not last_alert_str or (datetime.now(timezone.utc) - datetime.fromisoformat(last_alert_str)) > timedelta(days=1)):
+                                alert_message = f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\nYour wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n**Current Balance:** `{wallet_balance:,.2f}` ISK"
+                                notifications.append({'message': alert_message, 'chat_id': character.telegram_user_id})
+                                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+                            elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
+                                set_bot_state(state_key, '')
+
+                        # Buy Notifications
+                        if buys and character.enable_buy_notifications:
+                            if len(buys) > character.notification_batch_threshold:
+                                header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
+                                item_lines = [f"  • Bought: `{sum(t['quantity'] for t in tx_group)}` x `{id_to_name.get(type_id, 'Unknown')}`" for type_id, tx_group in buys.items()]
+                                footer = f"\n**Total Cost:** `{sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group):,.2f} ISK`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                                notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
+                            else:
+                                for type_id, tx_group in buys.items():
+                                    total_quantity = sum(t['quantity'] for t in tx_group)
+                                    total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+                                    message = f"🛒 *Market Buy ({character.name})* 🛒\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}`\n**Total Cost:** `{total_cost:,.2f} ISK`\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                                    notifications.append({'message': message, 'chat_id': character.telegram_user_id})
+
+                        # Sale Notifications
+                        if sales_details and character.enable_sales_notifications:
+                            if len(sales_details) > character.notification_batch_threshold:
+                                header = f"✅ *Multiple Market Sales ({character.name})* ✅"
+                                item_lines = [f"  • Sold: `{sum(t['quantity'] for t in sale_info['tx_group'])}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`" for sale_info in sales_details]
+                                grand_total_value = sum(sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group']) for sale_info in sales_details)
+                                grand_total_fees = sum(sale_info['total_fees'] for sale_info in sales_details)
+                                grand_total_net_profit = sum(sale_info['net_profit'] for sale_info in sales_details if sale_info['net_profit'] is not None)
+                                profit_line = f"\n**Total Net Profit:** `{grand_total_net_profit:,.2f} ISK`" if grand_total_net_profit > 0 else ""
+                                footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`\n**Total Fees:** `{grand_total_fees:,.2f} ISK`{profit_line}\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                                notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
+                            else:
+                                for sale_info in sales_details:
+                                    type_id, tx_group, total_fees, net_profit = sale_info['type_id'], sale_info['tx_group'], sale_info['total_fees'], sale_info['net_profit']
+                                    total_quantity = sum(t['quantity'] for t in tx_group)
+                                    avg_price = sum(t['quantity'] * t['unit_price'] for t in tx_group) / total_quantity
+                                    profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
+                                    message = f"✅ *Market Sale ({character.name})* ✅\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n**Total Fees:** `{total_fees:,.2f} ISK`{profit_line}\n\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                                    notifications.append({'message': message, 'chat_id': character.telegram_user_id})
+
+        except (ValueError, TypeError):
+            pass
+
+    return notifications
+
+
+def process_character_orders(character_id: int) -> list[dict]:
+    """
+    Processes open orders, undercuts, and historical orders for a single character.
+    Returns a list of notification dictionaries.
+    """
+    character = get_character_by_id(character_id)
+    if not character or get_character_deletion_status(character.id):
+        return []
+
+    notifications = []
+    grace_period_hours = 1
+
+    # --- Order History (Cancelled/Expired) ---
+    history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+    if history_backfilled_at_str and character.notifications_enabled:
+        try:
+            history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+            if (datetime.now(timezone.utc) - history_backfilled_at) > timedelta(hours=grace_period_hours):
+                order_history, headers = get_market_orders_history(character, return_headers=True, force_revalidate=True)
+                if order_history:
+                    processed_order_ids = get_processed_orders(character.id)
+                    new_orders = [o for o in order_history if o['order_id'] not in processed_order_ids]
+                    if new_orders:
+                        poll_time = datetime.strptime(headers['Date'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc) if headers.get('Date') else datetime.now(timezone.utc)
+                        cancelled = [o for o in new_orders if o.get('state') == 'cancelled' or (o.get('state') == 'expired' and poll_time < (datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) + timedelta(days=o.get('duration', 90))))]
+                        expired = [o for o in new_orders if o not in cancelled]
+
+                        item_ids = [o['type_id'] for o in new_orders]
+                        id_to_name = get_names_from_ids(item_ids)
+
+                        for order in cancelled:
+                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                            if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
+                                msg = f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled."
+                                notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
+
+                        for order in expired:
+                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                            if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
+                                msg = f"ℹ️ *{order_type} Order Expired ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired."
+                                notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
+
+                        add_processed_orders(character.id, [o['order_id'] for o in new_orders])
+        except (ValueError, TypeError):
+            pass
+
+    # --- Open Orders & Undercut Check ---
+    open_orders, headers = get_market_orders(character, return_headers=True, force_revalidate=True)
+    if open_orders is None:
+        return notifications
+
+    # Cache Management
+    esi_order_ids = {o['order_id'] for o in open_orders}
+    cached_orders = get_tracked_market_orders(character.id)
+    cached_order_ids = {o['order_id'] for o in cached_orders}
+    orders_to_remove = cached_order_ids - esi_order_ids
+    if orders_to_remove:
+        remove_tracked_market_orders(character.id, list(orders_to_remove))
+    if open_orders:
+        update_tracked_market_orders(character.id, open_orders)
+    elif not orders_to_remove and cached_order_ids:
+        remove_tracked_market_orders(character.id, list(cached_order_ids))
+
+    # Undercut Notifications
+    if character.enable_undercut_notifications and open_orders:
+        remove_stale_undercut_statuses(character.id, list(esi_order_ids))
+        previous_statuses = get_undercut_statuses(character.id)
+        new_statuses, notifications_to_send = [], []
+        market_data_cache = {}
+
+        for order in open_orders:
+            system_id = _resolve_location_to_system_id(order['location_id'], character)
+            if not system_id: continue
+            system_info = get_system_info(system_id)
+            if not system_info: continue
+            region_id = get_constellation_info(system_info['constellation_id'])['region_id']
+            order['region_id'] = region_id
+
+            if region_id not in market_data_cache: market_data_cache[region_id] = {}
+            if order['type_id'] not in market_data_cache[region_id]:
+                regional_orders = get_region_market_orders(region_id, order['type_id'], force_revalidate=True)
+                if regional_orders:
+                    market_data_cache[region_id][order['type_id']] = {
+                        'buy': max([o for o in regional_orders if o.get('is_buy_order')], key=lambda x: x['price'], default=None),
+                        'sell': min([o for o in regional_orders if not o.get('is_buy_order')], key=lambda x: x['price'], default=None)
+                    }
+
+            is_undercut, competitor = False, None
+            regional_prices = market_data_cache.get(region_id, {}).get(order['type_id'])
+            if regional_prices:
+                if order.get('is_buy_order'):
+                    best_buy = regional_prices.get('buy')
+                    if best_buy and best_buy['price'] > order['price']:
+                        is_undercut, competitor = True, best_buy
+                else:
+                    best_sell = regional_prices.get('sell')
+                    if best_sell and best_sell['price'] < order['price']:
+                        is_undercut, competitor = True, best_sell
+
+            new_statuses.append({'order_id': order['order_id'], 'is_undercut': is_undercut, 'competitor_price': competitor['price'] if competitor else None, 'competitor_location_id': competitor['location_id'] if competitor else None})
+            if is_undercut and not previous_statuses.get(order['order_id'], {}).get('is_undercut', False):
+                notifications_to_send.append({'my_order': order, 'competitor': competitor})
+
+        if new_statuses:
+            update_undercut_statuses(character.id, new_statuses)
+
+        if notifications_to_send:
+            all_ids = {n['my_order']['type_id'] for n in notifications_to_send} | {n['my_order']['location_id'] for n in notifications_to_send} | {n['competitor']['location_id'] for n in notifications_to_send if n.get('competitor')}
+            id_to_name = get_names_from_ids(list(all_ids), character)
+            for notif in notifications_to_send:
+                my_order, competitor = notif['my_order'], notif['competitor']
+                jumps = get_jump_distance(my_order['location_id'], competitor['location_id'], character)
+                location_line = f"`{id_to_name.get(competitor['location_id'], 'Unknown')}`" + (f" ({jumps} jumps)" if jumps is not None else "")
+                msg = (f"❗️ *Order Undercut ({character.name})* ❗️\n\n"
+                       f"Your {'Buy' if my_order.get('is_buy_order') else 'Sell'} order for **{id_to_name.get(my_order['type_id'])}** has been undercut.\n\n"
+                       f"  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
+                       f"  • **Your Location:** `{id_to_name.get(my_order['location_id'])}`\n"
+                       f"  • **Best Market Price:** `{competitor['price']:,.2f}` ISK\n"
+                       f"  • **Best Price Location:** {location_line}\n\n"
+                       f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`")
+                notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
+
+    return notifications
+
+
+def process_character_contracts(character_id: int) -> list[dict]:
+    """
+    Processes contracts for a single character and returns notifications.
+    """
+    character = get_character_by_id(character_id)
+    if not character or not character.enable_contract_notifications or get_character_deletion_status(character.id):
+        return []
+
+    notifications = []
+    history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
+    if not history_backfilled_at_str:
+        return []
+
+    try:
+        history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
+        if (datetime.now(timezone.utc) - history_backfilled_at) < timedelta(hours=1):
+            return []
+    except (ValueError, TypeError):
+        pass
+
+    contracts, headers = get_contracts(character, return_headers=True, force_revalidate=True)
+    if contracts is None:
+        return []
+
+    current_contract_ids = [c['contract_id'] for c in contracts]
+    remove_stale_contracts(character.id, current_contract_ids)
+    update_contracts_cache(character.id, contracts)
+
+    processed_contract_ids = get_processed_contracts(character.id)
+    new_contracts = [c for c in contracts if c['contract_id'] not in processed_contract_ids and c['status'] == 'outstanding']
+
+    if new_contracts:
+        ids_to_resolve = {c['issuer_id'] for c in new_contracts} | {c.get('assignee_id') for c in new_contracts if c.get('assignee_id')} | {c.get('start_location_id') for c in new_contracts if c.get('start_location_id')} | {c.get('end_location_id') for c in new_contracts if c.get('end_location_id')}
+        id_to_name = get_names_from_ids(list(ids_to_resolve), character)
+        for contract in new_contracts:
+            lines = [f"📝 *New Contract ({character.name})* 📝", f"\n*Type:* `{contract['type'].replace('_', ' ').title()}`", f"*From:* `{id_to_name.get(contract['issuer_id'], 'Unknown')}`", f"*Status:* `{contract['status'].replace('_', ' ').title()}`"]
+            if contract.get('assignee_id'): lines.append(f"*To:* `{id_to_name.get(contract['assignee_id'], 'Unknown')}`")
+            if contract.get('start_location_id'): lines.append(f"*Location:* `{id_to_name.get(contract['start_location_id'], 'Unknown')}`")
+            if contract.get('price', 0) > 0: lines.append(f"*Price:* `{contract['price']:,.2f} ISK`")
+            try:
+                expires_dt = datetime.fromisoformat(contract['date_expired'].replace('Z', '+00:00'))
+                time_left = expires_dt - datetime.now(timezone.utc)
+                if time_left.total_seconds() > 0:
+                    d, h, m = time_left.days, time_left.seconds // 3600, (time_left.seconds % 3600) // 60
+                    expires_str = f"{d}d {h}h {m}m" if d > 0 else f"{h}h {m}m"
+                    lines.append(f"*Expires In:* `{expires_str.strip()}`")
+            except (ValueError, KeyError): pass
+            notifications.append({'message': "\n".join(lines), 'chat_id': character.telegram_user_id})
+
+    add_processed_contracts(character.id, current_contract_ids)
+    return notifications
+
+
+def _prepare_chart_data(character_id, start_of_period):
+    """
+    Prepares all data needed for chart generation.
+    1. Fetches all historical financial events.
+    2. Builds the inventory state up to the start of the chart period.
+    3. Returns the initial inventory state and all events within the period.
+    """
+    all_transactions = get_historical_transactions_from_db(character_id)
+    full_journal = get_full_wallet_journal_from_db(character_id)
+    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+
+    all_events = []
+    for tx in all_transactions:
+        all_events.append({'type': 'tx', 'data': tx, 'date': datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))})
+    for entry in full_journal:
+        if entry['ref_type'] in fee_ref_types:
+            all_events.append({'type': 'fee', 'data': entry, 'date': entry['date']})
+    all_events.sort(key=lambda x: x['date'])
+
+    inventory = defaultdict(list)
+    events_before_period = [e for e in all_events if e['date'] < start_of_period]
+
+    for event in events_before_period:
+        if event['type'] == 'tx':
+            tx = event['data']
+            if tx.get('is_buy'):
+                inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+            else: # Sale
+                remaining_to_sell = tx['quantity']
+                lots = inventory.get(tx['type_id'], [])
+                if lots:
+                    consumed_count = 0
+                    for lot in lots:
+                        if remaining_to_sell <= 0: break
+                        take = min(remaining_to_sell, lot['quantity'])
+                        remaining_to_sell -= take
+                        lot['quantity'] -= take
+                        if lot['quantity'] == 0: consumed_count += 1
+                    inventory[tx['type_id']] = lots[consumed_count:]
+
+    events_in_period = [e for e in all_events if e['date'] >= start_of_period]
+    return inventory, events_in_period
+
+def _calculate_overview_data(character: Character) -> dict:
+    """Fetches all necessary data from the local DB and calculates overview statistics."""
+    logging.info(f"Calculating overview data for {character.name} from local database...")
+
+    now = datetime.now(timezone.utc)
+    one_day_ago = now - timedelta(days=1)
+    thirty_days_ago = now - timedelta(days=30)
+
+    all_transactions = get_historical_transactions_from_db(character.id)
+    full_journal = get_full_wallet_journal_from_db(character.id)
+    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+
+    # --- Profit/Loss Calculation ---
+    def calculate_profit(start_date):
+        inventory, events = _prepare_chart_data(character.id, start_date)
+        profit = 0
+        sales_value = 0
+        fees_value = sum(abs(e['data']['amount']) for e in events if e['type'] == 'fee')
+
+        for event in events:
+            if event['type'] == 'tx':
+                tx = event['data']
+                if tx.get('is_buy'):
+                    inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+                else: # Sale
+                    sale_value = tx['quantity'] * tx['unit_price']
+                    sales_value += sale_value
+                    cogs = 0
+                    remaining_to_sell = tx['quantity']
+                    lots = inventory.get(tx['type_id'], [])
+                    if lots:
+                        consumed_count = 0
+                        for lot in lots:
+                            if remaining_to_sell <= 0: break
+                            take = min(remaining_to_sell, lot['quantity'])
+                            cogs += take * lot['price']
+                            remaining_to_sell -= take
+                            lot['quantity'] -= take
+                            if lot['quantity'] == 0: consumed_count += 1
+                        inventory[tx['type_id']] = lots[consumed_count:]
+                    profit += sale_value - cogs
+            elif event['type'] == 'fee':
+                profit -= abs(event['data']['amount'])
+        return profit, sales_value, fees_value
+
+    profit_24h, total_sales_24h, total_fees_24h = calculate_profit(one_day_ago)
+    profit_30_days, total_sales_30_days, total_fees_30_days = calculate_profit(thirty_days_ago)
+
+    wallet_balance = get_last_known_wallet_balance(character)
+    available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions))) if all_transactions else []
+
+    return {
+        "now": now, "wallet_balance": wallet_balance,
+        "total_sales_24h": total_sales_24h, "total_fees_24h": total_fees_24h, "profit_24h": profit_24h,
+        "total_sales_30_days": total_sales_30_days, "total_fees_30_days": total_fees_30_days, "profit_30_days": profit_30_days,
+        "available_years": available_years
+    }
+
+def _format_overview_message(overview_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
+    """Formats the overview data into a message string and keyboard."""
+    now = overview_data['now']
+    message = (
+        f"📊 *Market Overview ({character.name})*\n"
+        f"_{now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
+        f"*Wallet Balance:* `{overview_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
+        f"*Last Day:*\n"
+        f"  - Total Sales Value: `{overview_data['total_sales_24h']:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_24h']:,.2f} ISK`\n"
+        f"  - **Profit (FIFO):** `{overview_data['profit_24h']:,.2f} ISK`\n\n"
+        f"---\n\n"
+        f"🗓️ *Last 30 Days:*\n"
+        f"  - Total Sales Value: `{overview_data['total_sales_30_days']:,.2f} ISK`\n"
+        f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_30_days']:,.2f} ISK`\n"
+        f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`"
+    )
+    keyboard = [
+        [InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"), InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}")],
+        [InlineKeyboardButton("Last 30 Days", callback_data=f"chart_30days_{character.id}"), InlineKeyboardButton("All Time", callback_data=f"chart_alltime_{character.id}")]
+    ]
+    return message, InlineKeyboardMarkup(keyboard)
+
+def send_daily_overview_for_character(character_id: int, bot):
+    """Generates and sends the daily overview for a single character."""
+    character = get_character_by_id(character_id)
+    if not character or get_character_deletion_status(character.id):
+        return
+
+    logging.info(f"Running scheduled daily overview for {character.name}...")
+    try:
+        overview_data = _calculate_overview_data(character)
+        message, reply_markup = _format_overview_message(overview_data, character)
+
+        new_keyboard = list(reply_markup.inline_keyboard)
+        new_keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        new_reply_markup = InlineKeyboardMarkup(new_keyboard)
+
+        from tasks import send_telegram_message_sync
+        send_telegram_message_sync(bot, message, chat_id=character.telegram_user_id, reply_markup=new_reply_markup)
+        logging.info(f"Daily overview sent for {character.name}.")
+    except Exception as e:
+        logging.error(f"Failed to send daily overview for {character.name}: {e}", exc_info=True)
