@@ -95,7 +95,7 @@ def load_characters_from_db():
             backfill_before_id=backfill_before_id
         )
         CHARACTERS.append(character)
-        logging.info(f"Loaded character: {character.name} ({character.id})")
+        logging.debug(f"Loaded character: {character.name} ({character.id})")
 
     if not CHARACTERS:
         logging.error("Could not load any characters successfully from the database.")
@@ -2363,7 +2363,8 @@ def _create_character_info_image(character_id, corporation_id, alliance_id=None)
 def get_new_and_updated_character_info():
     """
     Fetches information about new and updated characters from the database.
-    A character is 'new' if they do not have a 'history_backfilled' state.
+    - A character is 'new' if they don't have a 'history_backfilled' state AND are not currently backfilling.
+    - A character is 'updated' if their `needs_update_notification` flag is set.
     Returns a dictionary mapping character_id to their status.
     e.g., {123: {'is_new': True}, 456: {'needs_update': True}}
     """
@@ -2371,8 +2372,10 @@ def get_new_and_updated_character_info():
     db_chars_info = {}
     try:
         with conn.cursor() as cursor:
-            # Get all characters that aren't marked for deletion
-            cursor.execute("SELECT character_id, needs_update_notification FROM characters WHERE deletion_scheduled_at IS NULL")
+            # Get all characters that aren't marked for deletion, including their backfill status
+            cursor.execute(
+                "SELECT character_id, needs_update_notification, is_backfilling FROM characters WHERE deletion_scheduled_at IS NULL"
+            )
             all_chars = cursor.fetchall()
             if not all_chars:
                 return {}
@@ -2383,13 +2386,12 @@ def get_new_and_updated_character_info():
             state_keys = [f"history_backfilled_{char_id}" for char_id in all_char_ids]
             placeholders = ','.join(['%s'] * len(state_keys))
             cursor.execute(f"SELECT key FROM bot_state WHERE key IN ({placeholders})", state_keys)
-
             backfilled_keys = {row[0] for row in cursor.fetchall()}
 
-            for char_id, needs_update in all_chars:
+            for char_id, needs_update, is_backfilling in all_chars:
                 info = {}
-                # Check if the character is new
-                if f"history_backfilled_{char_id}" not in backfilled_keys:
+                # A character is new only if backfill is not complete AND not currently in progress.
+                if f"history_backfilled_{char_id}" not in backfilled_keys and not is_backfilling:
                     info['is_new'] = True
 
                 # Check if the character needs a credential update notification
