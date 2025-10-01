@@ -1743,7 +1743,7 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             f"  *Location:* `{location_name}`"
         )
 
-        # Add undercut alert from the cached status
+        # Add undercut/outbid alert from the cached status
         undercut_status = all_undercut_statuses.get(order['order_id'])
         if undercut_status and undercut_status['is_undercut']:
             competitor_price = undercut_status.get('competitor_price', 0.0)
@@ -1757,8 +1757,11 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
                     if jumps is not None:
                         jumps_str = f" ({jumps}j)"
 
-                order_type_str = "buy" if is_buy else "sell"
-                line += f"\n  `> ❗️ Undercut! Best {order_type_str}: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}`"
+                if is_buy:
+                    alert_line = f"❗️ Outbid! Highest bid: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}"
+                else:
+                    alert_line = f"❗️ Undercut! Lowest price: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}"
+                line += f"\n  `> {alert_line}`"
 
         message_lines.append(line)
 
