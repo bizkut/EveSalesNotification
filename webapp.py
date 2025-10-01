@@ -35,8 +35,8 @@ def add_character_to_db(character_id, character_name, refresh_token, telegram_us
             # Now, "upsert" the character.
             cursor.execute(
                 """
-                INSERT INTO characters (character_id, character_name, refresh_token, telegram_user_id)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO characters (character_id, character_name, refresh_token, telegram_user_id, needs_update_notification)
+                VALUES (%s, %s, %s, %s, TRUE)
                 ON CONFLICT (character_id) DO UPDATE SET
                     character_name = EXCLUDED.character_name,
                     refresh_token = EXCLUDED.refresh_token,
