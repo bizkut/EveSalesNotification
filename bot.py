@@ -1712,13 +1712,8 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
     location_ids = [order['location_id'] for order in paginated_orders]
 
-    # Fetch character's current location and all undercut statuses for them
-    results = await asyncio.gather(
-        asyncio.to_thread(get_character_location, character),
-        asyncio.to_thread(get_undercut_statuses, character.id)
-    )
-    char_location_info, all_undercut_statuses = results
-    character_location_id = char_location_info.get('station_id') or char_location_info.get('structure_id') if char_location_info else None
+    # Fetch all undercut statuses for the character
+    all_undercut_statuses = await asyncio.to_thread(get_undercut_statuses, character.id)
 
     # Now, gather all the IDs we need to resolve into names
     competitor_location_ids = [
