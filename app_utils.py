@@ -453,6 +453,19 @@ def add_processed_orders(character_id, order_ids):
         database.release_db_connection(conn)
 
 
+def get_processed_journal_refs(character_id):
+    """Retrieves all processed journal ref IDs for a character from the database."""
+    conn = database.get_db_connection()
+    processed_ids = set()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT ref_id FROM historical_journal WHERE character_id = %s", (character_id,))
+            processed_ids = {row[0] for row in cursor.fetchall()}
+    finally:
+        database.release_db_connection(conn)
+    return processed_ids
+
+
 def add_processed_journal_refs(character_id, ref_ids):
     """Adds a list of journal ref IDs for a character to the database."""
     if not ref_ids:
