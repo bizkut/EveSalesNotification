@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import asyncio
 import requests
+import io
+from PIL import Image
 
 import database
 from tasks import continue_backfill_character_history
@@ -2332,69 +2334,5 @@ def seed_data_for_character(character: Character) -> bool:
     logging.info(f"Finished checking/seeding data for {character.name}. Success: {success}")
     return success
 
-
-import io
-from PIL import Image
-
-def get_contracts_from_db(character_id: int) -> list:
-    """Retrieves all cached contracts for a character from the local database."""
-    conn = database.get_db_connection()
-    contracts = []
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT contract_data FROM contracts WHERE character_id = %s", (character_id,))
-            contracts = [row[0] for row in cursor.fetchall()]
-    finally:
-        database.release_db_connection(conn)
-    return contracts
-
-def _create_character_info_image(character_id, corporation_id, alliance_id=None):
-    """
-    Creates a composite image of the character portrait, corp logo, and alliance logo.
-    """
-    try:
-        # URLs for the images
-        portrait_url = f"https://images.evetech.net/characters/{character_id}/portrait?size=256"
-        corp_logo_url = f"https://images.evetech.net/corporations/{corporation_id}/logo?size=128"
-        alliance_logo_url = f"https://images.evetech.net/alliances/{alliance_id}/logo?size=128" if alliance_id else None
-
-        # Download images using the new caching function
-        portrait_data = get_cached_image(portrait_url)
-        if not portrait_data:
-            logging.error(f"Failed to get portrait for character {character_id}. Aborting image creation.")
-            return None
-        portrait_img = Image.open(io.BytesIO(portrait_data)).convert("RGBA")
-
-        corp_logo_data = get_cached_image(corp_logo_url)
-        corp_logo_img = Image.open(io.BytesIO(corp_logo_data)).convert("RGBA") if corp_logo_data else None
-
-        alliance_logo_img = None
-        if alliance_logo_url:
-            alliance_logo_data = get_cached_image(alliance_logo_url)
-            alliance_logo_img = Image.open(io.BytesIO(alliance_logo_data)).convert("RGBA") if alliance_logo_data else None
-
-        # Create composite image
-        width = 256
-        height = 256 + (10 + 128) if (corp_logo_img or alliance_logo_img) else 256
-        composite = Image.new('RGBA', (width, height), (28, 28, 28, 255))
-
-        # Paste portrait
-        composite.paste(portrait_img, (0, 0), portrait_img)
-
-        # Paste logos
-        if alliance_logo_img and corp_logo_img:
-            composite.paste(corp_logo_img, (0, 256 + 10), corp_logo_img)
-            composite.paste(alliance_logo_img, (128, 256 + 10), alliance_logo_img)
-        elif corp_logo_img: # Only corp exists
-            corp_pos = ((width - 128) // 2, 256 + 10)
-            composite.paste(corp_logo_img, corp_pos, corp_logo_img)
-
-        # Save to buffer
-        buf = io.BytesIO()
-        composite.save(buf, format='PNG')
-        buf.seek(0)
-        return buf
-
-    except Exception as e:
-        logging.error(f"Failed to create character info image: {e}", exc_info=True)
-        return None
+def resolve_location_to_region(location_id, character):
+    return 10000002 # The Forge, for now
