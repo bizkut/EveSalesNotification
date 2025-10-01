@@ -14,16 +14,16 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **New Contract Notifications**: Get real-time alerts for any new contracts that require your attention.
 - **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds using efficient ETag-based polling.
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
-- **Rich Contextual Data & Undercut Alerts**:
+- **Rich Contextual Data & Order Alerts**:
   - **Accurate Profit Tracking (FIFO & Journal-Based)**: The bot uses the First-In, First-Out (FIFO) method to calculate the Cost of Goods Sold (COGS) for all sales. It then uses your character's actual wallet journal data for 100% accurate tax and broker fee calculations, providing a true financial record in all views.
   - **Automatic & Accurate Market Context**: Sales notifications are compared against the best buy order in the *exact location* of the sale. The bot automatically determines if the sale was in an NPC station or a player-owned structure and fetches the correct market data. For stations, it finds the correct region by walking the ESI hierarchy (`station -> system -> region`), ensuring pinpoint accuracy without any user configuration.
-  - **Accurate, Multi-Region Undercut Alerts**: When viewing open orders, the bot checks for undercuts in the *actual region of each order*, making it highly accurate for players who trade in multiple hubs simultaneously.
-  - **Live Undercut Notifications**: Get notified the moment one of your orders is undercut. The bot monitors both regional markets and player-owned structures. To prevent spam, notifications are only sent once when an order's status changes from competitive to undercut. This can be toggled in the settings.
-  - **Jump Distance Calculation**: Undercut alerts now include the number of jumps from your order's location (for notifications) or your character's current location (for the interactive view) to the competitor's location, giving you immediate context on how far away the best price is.
+  - **Accurate, Multi-Region Undercut & Outbid Alerts**: When viewing open orders, the bot checks for undercuts on sell orders and outbids on buy orders in the *actual region of each order*, making it highly accurate for players who trade in multiple hubs simultaneously.
+  - **Live Undercut & Outbid Notifications**: Get notified the moment one of your sell orders is undercut or your buy order is outbid. The bot monitors both regional markets and player-owned structures. To prevent spam, notifications are only sent once when an order's status changes from competitive to non-competitive. This can be toggled in the settings.
+  - **Jump Distance Calculation**: Undercut and outbid alerts now include the number of jumps from your order's location to the competitor's location, giving you immediate context on how far away the best price is.
   - **Wallet Balance**: All notifications include your character's current wallet balance.
 - **Low Wallet Balance Alert**: Sends a one-time warning if a character's wallet drops below a configurable threshold.
 - **Comprehensive Daily Overview**: At a user-defined time, the bot sends a detailed, private financial report for each character (if enabled).
-- **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot displays your character's current order capacity (e.g., "152 / 305 orders") and provides undercut alerts.
+- **View Open Orders**: Interactively browse through all open buy and sell orders in a paginated view. The bot displays your character's current order capacity (e.g., "152 / 305 orders") and provides alerts for undercuts and outbids.
 - **Public Character Info**: View an overview of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram with a single button press. The bot offers several timeframes: "Last Day," "Last 7 Days," "Last 30 Days," and "All Time."
@@ -155,14 +155,22 @@ All interaction with the bot is handled through a clean, inline button-based men
 **Wallet:** `1,234,567,890.12 ISK`
 ```
 
-**Open Order Undercut:**
+**Open Order Alerts (Undercut & Outbid):**
 ```
-📄 *Open Buy Orders for Character Name* (152 / 305 orders)
+📄 *Open Sell Orders for Character Name* (152 / 305 orders)
+
+*Plex*
+  `5` of `10` @ `4,500,000.00` ISK
+  *Location:* `Jita 4-4 - Caldari Navy Assembly Plant`
+  `> ❗️ Undercut! Lowest price: 4,499,999.99 in Amarr VIII (10j)`
+
+---
+📄 *Open Buy Orders for Character Name* (153 / 305 orders)
 
 *Tritanium*
   `1,000,000` of `5,000,000` @ `9.90` ISK
   *Location:* `Jita 4-4 - Caldari Navy Assembly Plant`
-  `> ❗️ Undercut! Best buy: 9.95`
+  `> ❗️ Outbid! Highest bid: 9.95 in Perimeter (1j)`
 ```
 
 **Daily Overview:**
