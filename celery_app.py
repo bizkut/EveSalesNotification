@@ -1,10 +1,19 @@
 import os
 import sys
 from celery import Celery
+from celery.signals import worker_process_init
+import database
+import logging
 
 # Add the project's root directory to the Python path
 # This is necessary for the Celery worker to find the 'bot' module
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+@worker_process_init.connect
+def init_worker(**kwargs):
+    """Initializes database connection pool for each worker process."""
+    logging.info("Initializing database connection pool for celery worker...")
+    database.initialize_pool()
 
 # Get the broker URL from environment variables
 # Default to a local Redis instance if not set, for development flexibility

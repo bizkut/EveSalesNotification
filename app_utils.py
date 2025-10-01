@@ -2398,7 +2398,6 @@ def get_new_and_updated_character_info():
 
                 if info: # Only add to dict if there's something to do
                     db_chars_info[char_id] = info
-
     finally:
         database.release_db_connection(conn)
     return db_chars_info

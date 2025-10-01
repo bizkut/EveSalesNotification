@@ -14,6 +14,7 @@ from PIL import Image
 
 # Import the new shared utility module
 import app_utils
+import database
 from app_utils import (
     Character, CHARACTERS, load_characters_from_db, setup_database,
     get_bot_state, set_bot_state, get_characters_for_user, get_character_by_id,
@@ -1597,6 +1598,7 @@ def main() -> None:
     """Run the bot."""
     logging.info("Bot starting up...")
 
+    database.initialize_pool()
     setup_database()
     load_characters_from_db()
 

@@ -53,5 +53,5 @@ def close_pool():
         connection_pool.closeall()
         logging.info("PostgreSQL connection pool closed.")
 
-# Initialize the pool when the module is imported
-initialize_pool()
+# The pool is now initialized manually by the application entry points
+# (e.g., in bot.py for the main bot, and in celery_app.py for workers)
