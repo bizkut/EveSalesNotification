@@ -2898,9 +2898,9 @@ def process_character_orders(character_id: int) -> list[dict]:
                 processed_order_ids = get_processed_orders(character.id)
                 new_orders = [o for o in order_history if o['order_id'] not in processed_order_ids and datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) > character.created_at]
                 if new_orders:
-                    poll_time = datetime.strptime(headers['Date'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc) if headers.get('Date') else datetime.now(timezone.utc)
-                    cancelled = [o for o in new_orders if o.get('state') == 'cancelled' or (o.get('state') == 'expired' and poll_time < (datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) + timedelta(days=o.get('duration', 90))))]
-                    expired = [o for o in new_orders if o not in cancelled]
+                    # Trust the ESI state directly for cancelled vs expired status
+                    cancelled = [o for o in new_orders if o.get('state') == 'cancelled']
+                    expired = [o for o in new_orders if o.get('state') == 'expired']
 
                     item_ids = [o['type_id'] for o in new_orders]
                     id_to_name = get_names_from_ids(item_ids)
