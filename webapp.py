@@ -5,21 +5,10 @@ import requests
 from flask import Flask, request, redirect, render_template_string
 from tasks import seed_character_data_task, send_welcome_and_menu, check_new_characters
 
+from log_config import setup_logging
+
 # Configure logging
-log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
-log_level = getattr(logging, log_level_str, logging.WARNING)
-# Get the root logger
-logger = logging.getLogger()
-logger.setLevel(log_level)
-# Remove any existing handlers to prevent conflicts
-for handler in logger.handlers[:]:
-    logger.removeHandler(handler)
-# Create a new stream handler
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-# Add the new handler to the root logger
-logger.addHandler(handler)
+setup_logging()
 
 # --- Database Functions ---
 def add_character_to_db(character_id, character_name, refresh_token, telegram_user_id):

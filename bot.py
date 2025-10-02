@@ -47,21 +47,10 @@ from app_utils import (
 )
 
 
+from log_config import setup_logging
+
 # Configure logging
-log_level_str = os.getenv('LOG_LEVEL', 'WARNING').upper()
-log_level = getattr(logging, log_level_str, logging.WARNING)
-# Get the root logger
-logger = logging.getLogger()
-logger.setLevel(log_level)
-# Remove any existing handlers to prevent conflicts
-for handler in logger.handlers[:]:
-    logger.removeHandler(handler)
-# Create a new stream handler
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-# Add the new handler to the root logger
-logger.addHandler(handler)
+setup_logging()
 
 
 # --- Telegram Bot Functions ---

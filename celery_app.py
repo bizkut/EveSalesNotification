@@ -11,9 +11,12 @@ import logging
 # This is necessary for the Celery worker to find the 'bot' module
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
+from log_config import setup_logging
+
 @worker_process_init.connect
 def init_worker(**kwargs):
-    """Initializes database connection pool for each worker process."""
+    """Initializes database connection pool and logging for each worker process."""
+    setup_logging()
     logging.info("Initializing database connection pool for celery worker...")
     database.initialize_pool()
 
