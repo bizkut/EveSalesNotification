@@ -94,7 +94,7 @@ def send_welcome_and_menu(telegram_user_id: int, character_name: str):
 def seed_character_data_task(character_id: int):
     """
     Task to seed initial data for a new character in the background.
-    Notifies the user upon completion.
+    This now runs silently without notifying the user on completion.
     """
     logging.info(f"Starting background data seed for character_id: {character_id}")
     character = get_character_by_id(character_id)
@@ -102,16 +102,12 @@ def seed_character_data_task(character_id: int):
         logging.error(f"Cannot seed data: Character {character_id} not found.")
         return
 
-    bot = get_bot()
     seed_successful = seed_data_for_character(character)
 
     if seed_successful:
-        msg = "Sync complete\nAll historical data has been imported"
+        logging.info(f"Successfully completed silent data seed for character {character_id}.")
     else:
-        msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
-
-    # Send the main menu with the status message at the top.
-    send_main_menu_sync(bot, character.telegram_user_id, top_message=msg)
+        logging.error(f"Failed to silently seed data for character {character_id}.")
 
 
 # --- Dispatcher Tasks (Triggered by Celery Beat) ---

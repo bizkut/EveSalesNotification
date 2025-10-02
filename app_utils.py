@@ -2965,7 +2965,9 @@ def _prepare_chart_data(character_id, start_of_period):
     """
     all_transactions = get_historical_transactions_from_db(character_id)
     full_journal = get_full_wallet_journal_from_db(character_id)
-    fee_ref_types = {'transaction_tax', 'brokers_fee'}
+    # Use exact transaction and market provider taxes from the journal.
+    # Broker's fee will be estimated based on user settings, so we exclude it here.
+    fee_ref_types = {'transaction_tax', 'market_provider_tax'}
 
     all_events = []
     for tx in all_transactions:
@@ -3016,16 +3018,10 @@ def _calculate_overview_data(character: Character) -> dict:
         profit = 0
         sales_value = 0
 
-        # Separate journaled fees from estimated broker fees
-        # `events` from `_prepare_chart_data` now only contains transaction_tax and brokers_fee
+        # `events` from `_prepare_chart_data` now contains journaled fees like
+        # transaction_tax and market_provider_tax. Broker's fees are estimated separately.
         journaled_fees_value = sum(abs(e['data']['amount']) for e in events if e['type'] == 'fee')
         estimated_broker_fees = 0
-
-        # Manually calculate market provider tax for the period as a general expense
-        market_provider_tax_value = sum(
-            abs(entry['amount']) for entry in full_journal
-            if entry['ref_type'] == 'market_provider_tax' and entry['date'] >= start_date
-        )
 
         for event in events:
             if event['type'] == 'tx':
@@ -3056,7 +3052,7 @@ def _calculate_overview_data(character: Character) -> dict:
                     profit += sale_value - cogs
 
         # Subtract all fees from the final profit
-        total_fees = journaled_fees_value + estimated_broker_fees + market_provider_tax_value
+        total_fees = journaled_fees_value + estimated_broker_fees
         profit -= total_fees
 
         return profit, sales_value, total_fees
