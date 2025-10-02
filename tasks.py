@@ -33,6 +33,7 @@ from app_utils import (
     send_daily_overview_for_character,
     send_main_menu_sync,
     send_main_menu_async,
+    edit_main_menu_sync,
     send_telegram_message_sync,
     get_cached_chart,
     save_chart_to_cache,
@@ -69,9 +70,15 @@ async def _send_welcome_sequence(bot: telegram.Bot, telegram_user_id: int, chara
             # Log error but don't stop the sequence
             logging.error(f"Error deleting 'add character' prompt for user {telegram_user_id}: {e}")
 
-    # 2. Construct welcome message and send it with the main menu
+    # 2. Construct welcome message, send it, and store its ID for later editing.
     welcome_msg = f"✅ Character **{character_name}** added! Starting initial data sync in the background. This might take a few minutes."
-    await send_main_menu_async(bot, telegram_user_id, top_message=welcome_msg)
+    sent_message = await send_main_menu_async(bot, telegram_user_id, top_message=welcome_msg)
+    if sent_message:
+        # Store the message ID so the sync task can edit it upon completion.
+        state_key = f"welcome_message_id_{telegram_user_id}"
+        message_info = f"{sent_message.chat_id}:{sent_message.message_id}"
+        set_bot_state(state_key, message_info)
+        logging.info(f"Stored welcome message ID for user {telegram_user_id}: {message_info}")
 
 
 @celery.task(name='tasks.send_welcome_and_menu')
@@ -94,7 +101,7 @@ def send_welcome_and_menu(telegram_user_id: int, character_name: str):
 def seed_character_data_task(character_id: int):
     """
     Task to seed initial data for a new character in the background.
-    Notifies the user upon completion.
+    Notifies the user upon completion by editing the welcome message.
     """
     logging.info(f"Starting background data seed for character_id: {character_id}")
     character = get_character_by_id(character_id)
@@ -106,12 +113,29 @@ def seed_character_data_task(character_id: int):
     seed_successful = seed_data_for_character(character)
 
     if seed_successful:
-        msg = "Sync complete\nAll historical data has been imported"
+        msg = "✅ Sync complete!\nAll historical data has been imported."
     else:
         msg = f"⚠️ Failed to import historical data for **{character.name}**. The process will be retried automatically."
 
-    # Send the main menu with the status message at the top.
-    send_main_menu_sync(bot, character.telegram_user_id, top_message=msg)
+    # Try to edit the original welcome message.
+    state_key = f"welcome_message_id_{character.telegram_user_id}"
+    message_info = get_bot_state(state_key)
+    edited = False
+    if message_info:
+        try:
+            chat_id_str, message_id_str = message_info.split(':')
+            chat_id, message_id = int(chat_id_str), int(message_id_str)
+            edit_main_menu_sync(bot, chat_id, message_id, top_message=msg)
+            set_bot_state(state_key, "") # Clear the state after using it
+            edited = True
+            logging.info(f"Edited welcome message {message_id} for user {character.telegram_user_id} with sync status.")
+        except (ValueError, TypeError) as e:
+            logging.error(f"Error parsing welcome message info '{message_info}': {e}. Falling back to sending new message.")
+
+    # Fallback to sending a new message if editing failed.
+    if not edited:
+        logging.warning(f"Could not find or edit welcome message for user {character.telegram_user_id}. Sending a new message instead.")
+        send_main_menu_sync(bot, character.telegram_user_id, top_message=msg)
 
 
 # --- Dispatcher Tasks (Triggered by Celery Beat) ---
