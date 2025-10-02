@@ -3227,6 +3227,63 @@ def _format_overview_message(overview_data: dict, character: Character) -> tuple
     return message, InlineKeyboardMarkup(keyboard)
 
 
+def prepare_paginated_overview_data(user_id: int, page: int = 0):
+    """
+    Prepares the data for a single page of the multi-character overview.
+    This is a synchronous, data-intensive function designed to be called from a Celery task.
+    Returns a tuple of (message_text, reply_markup_json, status).
+    Status can be 'success', 'no_characters'.
+    """
+    user_characters = get_characters_for_user(user_id)
+    if not user_characters:
+        return "You have no characters to display.", None, "no_characters"
+
+    total_pages = len(user_characters)
+    # Ensure page index is valid
+    page = max(0, min(page, total_pages - 1))
+
+    character = user_characters[page]
+
+    # Calculate and format the overview for the current character
+    overview_data = _calculate_overview_data(character)
+    # Get the standard message and the base keyboard with chart buttons
+    message, base_keyboard = _format_overview_message(overview_data, character)
+
+    # --- Modify the keyboard for pagination ---
+    new_keyboard_rows = []
+
+    # 1. Modify the chart buttons to include pagination info for the back button
+    for row in base_keyboard.inline_keyboard:
+        new_row = []
+        for button in row:
+            # Original callback data: chart_{type}_{char_id}
+            # We append the origin information for the chart's "Back" button.
+            # e.g., chart_lastday_12345_page_0
+            new_callback_data = f"{button.callback_data}_page_{page}"
+            new_row.append(InlineKeyboardButton(button.text, callback_data=new_callback_data))
+        new_keyboard_rows.append(new_row)
+
+    # 2. Add navigation buttons
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"overview_page_{page - 1}"))
+
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"overview_page_{page + 1}"))
+
+    if nav_row:
+        new_keyboard_rows.append(nav_row)
+
+    # 3. Add a back button to the character selection screen
+    new_keyboard_rows.append([InlineKeyboardButton("« Back to Character Selection", callback_data="overview")])
+
+    reply_markup = InlineKeyboardMarkup(new_keyboard_rows)
+
+    return message, json.dumps(reply_markup.to_dict()), "success"
+
+
 # --- Chart Generation ---
 
 def format_isk(value):

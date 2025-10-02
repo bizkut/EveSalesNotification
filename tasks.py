@@ -47,7 +47,8 @@ from app_utils import (
     get_characters_for_user,
     prepare_open_orders_data,
     prepare_historical_buys_data,
-    prepare_character_info_data
+    prepare_character_info_data,
+    prepare_paginated_overview_data
 )
 
 # --- Telegram Bot Initialization & Helper ---
@@ -314,10 +315,11 @@ def continue_backfill_character_history(self, character_id: int):
 
 
 @celery.task(name='tasks.generate_chart_task')
-def generate_chart_task(character_id: int, chart_type: str, chat_id: int, generating_message_id: int):
+def generate_chart_task(character_id: int, chart_type: str, chat_id: int, generating_message_id: int, origin_page: int = None):
     """
     Celery task to generate and send a chart in the background, with caching.
     This replaces the bot's internal JobQueue for better scalability.
+    It now accepts an optional origin_page to build the correct "Back" button.
     """
     bot = get_bot()
     character = get_character_by_id(character_id)
@@ -341,7 +343,16 @@ def generate_chart_task(character_id: int, chart_type: str, chat_id: int, genera
             '30days': "Last 30 Days", 'alltime': "All Time"
         }
         base_caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character_id}")]]
+
+        # Dynamically create the "Back" button based on the origin
+        if origin_page is not None:
+            # Came from a paginated view, so go back to that page
+            back_button_callback = f"overview_page_{origin_page}"
+        else:
+            # Came from a single character view or an unknown source
+            back_button_callback = f"overview_char_{character_id}"
+
+        keyboard = [[InlineKeyboardButton("« Back to Overview", callback_data=back_button_callback)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Check for cached chart first
@@ -479,6 +490,44 @@ def generate_overview_task(character_id: int, user_id: int, chat_id: int, messag
         asyncio.run(send_overview())
     except Exception as e:
         logging.error(f"Error running asyncio for generate_overview_task: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.generate_paginated_overview_task')
+def generate_paginated_overview_task(user_id: int, chat_id: int, message_id: int, page: int):
+    """
+    Celery task to generate and send a single page of the multi-character overview.
+    """
+    bot = get_bot()
+
+    message_text, reply_markup_json, status = prepare_paginated_overview_data(user_id, page)
+
+    reply_markup = None
+    if reply_markup_json:
+        reply_markup = InlineKeyboardMarkup.de_json(json.loads(reply_markup_json), bot)
+
+    async def edit_message():
+        try:
+            await bot.edit_message_text(
+                text=message_text,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logging.error(f"Error editing message for paginated overview task: {e}", exc_info=True)
+            # As a fallback, send a new message if editing fails (e.g., message was deleted)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+    try:
+        asyncio.run(edit_message())
+    except Exception as e:
+        logging.error(f"Error running asyncio for generate_paginated_overview_task: {e}", exc_info=True)
 
 
 @celery.task(name='tasks.display_open_orders_task')
