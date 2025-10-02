@@ -3000,8 +3000,8 @@ def _prepare_chart_data(character_id, start_of_period):
     return inventory, events_in_period
 
 def _calculate_overview_data(character: Character) -> dict:
-    """Fetches all necessary data from the local DB and calculates overview statistics."""
-    logging.info(f"Calculating overview data for {character.name} from local database...")
+    """Calculates overview statistics directly from the wallet journal."""
+    logging.info(f"Calculating overview data for {character.name} from wallet journal...")
 
     now = datetime.now(timezone.utc)
     one_day_ago = now - timedelta(days=1)
@@ -3010,62 +3010,37 @@ def _calculate_overview_data(character: Character) -> dict:
     all_transactions = get_historical_transactions_from_db(character.id)
     full_journal = get_full_wallet_journal_from_db(character.id)
 
-    # --- Profit/Loss Calculation ---
-    def calculate_profit(start_date):
-        inventory, events = _prepare_chart_data(character.id, start_date)
+    def calculate_journal_flow(start_date):
+        """Calculates sales, fees, and profit from journal entries after a given date."""
         profit = 0
         sales_value = 0
+        fees_value = 0
+        relevant_entries = [e for e in full_journal if e['date'] >= start_date]
 
-        # Separate journaled fees from estimated broker fees
-        # `events` from `_prepare_chart_data` now only contains transaction_tax and brokers_fee
-        journaled_fees_value = sum(abs(e['data']['amount']) for e in events if e['type'] == 'fee')
-        estimated_broker_fees = 0
+        for entry in relevant_entries:
+            ref_type = entry.get('ref_type')
+            amount = entry.get('amount', 0)
 
-        # Manually calculate market provider tax for the period as a general expense
-        market_provider_tax_value = sum(
-            abs(entry['amount']) for entry in full_journal
-            if entry['ref_type'] == 'market_provider_tax' and entry['date'] >= start_date
-        )
+            # Sum up all costs/fees
+            if amount < 0:
+                fees_value += abs(amount)
 
-        for event in events:
-            if event['type'] == 'tx':
-                tx = event['data']
-                if tx.get('is_buy'):
-                    inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-                else: # Sale
-                    sale_value = tx['quantity'] * tx['unit_price']
-                    sales_value += sale_value
-                    cogs = 0
-                    remaining_to_sell = tx['quantity']
-                    lots = inventory.get(tx['type_id'], [])
-                    if lots:
-                        consumed_count = 0
-                        for lot in lots:
-                            if remaining_to_sell <= 0: break
-                            take = min(remaining_to_sell, lot['quantity'])
-                            cogs += take * lot['price']
-                            remaining_to_sell -= take
-                            lot['quantity'] -= take
-                            if lot['quantity'] == 0: consumed_count += 1
-                        inventory[tx['type_id']] = lots[consumed_count:]
+            # Sum up all income
+            if amount > 0:
+                sales_value += amount
 
-                    # Add estimated broker fees for this sale
-                    if cogs > 0:
-                        estimated_broker_fees += (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+            # Profit is the net of all movements
+            profit += amount
 
-                    profit += sale_value - cogs
 
-        # Subtract all fees from the final profit
-        total_fees = journaled_fees_value + estimated_broker_fees + market_provider_tax_value
-        profit -= total_fees
+        return profit, sales_value, fees_value
 
-        return profit, sales_value, total_fees
-
-    profit_24h, total_sales_24h, total_fees_24h = calculate_profit(one_day_ago)
-    profit_30_days, total_sales_30_days, total_fees_30_days = calculate_profit(thirty_days_ago)
+    profit_24h, total_sales_24h, total_fees_24h = calculate_journal_flow(one_day_ago)
+    profit_30_days, total_sales_30_days, total_fees_30_days = calculate_journal_flow(thirty_days_ago)
 
     wallet_balance = get_last_known_wallet_balance(character)
-    available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions))) if all_transactions else []
+    available_years = sorted(list(set(tx['date'].year for tx in full_journal))) if full_journal else []
+
 
     return {
         "now": now, "wallet_balance": wallet_balance,
@@ -3074,6 +3049,7 @@ def _calculate_overview_data(character: Character) -> dict:
         "available_years": available_years
     }
 
+
 def _format_overview_message(overview_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
     """Formats the overview data into a message string and keyboard."""
     now = overview_data['now']
@@ -3081,15 +3057,15 @@ def _format_overview_message(overview_data: dict, character: Character) -> tuple
         f"📊 *Market Overview ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
         f"*Wallet Balance:* `{overview_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
-        f"*Last Day:*\n"
+        f"*Last Day (Journal Flow):*\n"
         f"  - Total Sales Value: `{overview_data['total_sales_24h']:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_24h']:,.2f} ISK`\n"
-        f"  - **Profit (FIFO):** `{overview_data['profit_24h']:,.2f} ISK`\n\n"
+        f"  - **Profit:** `{overview_data['profit_24h']:,.2f} ISK`\n\n"
         f"---\n\n"
-        f"🗓️ *Last 30 Days:*\n"
+        f"🗓️ *Last 30 Days (Journal Flow):*\n"
         f"  - Total Sales Value: `{overview_data['total_sales_30_days']:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_30_days']:,.2f} ISK`\n"
-        f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`"
+        f"  - **Profit:** `{overview_data['profit_30_days']:,.2f} ISK`"
     )
     keyboard = [
         [InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"), InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}")],
@@ -3111,81 +3087,13 @@ def format_isk(value):
     return f"{value:.2f}"
 
 
-def _calculate_top_profitable_items(events_in_period: list, initial_inventory: dict, character_id: int) -> str:
-    """
-    Calculates the top 5 most profitable items from a list of events and returns a formatted string.
-    This helper function is designed to be called by the various chart generation functions.
-    """
-    inventory = initial_inventory.copy()
-    item_profits = defaultdict(lambda: {'profit': 0, 'sales_value': 0})
-
-    # First, process all buys in the period to update the inventory
-    for event in events_in_period:
-        if event['type'] == 'tx' and event['data'].get('is_buy'):
-            tx = event['data']
-            inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-
-    # Then, process all sales and fees
-    for event in events_in_period:
-        if event['type'] == 'tx' and not event['data'].get('is_buy'):
-            tx = event['data']
-            sale_value = tx['quantity'] * tx['unit_price']
-
-            cogs = 0
-            remaining_to_sell = tx['quantity']
-            lots = inventory.get(tx['type_id'], [])
-            if lots:
-                consumed_count = 0
-                for lot in lots:
-                    if remaining_to_sell <= 0: break
-                    take = min(remaining_to_sell, lot['quantity'])
-                    cogs += take * lot['price']
-                    remaining_to_sell -= take
-                    lot['quantity'] -= take
-                    if lot['quantity'] == 0: consumed_count += 1
-                inventory[tx['type_id']] = lots[consumed_count:]
-
-            # Only track profit if COGS could be fully determined
-            if remaining_to_sell == 0:
-                net_profit = sale_value - cogs
-                item_profits[tx['type_id']]['profit'] += net_profit
-                item_profits[tx['type_id']]['sales_value'] += sale_value
-
-    if not item_profits:
-        return ""
-
-    # Sort items by profit in descending order
-    sorted_items = sorted(item_profits.items(), key=lambda item: item[1]['profit'], reverse=True)
-
-    # Get the top 5
-    top_5_items = sorted_items[:5]
-
-    if not top_5_items:
-        return ""
-
-    # Resolve names for the top 5 items
-    type_ids = [item_id for item_id, data in top_5_items]
-    character = get_character_by_id(character_id)
-    id_to_name = get_names_from_ids(type_ids, character)
-
-    # Format the output string
-    lines = ["\n\n*Top 5 Profitable Items (Net Profit):*"]
-    for item_id, data in top_5_items:
-        name = id_to_name.get(item_id, f"Unknown Item ID: {item_id}")
-        profit_in_millions = data['profit'] / 1_000_000
-        lines.append(f"  - `{name}`: `{profit_in_millions:,.2f}m ISK`")
-
-    return "\n".join(lines)
-
-
 def generate_last_day_chart(character_id: int):
     """
-    Generates a chart for the last 24 hours, processing events chronologically to ensure accuracy.
-    Also calculates the top 5 profitable items for the period.
+    Generates a chart for the last 24 hours based on wallet journal flow.
     Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
     """
     import matplotlib
-    matplotlib.use('Agg')  # Use a non-interactive backend
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
     if not character: return None, None
@@ -3193,27 +3101,18 @@ def generate_last_day_chart(character_id: int):
     now = datetime.now(timezone.utc)
     start_of_period = now - timedelta(days=1)
 
-    # Get initial inventory state and all events within the period, sorted chronologically.
-    inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
+    full_journal = get_full_wallet_journal_from_db(character_id)
+    events_in_period = sorted([e for e in full_journal if e['date'] >= start_of_period], key=lambda x: x['date'])
 
-    # If there are no events, there's nothing to chart.
-    if not any(e['type'] == 'tx' and not e['data'].get('is_buy') for e in events_in_period) and \
-       not any(e['type'] == 'fee' for e in events_in_period):
+    if not events_in_period:
         return None, None
 
-    # --- Top Items Calculation ---
-    # Create a deep copy of the inventory for the profit calculation to not interfere with the chart calculation
-    inventory_for_profit_calc = defaultdict(list)
-    for type_id, lots in inventory.items():
-        inventory_for_profit_calc[type_id] = [lot.copy() for lot in lots]
-    caption_suffix = _calculate_top_profitable_items(events_in_period, inventory_for_profit_calc, character_id)
-
+    caption_suffix = ""  # Top profitable items calculation removed
 
     # --- Data Preparation for Chart ---
     hour_labels = [(start_of_period + timedelta(hours=i)).strftime('%H:00') for i in range(24)]
-    hourly_sales = {label: 0 for label in hour_labels}
-    hourly_fees = {label: 0 for label in hour_labels}
-
+    hourly_income = {label: 0 for label in hour_labels}
+    hourly_expenses = {label: 0 for label in hour_labels}
     hourly_cumulative_profit = []
     accumulated_profit = 0
     event_idx = 0
@@ -3224,47 +3123,16 @@ def generate_last_day_chart(character_id: int):
         hour_end = hour_start + timedelta(hours=1)
         hour_label = hour_start.strftime('%H:00')
 
-        # Process all events that fall within this hour, in order.
         while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < hour_end:
-            event = events_in_period[event_idx]
-            event_type = event['type']
-            data = event['data']
+            entry = events_in_period[event_idx]
+            amount = entry.get('amount', 0)
 
-            if event_type == 'tx':
-                if data.get('is_buy'):
-                    inventory[data['type_id']].append({'quantity': data['quantity'], 'price': data['unit_price']})
-                else:  # Sale
-                    sale_value = data['quantity'] * data['unit_price']
-                    hourly_sales[hour_label] += sale_value
-
-                    cogs = 0
-                    remaining_to_sell = data['quantity']
-                    lots = inventory.get(data['type_id'], [])
-                    if lots:
-                        consumed_count = 0
-                        for lot in lots:
-                            if remaining_to_sell <= 0: break
-                            take = min(remaining_to_sell, lot['quantity'])
-                            cogs += take * lot['price']
-                            remaining_to_sell -= take
-                            lot['quantity'] -= take
-                            if lot['quantity'] == 0: consumed_count += 1
-                        inventory[data['type_id']] = lots[consumed_count:]
-                    # Estimate broker fees for this sale
-                    estimated_broker_fee = 0
-                    if cogs > 0:
-                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
-
-                    hourly_fees[hour_label] += estimated_broker_fee
-                    accumulated_profit += sale_value - cogs - estimated_broker_fee
-
-            elif event_type == 'fee':
-                fee_amount = abs(data['amount'])
-                hourly_fees[hour_label] += fee_amount
-                accumulated_profit -= fee_amount
-
+            if amount > 0:
+                hourly_income[hour_label] += amount
+            elif amount < 0:
+                hourly_expenses[hour_label] += abs(amount)
+            accumulated_profit += amount
             event_idx += 1
-
         hourly_cumulative_profit.append(accumulated_profit)
 
     # --- Plotting ---
@@ -3275,19 +3143,18 @@ def generate_last_day_chart(character_id: int):
     bar_width = 0.4
     r1 = range(len(hour_labels))
     r2 = [x + bar_width for x in r1]
-    ax.bar(r1, list(hourly_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
-    ax.bar(r2, list(hourly_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
+    ax.bar(r1, list(hourly_income.values()), color='cyan', width=bar_width, edgecolor='black', label='Income', zorder=2)
+    ax.bar(r2, list(hourly_expenses.values()), color='red', width=bar_width, edgecolor='black', label='Expenses', zorder=2)
 
     ax2 = ax.twinx()
-    # Prepend the starting profit (0) for the line plot
     final_profit_line = [0] + hourly_cumulative_profit
-    ax2.plot(range(25), final_profit_line, label='Accumulated Profit', color='lime', linestyle='-', zorder=3)
+    ax2.plot(range(25), final_profit_line, label='Net Money Flow', color='lime', linestyle='-', zorder=3)
     ax2.fill_between(range(25), final_profit_line, color="lime", alpha=0.3, zorder=1)
 
-    ax.set_title(f'Performance for {character.name} (Last 24 Hours)', color='white', fontsize=16)
+    ax.set_title(f'Money Flow for {character.name} (Last 24 Hours)', color='white', fontsize=16)
     ax.set_xlabel('Hour (UTC)', color='white', fontsize=12)
-    ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
-    ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
+    ax.set_ylabel('Income / Expenses (ISK)', color='white', fontsize=12)
+    ax2.set_ylabel('Net Money Flow (ISK)', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
@@ -3306,14 +3173,14 @@ def generate_last_day_chart(character_id: int):
     buf.seek(0)
     return buf, caption_suffix
 
+
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     """
-    Helper to generate charts with a daily breakdown (last 7/30 days).
-    Also calculates the top 5 profitable items for the period.
+    Helper to generate charts with a daily breakdown (last 7/30 days) based on wallet journal flow.
     Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
     """
     import matplotlib
-    matplotlib.use('Agg')  # Use a non-interactive backend
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
     if not character: return None, None
@@ -3321,25 +3188,20 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     now = datetime.now(timezone.utc)
     start_of_period = (now - timedelta(days=days_to_show-1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    inventory, events_in_period = _prepare_chart_data(character_id, start_of_period)
+    full_journal = get_full_wallet_journal_from_db(character_id)
+    events_in_period = sorted([e for e in full_journal if e['date'] >= start_of_period], key=lambda x: x['date'])
 
-    if not any(e['type'] == 'tx' and not e['data'].get('is_buy') for e in events_in_period) and \
-       not any(e['type'] == 'fee' for e in events_in_period):
+    if not events_in_period:
         return None, None
 
-    # --- Top Items Calculation ---
-    inventory_for_profit_calc = defaultdict(list)
-    for type_id, lots in inventory.items():
-        inventory_for_profit_calc[type_id] = [lot.copy() for lot in lots]
-    caption_suffix = _calculate_top_profitable_items(events_in_period, inventory_for_profit_calc, character_id)
+    caption_suffix = "" # Top profitable items calculation removed
 
     # --- Data Preparation for Chart ---
     days = [(start_of_period + timedelta(days=i)) for i in range(days_to_show)]
     label_format = '%d' if days_to_show == 30 else '%m-%d'
     bar_labels = [d.strftime(label_format) for d in days]
-    daily_sales = {label: 0 for label in bar_labels}
-    daily_fees = {label: 0 for label in bar_labels}
-
+    daily_income = {label: 0 for label in bar_labels}
+    daily_expenses = {label: 0 for label in bar_labels}
     daily_cumulative_profit = []
     accumulated_profit = 0
     event_idx = 0
@@ -3350,44 +3212,15 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
         day_label = day_start.strftime(label_format)
 
         while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < day_end:
-            event = events_in_period[event_idx]
-            event_type = event['type']
-            data = event['data']
+            entry = events_in_period[event_idx]
+            amount = entry.get('amount', 0)
 
-            if event_type == 'tx':
-                if data.get('is_buy'):
-                    inventory[data['type_id']].append({'quantity': data['quantity'], 'price': data['unit_price']})
-                else:  # Sale
-                    sale_value = data['quantity'] * data['unit_price']
-                    daily_sales[day_label] += sale_value
-                    cogs = 0
-                    remaining_to_sell = data['quantity']
-                    lots = inventory.get(data['type_id'], [])
-                    if lots:
-                        consumed_count = 0
-                        for lot in lots:
-                            if remaining_to_sell <= 0: break
-                            take = min(remaining_to_sell, lot['quantity'])
-                            cogs += take * lot['price']
-                            remaining_to_sell -= take
-                            lot['quantity'] -= take
-                            if lot['quantity'] == 0: consumed_count += 1
-                        inventory[data['type_id']] = lots[consumed_count:]
-                    # Estimate broker fees for this sale
-                    estimated_broker_fee = 0
-                    if cogs > 0:
-                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
-
-                    daily_fees[day_label] += estimated_broker_fee
-                    accumulated_profit += sale_value - cogs - estimated_broker_fee
-
-            elif event_type == 'fee':
-                fee_amount = abs(data['amount'])
-                daily_fees[day_label] += fee_amount
-                accumulated_profit -= fee_amount
-
+            if amount > 0:
+                daily_income[day_label] += amount
+            elif amount < 0:
+                daily_expenses[day_label] += abs(amount)
+            accumulated_profit += amount
             event_idx += 1
-
         daily_cumulative_profit.append(accumulated_profit)
 
     # --- Plotting ---
@@ -3398,18 +3231,18 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     bar_width = 0.4
     r1 = range(len(bar_labels))
     r2 = [x + bar_width for x in r1]
-    ax.bar(r1, list(daily_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
-    ax.bar(r2, list(daily_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
+    ax.bar(r1, list(daily_income.values()), color='cyan', width=bar_width, edgecolor='black', label='Income', zorder=2)
+    ax.bar(r2, list(daily_expenses.values()), color='red', width=bar_width, edgecolor='black', label='Expenses', zorder=2)
 
     ax2 = ax.twinx()
     final_profit_line = [0] + daily_cumulative_profit
-    ax2.plot(range(days_to_show + 1), final_profit_line, label='Accumulated Profit', color='lime', linestyle='-', zorder=3)
+    ax2.plot(range(days_to_show + 1), final_profit_line, label='Net Money Flow', color='lime', linestyle='-', zorder=3)
     ax2.fill_between(range(days_to_show + 1), final_profit_line, color="lime", alpha=0.3, zorder=1)
 
-    ax.set_title(f'Performance for {character.name} (Last {days_to_show} Days)', color='white', fontsize=16)
+    ax.set_title(f'Money Flow for {character.name} (Last {days_to_show} Days)', color='white', fontsize=16)
     ax.set_xlabel('Date', color='white', fontsize=12)
-    ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
-    ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
+    ax.set_ylabel('Income / Expenses (ISK)', color='white', fontsize=12)
+    ax2.set_ylabel('Net Money Flow (ISK)', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
@@ -3428,34 +3261,35 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     buf.seek(0)
     return buf, caption_suffix
 
+
 def generate_last_7_days_chart(character_id: int):
     """Generates a chart for the last 7 days."""
     return _generate_daily_breakdown_chart(character_id, 7)
+
 
 def generate_last_30_days_chart(character_id: int):
     """Generates a chart for the last 30 days."""
     return _generate_daily_breakdown_chart(character_id, 30)
 
+
 def generate_all_time_chart(character_id: int):
     """
-    Generates a monthly breakdown chart for the character's entire history.
-    Also calculates the top 5 profitable items for the period.
+    Generates a monthly breakdown chart for the character's entire history based on wallet journal flow.
     Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
     """
     import matplotlib
-    matplotlib.use('Agg')  # Use a non-interactive backend
+    matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     character = get_character_by_id(character_id)
     if not character: return None, None
 
-    inventory, events_in_period = _prepare_chart_data(character_id, datetime.min.replace(tzinfo=timezone.utc))
-    if not events_in_period: return None, None
+    full_journal = get_full_wallet_journal_from_db(character_id)
+    events_in_period = sorted(full_journal, key=lambda x: x['date'])
 
-    # --- Top Items Calculation ---
-    inventory_for_profit_calc = defaultdict(list)
-    for type_id, lots in inventory.items():
-        inventory_for_profit_calc[type_id] = [lot.copy() for lot in lots]
-    caption_suffix = _calculate_top_profitable_items(events_in_period, inventory_for_profit_calc, character_id)
+    if not events_in_period:
+        return None, None
+
+    caption_suffix = "" # Top profitable items calculation removed
 
     # --- Data Preparation for Chart ---
     start_date = events_in_period[0]['date']
@@ -3472,8 +3306,8 @@ def generate_all_time_chart(character_id: int):
         current_month = current_month.replace(year=next_year_val, month=next_month_val)
 
     bar_labels = [m.strftime('%Y-%m') for m in months]
-    monthly_sales = {label: 0 for label in bar_labels}
-    monthly_fees = {label: 0 for label in bar_labels}
+    monthly_income = {label: 0 for label in bar_labels}
+    monthly_expenses = {label: 0 for label in bar_labels}
     monthly_cumulative_profit = []
     accumulated_profit = 0
     event_idx = 0
@@ -3484,43 +3318,15 @@ def generate_all_time_chart(character_id: int):
         next_month_start = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
 
         while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < next_month_start:
-            event = events_in_period[event_idx]
-            event_type = event['type']
-            data = event['data']
+            entry = events_in_period[event_idx]
+            amount = entry.get('amount', 0)
 
-            if event_type == 'tx':
-                if data.get('is_buy'):
-                    inventory[data['type_id']].append({'quantity': data['quantity'], 'price': data['unit_price']})
-                else: # Sale
-                    sale_value = data['quantity'] * data['unit_price']
-                    monthly_sales[month_label] += sale_value
-                    cogs = 0
-                    remaining_to_sell = data['quantity']
-                    lots = inventory.get(data['type_id'], [])
-                    if lots:
-                        consumed_count = 0
-                        for lot in lots:
-                            if remaining_to_sell <= 0: break
-                            take = min(remaining_to_sell, lot['quantity'])
-                            cogs += take * lot['price']
-                            remaining_to_sell -= take
-                            lot['quantity'] -= take
-                            if lot['quantity'] == 0: consumed_count += 1
-                        inventory[data['type_id']] = lots[consumed_count:]
-                    # Estimate broker fees for this sale
-                    estimated_broker_fee = 0
-                    if cogs > 0:
-                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
-
-                    monthly_fees[month_label] += estimated_broker_fee
-                    accumulated_profit += sale_value - cogs - estimated_broker_fee
-            elif event_type == 'fee':
-                fee_amount = abs(data['amount'])
-                monthly_fees[month_label] += fee_amount
-                accumulated_profit -= fee_amount
-
+            if amount > 0:
+                monthly_income[month_label] += amount
+            elif amount < 0:
+                monthly_expenses[month_label] += abs(amount)
+            accumulated_profit += amount
             event_idx += 1
-
         monthly_cumulative_profit.append(accumulated_profit)
 
     # --- Plotting ---
@@ -3531,18 +3337,18 @@ def generate_all_time_chart(character_id: int):
     bar_width = 0.4
     r1 = range(len(bar_labels))
     r2 = [x + bar_width for x in r1]
-    ax.bar(r1, list(monthly_sales.values()), color='cyan', width=bar_width, edgecolor='black', label='Sales', zorder=2)
-    ax.bar(r2, list(monthly_fees.values()), color='red', width=bar_width, edgecolor='black', label='Fees', zorder=2)
+    ax.bar(r1, list(monthly_income.values()), color='cyan', width=bar_width, edgecolor='black', label='Income', zorder=2)
+    ax.bar(r2, list(monthly_expenses.values()), color='red', width=bar_width, edgecolor='black', label='Expenses', zorder=2)
 
     ax2 = ax.twinx()
     final_profit_line = [0] + monthly_cumulative_profit
-    ax2.plot(range(len(months) + 1), final_profit_line, label='Accumulated Profit', color='lime', linestyle='-', zorder=3)
+    ax2.plot(range(len(months) + 1), final_profit_line, label='Net Money Flow', color='lime', linestyle='-', zorder=3)
     ax2.fill_between(range(len(months) + 1), final_profit_line, color="lime", alpha=0.3, zorder=1)
 
-    ax.set_title(f'Performance for {character.name} (All Time)', color='white', fontsize=16)
+    ax.set_title(f'Money Flow for {character.name} (All Time)', color='white', fontsize=16)
     ax.set_xlabel('Month', color='white', fontsize=12)
-    ax.set_ylabel('Sales / Fees (ISK)', color='white', fontsize=12)
-    ax2.set_ylabel('Accumulated Profit (ISK)', color='white', fontsize=12)
+    ax.set_ylabel('Income / Expenses (ISK)', color='white', fontsize=12)
+    ax2.set_ylabel('Net Money Flow (ISK)', color='white', fontsize=12)
     ax.grid(True, which='both', linestyle='--', linewidth=0.5, color='gray', zorder=0)
     lines, labels = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
