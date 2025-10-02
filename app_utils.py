@@ -39,6 +39,8 @@ class Character:
     backfill_before_id: int | None
     buy_broker_fee: float
     sell_broker_fee: float
+    wallet_balance: float | None
+    wallet_balance_last_updated: datetime | None
 
 CHARACTERS: list[Character] = []
 
@@ -57,7 +59,8 @@ def load_characters_from_db():
                     enable_sales_notifications, enable_buys_notifications,
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contracts_notifications, notification_batch_threshold, created_at,
-                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
+                    wallet_balance, wallet_balance_last_updated
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -76,7 +79,8 @@ def load_characters_from_db():
             wallet_balance_threshold,
             enable_sales, enable_buys,
             enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
-            is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
+            is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
+            wallet_balance, wallet_balance_last_updated
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -98,7 +102,9 @@ def load_characters_from_db():
             is_backfilling=bool(is_backfilling),
             backfill_before_id=backfill_before_id,
             buy_broker_fee=float(buy_broker_fee),
-            sell_broker_fee=float(sell_broker_fee)
+            sell_broker_fee=float(sell_broker_fee),
+            wallet_balance=float(wallet_balance) if wallet_balance is not None else None,
+            wallet_balance_last_updated=wallet_balance_last_updated
         )
         CHARACTERS.append(character)
         logging.debug(f"Loaded character: {character.name} ({character.id})")
@@ -228,6 +234,19 @@ def setup_database():
                 logging.info("Applying migration: Adding 'sell_broker_fee' column to characters table...")
                 cursor.execute("ALTER TABLE characters ADD COLUMN sell_broker_fee NUMERIC(5, 2) DEFAULT 3.0;")
                 logging.info("Migration for 'sell_broker_fee' complete.")
+
+            # Migration: Add wallet balance caching columns
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'wallet_balance'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'wallet_balance' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN wallet_balance NUMERIC(17, 2);")
+                logging.info("Migration for 'wallet_balance' complete.")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'wallet_balance_last_updated'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'wallet_balance_last_updated' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN wallet_balance_last_updated TIMESTAMP WITH TIME ZONE;")
+                logging.info("Migration for 'wallet_balance_last_updated' complete.")
 
 
             cursor.execute("""
@@ -821,7 +840,8 @@ def get_characters_for_user(telegram_user_id):
                     enable_sales_notifications, enable_buys_notifications,
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contracts_notifications, notification_batch_threshold, created_at,
-                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
+                    wallet_balance, wallet_balance_last_updated
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -831,7 +851,8 @@ def get_characters_for_user(telegram_user_id):
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
                     enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
-                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
+                    wallet_balance, wallet_balance_last_updated
                 ) = row
 
                 user_characters.append(Character(
@@ -849,7 +870,9 @@ def get_characters_for_user(telegram_user_id):
                     is_backfilling=bool(is_backfilling),
                     backfill_before_id=backfill_before_id,
                     buy_broker_fee=float(buy_broker_fee),
-                    sell_broker_fee=float(sell_broker_fee)
+                    sell_broker_fee=float(sell_broker_fee),
+                    wallet_balance=float(wallet_balance) if wallet_balance is not None else None,
+                    wallet_balance_last_updated=wallet_balance_last_updated
                 ))
     finally:
         database.release_db_connection(conn)
@@ -869,7 +892,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_sales_notifications, enable_buys_notifications,
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contracts_notifications, notification_batch_threshold, created_at,
-                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
+                    wallet_balance, wallet_balance_last_updated
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -880,7 +904,8 @@ def get_character_by_id(character_id: int) -> Character | None:
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
                     enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
-                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
+                    wallet_balance, wallet_balance_last_updated
                 ) = row
 
                 character = Character(
@@ -898,7 +923,9 @@ def get_character_by_id(character_id: int) -> Character | None:
                     is_backfilling=bool(is_backfilling),
                     backfill_before_id=backfill_before_id,
                     buy_broker_fee=float(buy_broker_fee),
-                    sell_broker_fee=float(sell_broker_fee)
+                    sell_broker_fee=float(sell_broker_fee),
+                    wallet_balance=float(wallet_balance) if wallet_balance is not None else None,
+                    wallet_balance_last_updated=wallet_balance_last_updated
                 )
     finally:
         database.release_db_connection(conn)
@@ -927,6 +954,21 @@ def update_character_setting(character_id: int, setting: str, value: any):
     finally:
         database.release_db_connection(conn)
     logging.info(f"Updated {setting} for character {character_id} to {value}.")
+
+
+def update_character_wallet_balance(character_id: int, balance: float, last_updated: datetime):
+    """Updates the wallet balance and timestamp for a character in the database."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE characters SET wallet_balance = %s, wallet_balance_last_updated = %s WHERE character_id = %s",
+                (balance, last_updated, character_id)
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+    logging.info(f"Updated wallet balance for character {character_id} to {balance:,.2f} ISK.")
 
 
 def update_character_fee_setting(character_id: int, fee_type: str, value: float):
@@ -1686,10 +1728,48 @@ def get_character_skills(character, force_revalidate=False):
     url = f"https://esi.evetech.net/v4/characters/{character.id}/skills/"
     return make_esi_request(url, character=character, force_revalidate=force_revalidate)
 
-def get_wallet_balance(character, return_headers=False, force_revalidate=False):
-    if not character: return None
+def get_wallet_balance(character: Character, return_headers=False, force_revalidate=False):
+    """
+    Fetches a character's wallet balance, using a 2-minute cache stored in the database.
+    If force_revalidate is True, it bypasses the cache check but still updates the cache.
+    """
+    if not character:
+        return None
+
+    # 1. Check for a fresh, cached balance if not forcing a revalidation
+    if not force_revalidate and character.wallet_balance is not None and character.wallet_balance_last_updated is not None:
+        if (datetime.now(timezone.utc) - character.wallet_balance_last_updated) < timedelta(minutes=2):
+            logging.debug(f"Returning cached wallet balance for {character.name}.")
+            return character.wallet_balance
+
+    # 2. If cache is stale, non-existent, or revalidation is forced, fetch from ESI
+    logging.info(f"Fetching wallet balance from ESI for {character.name}...")
     url = f"https://esi.evetech.net/v1/characters/{character.id}/wallet/"
-    return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
+    # We use force_revalidate=True in the ESI call itself to ensure we get the absolute latest data from ESI's side,
+    # as their own cache can be up to 120 seconds old. Our own logic determines if we should even make the call.
+    response_data, headers = make_esi_request(url, character=character, return_headers=True, force_revalidate=True)
+
+    # 3. If the fetch is successful, update our cache and the in-memory object
+    if response_data is not None:
+        new_balance = float(response_data)
+        now = datetime.now(timezone.utc)
+
+        # Update the database
+        update_character_wallet_balance(character.id, new_balance, now)
+
+        # Update the in-memory Character object to prevent stale reads until next reload
+        character.wallet_balance = new_balance
+        character.wallet_balance_last_updated = now
+
+        return (new_balance, headers) if return_headers else new_balance
+
+    # 4. If ESI fetch fails, return the stale balance if we have one, otherwise None
+    logging.error(f"Failed to fetch new wallet balance for {character.name} from ESI.")
+    if character.wallet_balance is not None:
+        logging.warning(f"Returning stale cached balance of {character.wallet_balance} for {character.name}.")
+        return character.wallet_balance
+
+    return None
 
 def get_contracts(character, return_headers=False, force_revalidate=False):
     """
