@@ -191,26 +191,38 @@ def send_daily_overview(character_id: int):
 # --- Maintenance Tasks (Triggered by Celery Beat) ---
 
 @celery.task(name='tasks.check_new_characters')
-def check_new_characters():
+def check_new_characters(character_id=None):
     """
-    Periodically checks for characters that have been re-authenticated
-    (to update permissions) and notifies the user. The initial creation
-    of new characters is now handled by tasks triggered from the webapp.
+    Checks for characters that have been re-authenticated.
+    If character_id is provided, it processes that character directly.
+    Otherwise, it scans the database for all characters needing an update.
+    This handles both scheduled checks and immediate checks from the webapp.
     """
-    logging.info("Running job to check for updated characters.")
     # Force a reload of characters from the DB to ensure this worker has the latest data.
     load_characters_from_db()
+    bot = get_bot()
+
     try:
-        db_chars_info = get_new_and_updated_character_info()
-        if not db_chars_info:
+        char_ids_to_process = []
+        if character_id:
+            # Direct invocation from webapp for a specific character
+            logging.info(f"Running immediate check for updated character: {character_id}.")
+            char_ids_to_process.append(character_id)
+        else:
+            # Scheduled job to find all characters needing an update
+            logging.info("Running scheduled job to check for all updated characters.")
+            db_chars_info = get_new_and_updated_character_info()
+            if db_chars_info:
+                char_ids_to_process = [
+                    char_id for char_id, info in db_chars_info.items()
+                    if info.get('needs_update')
+                ]
+
+        if not char_ids_to_process:
+            logging.info("No updated characters to process.")
             return
 
-        bot = get_bot()
-        for char_id, info in db_chars_info.items():
-            # This task now only cares about characters that need an update notification.
-            if not info.get('needs_update'):
-                continue
-
+        for char_id in char_ids_to_process:
             character = get_character_by_id(char_id)
             if not character:
                 logging.error(f"Could not find details for character ID {char_id} in the database.")
@@ -228,6 +240,7 @@ def check_new_characters():
 
             # After sending the status, show the main menu
             send_main_menu_sync(bot, character.telegram_user_id)
+
     except Exception as e:
         logging.error(f"Error in check_new_characters task: {e}", exc_info=True)
 
