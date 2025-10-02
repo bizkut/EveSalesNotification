@@ -128,7 +128,7 @@ def setup_database():
                     enable_sales_notifications BOOLEAN DEFAULT TRUE,
                     enable_buy_notifications BOOLEAN DEFAULT TRUE,
                     enable_daily_overview BOOLEAN DEFAULT TRUE,
-                    enable_undercut_notifications BOOLEAN DEFAULT FALSE,
+                    enable_undercut_notifications BOOLEAN DEFAULT TRUE,
                     notification_batch_threshold INTEGER DEFAULT 3,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
                     needs_update_notification BOOLEAN DEFAULT FALSE,
