@@ -3015,23 +3015,23 @@ def _calculate_overview_data(character: Character) -> dict:
         profit = 0
         sales_value = 0
         fees_value = 0
+        fee_ref_types = {'transaction_tax', 'brokers_fee', 'market_provider_tax'}
         relevant_entries = [e for e in full_journal if e['date'] >= start_date]
 
         for entry in relevant_entries:
             ref_type = entry.get('ref_type')
             amount = entry.get('amount', 0)
 
-            # Sum up all costs/fees
-            if amount < 0:
+            # Sum up specific fee types
+            if ref_type in fee_ref_types:
                 fees_value += abs(amount)
 
-            # Sum up all income
+            # Sum up all income for a simple "sales" value
             if amount > 0:
                 sales_value += amount
 
             # Profit is the net of all movements
             profit += amount
-
 
         return profit, sales_value, fees_value
 
