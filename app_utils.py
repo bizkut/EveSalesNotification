@@ -2664,7 +2664,7 @@ def process_character_wallet(character_id: int) -> list[dict]:
                             tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
                             fee_journal_by_timestamp = defaultdict(list)
                             for entry in full_journal:
-                                if entry['ref_type'] in {'transaction_tax', 'market_provider_tax'}:
+                                if entry['ref_type'] == 'transaction_tax':
                                     fee_journal_by_timestamp[entry['date']].append(entry)
 
                             for type_id, tx_group in sales.items():
@@ -2965,7 +2965,7 @@ def _prepare_chart_data(character_id, start_of_period):
     """
     all_transactions = get_historical_transactions_from_db(character_id)
     full_journal = get_full_wallet_journal_from_db(character_id)
-    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+    fee_ref_types = {'transaction_tax', 'brokers_fee'}
 
     all_events = []
     for tx in all_transactions:
@@ -3009,7 +3009,6 @@ def _calculate_overview_data(character: Character) -> dict:
 
     all_transactions = get_historical_transactions_from_db(character.id)
     full_journal = get_full_wallet_journal_from_db(character.id)
-    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
 
     # --- Profit/Loss Calculation ---
     def calculate_profit(start_date):
@@ -3018,8 +3017,15 @@ def _calculate_overview_data(character: Character) -> dict:
         sales_value = 0
 
         # Separate journaled fees from estimated broker fees
+        # `events` from `_prepare_chart_data` now only contains transaction_tax and brokers_fee
         journaled_fees_value = sum(abs(e['data']['amount']) for e in events if e['type'] == 'fee')
         estimated_broker_fees = 0
+
+        # Manually calculate market provider tax for the period as a general expense
+        market_provider_tax_value = sum(
+            abs(entry['amount']) for entry in full_journal
+            if entry['ref_type'] == 'market_provider_tax' and entry['date'] >= start_date
+        )
 
         for event in events:
             if event['type'] == 'tx':
@@ -3050,7 +3056,7 @@ def _calculate_overview_data(character: Character) -> dict:
                     profit += sale_value - cogs
 
         # Subtract all fees from the final profit
-        total_fees = journaled_fees_value + estimated_broker_fees
+        total_fees = journaled_fees_value + estimated_broker_fees + market_provider_tax_value
         profit -= total_fees
 
         return profit, sales_value, total_fees

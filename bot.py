@@ -1518,7 +1518,7 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
 
     # Group all fee-related journal entries by their exact timestamp for quick lookup
     fee_journal_by_timestamp = defaultdict(list)
-    tax_ref_types = {'transaction_tax', 'market_provider_tax'}
+    tax_ref_types = {'transaction_tax'}
     for entry in full_journal:
         if entry['ref_type'] in tax_ref_types:
             # Use the parsed datetime object directly as the key
@@ -1611,7 +1611,7 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
     # --- Page Summary & Footer ---
     footer = (
         f"\n---\n*Broker Fees for this page's period:* `{page_broker_fees:,.2f}` ISK\n"
-        f"_(Note: Net Profit includes transaction taxes but not broker fees.)_"
+        f"_(Note: Net Profit is an estimate including sales tax and broker fees.)_"
     )
 
     # --- Keyboard ---
