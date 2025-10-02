@@ -2917,7 +2917,7 @@ def process_character_contracts(character_id: int) -> list[dict]:
     Processes contracts for a single character and returns notifications.
     """
     character = get_character_by_id(character_id)
-    if not character or not character.enable_contract_notifications:
+    if not character or not character.enable_contracts_notifications:
         return []
 
     notifications = []
