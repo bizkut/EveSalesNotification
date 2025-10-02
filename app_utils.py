@@ -3203,12 +3203,7 @@ def _calculate_overview_data(character: Character) -> dict:
         "available_years": available_years
     }
 
-def _format_overview_message(
-    overview_data: dict,
-    character: Character,
-    user_characters: list = None,
-    current_character_index: int = 0
-) -> tuple[str, InlineKeyboardMarkup]:
+def _format_overview_message(overview_data: dict, character: Character, user_characters: list[Character] = None, current_character_index: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     """Formats the overview data into a message string and keyboard, with pagination."""
     now = overview_data['now']
     message = (
@@ -3226,44 +3221,25 @@ def _format_overview_message(
         f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`"
     )
 
-    # --- Keyboard Construction ---
     keyboard = [
-        # Chart buttons are always present
-        [
-            InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"),
-            InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}")
-        ],
-        [
-            InlineKeyboardButton("Last 30 Days", callback_data=f"chart_30days_{character.id}"),
-            InlineKeyboardButton("All Time", callback_data=f"chart_alltime_{character.id}")
-        ]
+        [InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"), InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}")],
+        [InlineKeyboardButton("Last 30 Days", callback_data=f"chart_30days_{character.id}"), InlineKeyboardButton("All Time", callback_data=f"chart_alltime_{character.id}")]
     ]
 
     # --- Pagination Logic ---
-    if user_characters and len(user_characters) > 1:
-        total_chars = len(user_characters)
-        nav_row = []
+    if len(user_characters) > 1:
+        num_chars = len(user_characters)
+        prev_index = (current_character_index - 1 + num_chars) % num_chars
+        next_index = (current_character_index + 1) % num_chars
+        prev_char = user_characters[prev_index]
+        next_char = user_characters[next_index]
 
-        # Previous button
-        if current_character_index > 0:
-            prev_char_index = current_character_index - 1
-            prev_char = user_characters[prev_char_index]
-            nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"overview_char_{prev_char.id}_{prev_char_index}"))
-
-        # Page indicator
-        nav_row.append(InlineKeyboardButton(f"{current_character_index + 1} / {total_chars}", callback_data="noop"))
-
-        # Next button
-        if current_character_index < total_chars - 1:
-            next_char_index = current_character_index + 1
-            next_char = user_characters[next_char_index]
-            nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"overview_char_{next_char.id}_{next_char_index}"))
-
-        if nav_row:
-            keyboard.append(nav_row)
-
-    # Add a "Back" button that always goes to the main menu for consistency
-    keyboard.append([InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")])
+        pagination_row = [
+            InlineKeyboardButton(f"⬅️ {prev_char.name}", callback_data=f"overview_char_{prev_char.id}_{prev_index}"),
+            InlineKeyboardButton(f"{current_character_index + 1}/{num_chars}", callback_data="noop"),
+            InlineKeyboardButton(f"{next_char.name} ➡️", callback_data=f"overview_char_{next_char.id}_{next_index}")
+        ]
+        keyboard.append(pagination_row)
 
     return message, InlineKeyboardMarkup(keyboard)
 
@@ -3814,13 +3790,14 @@ def send_daily_overview_for_character(character_id: int, bot):
     logging.info(f"Running scheduled daily overview for {character.name}...")
     try:
         overview_data = _calculate_overview_data(character)
-        # The _format_overview_message function now handles adding the correct back button.
-        # No need to add it here again. We pass no user_characters list for a scheduled
-        # overview, so it will correctly generate a keyboard without pagination buttons.
         message, reply_markup = _format_overview_message(overview_data, character)
 
+        new_keyboard = list(reply_markup.inline_keyboard)
+        new_keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        new_reply_markup = InlineKeyboardMarkup(new_keyboard)
+
         from tasks import send_telegram_message_sync
-        send_telegram_message_sync(bot, message, chat_id=character.telegram_user_id, reply_markup=reply_markup)
+        send_telegram_message_sync(bot, message, chat_id=character.telegram_user_id, reply_markup=new_reply_markup)
         logging.info(f"Daily overview sent for {character.name}.")
     except Exception as e:
         logging.error(f"Failed to send daily overview for {character.name}: {e}", exc_info=True)

@@ -341,7 +341,8 @@ def generate_chart_task(character_id: int, chart_type: str, chat_id: int, genera
             '30days': "Last 30 Days", 'alltime': "All Time"
         }
         base_caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character_id}")]]
+        # Correctly format the callback to include the index `0` for the first character page.
+        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character.id}_0")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Check for cached chart first

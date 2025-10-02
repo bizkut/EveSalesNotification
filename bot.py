@@ -446,19 +446,16 @@ async def overview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_id = update.effective_user.id
     user_characters = get_characters_for_user(user_id)
     chat_id = update.effective_chat.id
-    message_id = update.effective_message.message_id
 
     if not user_characters:
-        # For new users or users with no characters, send a message and stop.
         message_text = "You have no characters added. Please use the 'Add Character' button first."
         if update.callback_query:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text)
+            await update.callback_query.edit_message_text(text=message_text)
         else:
-            await context.bot.send_message(chat_id=chat_id, text=message_text)
+            await update.message.reply_text(text=message_text)
         return
 
-    # For both single and multiple characters, we now immediately show the overview for the first one.
-    # The pagination logic will be handled by the _format_overview_message function.
+    # For both single and multiple characters, immediately show the overview for the first one.
     await _generate_and_send_overview(update, context, user_characters[0], character_index=0)
 
 
@@ -1190,29 +1187,13 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
             parts = data.split('_')
             character_id = int(parts[2])
             character_index = int(parts[3])
-
             char_to_query = get_character_by_id(character_id)
             if not char_to_query:
                 await query.edit_message_text("Error: Could not find character.")
                 return
-
-            # Call the overview generation function with the specific character and their index
             await _generate_and_send_overview(update, context, char_to_query, character_index)
-
         except (IndexError, ValueError):
-            # Fallback for old "overview_char_all" or malformed data
-            user_id = update.effective_user.id
-            char_id_str = data.split('_')[-1]
-            if char_id_str == "all":
-                await query.message.delete()
-                chars_to_query = get_characters_for_user(user_id)
-                for i, char in enumerate(chars_to_query):
-                    # We pass 'None' for the callback_query part of the update to force new messages
-                    # and ensure the index is passed correctly.
-                    await _generate_and_send_overview(Update(update.update_id, message=query.message), context, char, character_index=i)
-                    await asyncio.sleep(1) # Be nice to Telegram's API
-            else:
-                await query.edit_message_text("Error: Invalid overview request format.")
+            await query.edit_message_text("Error: Invalid overview request format.")
 
     # --- Historical Transaction Lists (Sales & Buys) ---
     elif data.startswith("history_list_sale_"):
