@@ -19,6 +19,7 @@ from app_utils import (
     Character, CHARACTERS, load_characters_from_db, setup_database,
     get_bot_state, set_bot_state, get_characters_for_user, get_character_by_id,
     update_character_setting, update_character_notification_setting,
+    update_character_fee_setting,
     reset_update_notification_flag, schedule_character_deletion,
     cancel_character_deletion, get_character_deletion_status,
     get_market_orders, get_market_orders_history, get_wallet_balance,
@@ -838,6 +839,10 @@ def _build_settings_message_and_keyboard(character: Character):
         [InlineKeyboardButton("ℹ️ Character Info", callback_data=f"character_info_{character.id}")],
         [InlineKeyboardButton("🔔 Notification Settings", callback_data=f"notifications_char_{character.id}")],
         [InlineKeyboardButton(f"Low Wallet Alert: {character.wallet_balance_threshold:,.0f} ISK", callback_data=f"set_wallet_{character.id}")],
+        [
+            InlineKeyboardButton(f"Buy Broker Fee: {character.buy_broker_fee:.2f}%", callback_data=f"set_buy_fee_{character.id}"),
+            InlineKeyboardButton(f"Sell Broker Fee: {character.sell_broker_fee:.2f}%", callback_data=f"set_sell_fee_{character.id}")
+        ],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1070,6 +1075,20 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             success = True
         except ValueError:
             error_message = "❌ Invalid input. Please enter a valid number. Try again or type `cancel`."
+
+    elif action_type in ['set_buy_fee_value', 'set_sell_fee_value']:
+        try:
+            new_fee = float(text.replace(',', '.'))
+            if not (0 <= new_fee <= 100):
+                raise ValueError("Fee must be between 0 and 100.")
+
+            fee_type = 'buy' if action_type == 'set_buy_fee_value' else 'sell'
+            update_character_fee_setting(character_id, fee_type, new_fee)
+            load_characters_from_db()
+            success = True
+        except ValueError:
+            error_message = "❌ Invalid input. Please enter a valid percentage (e.g., `3.5`). Try again or type `cancel`."
+
 
     if success:
         await show_settings_again()
@@ -1499,7 +1518,7 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
 
     # Group all fee-related journal entries by their exact timestamp for quick lookup
     fee_journal_by_timestamp = defaultdict(list)
-    tax_ref_types = {'transaction_tax', 'market_provider_tax'}
+    tax_ref_types = {'transaction_tax'}
     for entry in full_journal:
         if entry['ref_type'] in tax_ref_types:
             # Use the parsed datetime object directly as the key
@@ -1524,8 +1543,10 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
 
 
         sale['taxes'] = taxes
-        if sale['cogs'] is not None:
-            sale['net_profit'] = sale_value - sale['cogs'] - taxes
+        if sale.get('cogs') is not None:
+            estimated_broker_fees = (sale['cogs'] * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+            sale['total_fees'] = taxes + estimated_broker_fees
+            sale['net_profit'] = sale_value - sale['cogs'] - sale['total_fees']
         else:
             sale['net_profit'] = None
 
@@ -1581,8 +1602,8 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
         )
         if tx.get('cogs') is not None:
             line += f"  *Cost (FIFO):* `{tx['cogs']:,.2f}` ISK\n"
-            line += f"  *Taxes (Journal):* `{tx['taxes']:,.2f}` ISK\n"
-            line += f"  *Net Profit:* `{tx['net_profit']:,.2f}` ISK"
+            line += f"  *Total Fees (Est.):* `{tx.get('total_fees', 0):,.2f}` ISK\n"
+            line += f"  *Net Profit (Est.):* `{tx['net_profit']:,.2f}` ISK"
         else:
             line += f"  *Net Profit:* `N/A (Missing Purchase History)`"
         message_lines.append(line)
@@ -1590,7 +1611,7 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
     # --- Page Summary & Footer ---
     footer = (
         f"\n---\n*Broker Fees for this page's period:* `{page_broker_fees:,.2f}` ISK\n"
-        f"_(Note: Net Profit includes transaction taxes but not broker fees.)_"
+        f"_(Note: Net Profit is an estimate including sales tax and broker fees.)_"
     )
 
     # --- Keyboard ---
@@ -1748,6 +1769,19 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['next_action'] = ('set_wallet_value', char_id)
         context.user_data['prompt_message_id'] = query.message.message_id
         await query.edit_message_text("Please enter the new wallet balance threshold (e.g., 100000000 for 100m ISK).\n\nType `cancel` to go back.")
+
+    elif data.startswith("set_buy_fee_"):
+        char_id = int(data.split('_')[-1])
+        context.user_data['next_action'] = ('set_buy_fee_value', char_id)
+        context.user_data['prompt_message_id'] = query.message.message_id
+        await query.edit_message_text("Please enter the new buy broker fee percentage (e.g., `3.0`).\n\nType `cancel` to go back.")
+
+    elif data.startswith("set_sell_fee_"):
+        char_id = int(data.split('_')[-1])
+        context.user_data['next_action'] = ('set_sell_fee_value', char_id)
+        context.user_data['prompt_message_id'] = query.message.message_id
+        await query.edit_message_text("Please enter the new sell broker fee percentage (e.g., `3.0`).\n\nType `cancel` to go back.")
+
 
     # --- Character Removal Flow ---
     elif data.startswith("remove_select_"):

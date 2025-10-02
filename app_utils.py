@@ -37,6 +37,8 @@ class Character:
     created_at: datetime
     is_backfilling: bool
     backfill_before_id: int | None
+    buy_broker_fee: float
+    sell_broker_fee: float
 
 CHARACTERS: list[Character] = []
 
@@ -55,7 +57,7 @@ def load_characters_from_db():
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at,
-                    is_backfilling, backfill_before_id
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -74,7 +76,7 @@ def load_characters_from_db():
             wallet_balance_threshold,
             enable_sales, enable_buys,
             enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
-            is_backfilling, backfill_before_id
+            is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -94,7 +96,9 @@ def load_characters_from_db():
             notification_batch_threshold=batch_threshold,
             created_at=created_at,
             is_backfilling=bool(is_backfilling),
-            backfill_before_id=backfill_before_id
+            backfill_before_id=backfill_before_id,
+            buy_broker_fee=float(buy_broker_fee),
+            sell_broker_fee=float(sell_broker_fee)
         )
         CHARACTERS.append(character)
         logging.debug(f"Loaded character: {character.name} ({character.id})")
@@ -132,7 +136,9 @@ def setup_database():
                     notification_batch_threshold INTEGER DEFAULT 3,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
                     needs_update_notification BOOLEAN DEFAULT FALSE,
-                    deletion_scheduled_at TIMESTAMP WITH TIME ZONE
+                    deletion_scheduled_at TIMESTAMP WITH TIME ZONE,
+                    buy_broker_fee NUMERIC(5, 2) DEFAULT 3.0,
+                    sell_broker_fee NUMERIC(5, 2) DEFAULT 3.0
                 )
             """)
 
@@ -183,6 +189,19 @@ def setup_database():
                 logging.info("Applying migration: Adding 'backfill_before_id' column to characters table...")
                 cursor.execute("ALTER TABLE characters ADD COLUMN backfill_before_id BIGINT;")
                 logging.info("Migration for 'backfill_before_id' complete.")
+
+            # Migration: Add broker fee columns
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'buy_broker_fee'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'buy_broker_fee' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN buy_broker_fee NUMERIC(5, 2) DEFAULT 3.0;")
+                logging.info("Migration for 'buy_broker_fee' complete.")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'sell_broker_fee'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'sell_broker_fee' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN sell_broker_fee NUMERIC(5, 2) DEFAULT 3.0;")
+                logging.info("Migration for 'sell_broker_fee' complete.")
 
 
             cursor.execute("""
@@ -776,7 +795,7 @@ def get_characters_for_user(telegram_user_id):
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at,
-                    is_backfilling, backfill_before_id
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -786,7 +805,7 @@ def get_characters_for_user(telegram_user_id):
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
                     enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
-                    is_backfilling, backfill_before_id
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 ) = row
 
                 user_characters.append(Character(
@@ -802,7 +821,9 @@ def get_characters_for_user(telegram_user_id):
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at,
                     is_backfilling=bool(is_backfilling),
-                    backfill_before_id=backfill_before_id
+                    backfill_before_id=backfill_before_id,
+                    buy_broker_fee=float(buy_broker_fee),
+                    sell_broker_fee=float(sell_broker_fee)
                 ))
     finally:
         database.release_db_connection(conn)
@@ -822,7 +843,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_sales_notifications, enable_buy_notifications,
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contract_notifications, notification_batch_threshold, created_at,
-                    is_backfilling, backfill_before_id
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -833,7 +854,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     wallet_balance_threshold,
                     enable_sales, enable_buys,
                     enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
-                    is_backfilling, backfill_before_id
+                    is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 ) = row
 
                 character = Character(
@@ -849,7 +870,9 @@ def get_character_by_id(character_id: int) -> Character | None:
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at,
                     is_backfilling=bool(is_backfilling),
-                    backfill_before_id=backfill_before_id
+                    backfill_before_id=backfill_before_id,
+                    buy_broker_fee=float(buy_broker_fee),
+                    sell_broker_fee=float(sell_broker_fee)
                 )
     finally:
         database.release_db_connection(conn)
@@ -878,6 +901,28 @@ def update_character_setting(character_id: int, setting: str, value: any):
     finally:
         database.release_db_connection(conn)
     logging.info(f"Updated {setting} for character {character_id} to {value}.")
+
+
+def update_character_fee_setting(character_id: int, fee_type: str, value: float):
+    """Updates a broker fee setting for a character in the database."""
+    allowed_fee_types = {
+        "buy": "buy_broker_fee",
+        "sell": "sell_broker_fee"
+    }
+    if fee_type not in allowed_fee_types:
+        logging.error(f"Attempted to update an invalid fee type: {fee_type}")
+        return
+
+    column_name = allowed_fee_types[fee_type]
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            query = f"UPDATE characters SET {column_name} = %s WHERE character_id = %s"
+            cursor.execute(query, (value, character_id))
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+    logging.info(f"Updated {column_name} for character {character_id} to {value}%.")
 
 
 def update_character_backfill_state(character_id: int, is_backfilling: bool, before_id: int | None):
@@ -2619,14 +2664,23 @@ def process_character_wallet(character_id: int) -> list[dict]:
                             tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
                             fee_journal_by_timestamp = defaultdict(list)
                             for entry in full_journal:
-                                if entry['ref_type'] in {'transaction_tax', 'market_provider_tax'}:
+                                if entry['ref_type'] == 'transaction_tax':
                                     fee_journal_by_timestamp[entry['date']].append(entry)
 
                             for type_id, tx_group in sales.items():
                                 total_quantity = sum(t['quantity'] for t in tx_group)
                                 total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
                                 cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-                                total_fees = sum(abs(fee['amount']) for tx in tx_group if tx_id_to_journal_map.get(tx['transaction_id']) for fee in fee_journal_by_timestamp.get(tx_id_to_journal_map[tx['transaction_id']]['date'], []))
+
+                                # Get actual taxes from the journal
+                                journal_taxes = sum(abs(fee['amount']) for tx in tx_group if tx_id_to_journal_map.get(tx['transaction_id']) for fee in fee_journal_by_timestamp.get(tx_id_to_journal_map[tx['transaction_id']]['date'], []))
+
+                                estimated_broker_fees = 0
+                                if cogs is not None:
+                                    # Estimate broker fees based on user settings
+                                    estimated_broker_fees = (cogs * (character.buy_broker_fee / 100)) + (total_value * (character.sell_broker_fee / 100))
+
+                                total_fees = journal_taxes + estimated_broker_fees
                                 net_profit = total_value - cogs - total_fees if cogs is not None else None
                                 sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs, 'total_fees': total_fees, 'net_profit': net_profit})
 
@@ -2911,7 +2965,7 @@ def _prepare_chart_data(character_id, start_of_period):
     """
     all_transactions = get_historical_transactions_from_db(character_id)
     full_journal = get_full_wallet_journal_from_db(character_id)
-    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
+    fee_ref_types = {'transaction_tax', 'brokers_fee'}
 
     all_events = []
     for tx in all_transactions:
@@ -2955,14 +3009,23 @@ def _calculate_overview_data(character: Character) -> dict:
 
     all_transactions = get_historical_transactions_from_db(character.id)
     full_journal = get_full_wallet_journal_from_db(character.id)
-    fee_ref_types = {'transaction_tax', 'market_provider_tax', 'brokers_fee'}
 
     # --- Profit/Loss Calculation ---
     def calculate_profit(start_date):
         inventory, events = _prepare_chart_data(character.id, start_date)
         profit = 0
         sales_value = 0
-        fees_value = sum(abs(e['data']['amount']) for e in events if e['type'] == 'fee')
+
+        # Separate journaled fees from estimated broker fees
+        # `events` from `_prepare_chart_data` now only contains transaction_tax and brokers_fee
+        journaled_fees_value = sum(abs(e['data']['amount']) for e in events if e['type'] == 'fee')
+        estimated_broker_fees = 0
+
+        # Manually calculate market provider tax for the period as a general expense
+        market_provider_tax_value = sum(
+            abs(entry['amount']) for entry in full_journal
+            if entry['ref_type'] == 'market_provider_tax' and entry['date'] >= start_date
+        )
 
         for event in events:
             if event['type'] == 'tx':
@@ -2985,10 +3048,18 @@ def _calculate_overview_data(character: Character) -> dict:
                             lot['quantity'] -= take
                             if lot['quantity'] == 0: consumed_count += 1
                         inventory[tx['type_id']] = lots[consumed_count:]
+
+                    # Add estimated broker fees for this sale
+                    if cogs > 0:
+                        estimated_broker_fees += (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+
                     profit += sale_value - cogs
-            elif event['type'] == 'fee':
-                profit -= abs(event['data']['amount'])
-        return profit, sales_value, fees_value
+
+        # Subtract all fees from the final profit
+        total_fees = journaled_fees_value + estimated_broker_fees + market_provider_tax_value
+        profit -= total_fees
+
+        return profit, sales_value, total_fees
 
     profit_24h, total_sales_24h, total_fees_24h = calculate_profit(one_day_ago)
     profit_30_days, total_sales_30_days, total_fees_30_days = calculate_profit(thirty_days_ago)
@@ -3179,7 +3250,14 @@ def generate_last_day_chart(character_id: int):
                             lot['quantity'] -= take
                             if lot['quantity'] == 0: consumed_count += 1
                         inventory[data['type_id']] = lots[consumed_count:]
-                    accumulated_profit += sale_value - cogs
+                    # Estimate broker fees for this sale
+                    estimated_broker_fee = 0
+                    if cogs > 0:
+                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+
+                    hourly_fees[hour_label] += estimated_broker_fee
+                    accumulated_profit += sale_value - cogs - estimated_broker_fee
+
             elif event_type == 'fee':
                 fee_amount = abs(data['amount'])
                 hourly_fees[hour_label] += fee_amount
@@ -3295,7 +3373,14 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
                             lot['quantity'] -= take
                             if lot['quantity'] == 0: consumed_count += 1
                         inventory[data['type_id']] = lots[consumed_count:]
-                    accumulated_profit += sale_value - cogs
+                    # Estimate broker fees for this sale
+                    estimated_broker_fee = 0
+                    if cogs > 0:
+                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+
+                    daily_fees[day_label] += estimated_broker_fee
+                    accumulated_profit += sale_value - cogs - estimated_broker_fee
+
             elif event_type == 'fee':
                 fee_amount = abs(data['amount'])
                 daily_fees[day_label] += fee_amount
@@ -3422,7 +3507,13 @@ def generate_all_time_chart(character_id: int):
                             lot['quantity'] -= take
                             if lot['quantity'] == 0: consumed_count += 1
                         inventory[data['type_id']] = lots[consumed_count:]
-                    accumulated_profit += sale_value - cogs
+                    # Estimate broker fees for this sale
+                    estimated_broker_fee = 0
+                    if cogs > 0:
+                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+
+                    monthly_fees[month_label] += estimated_broker_fee
+                    accumulated_profit += sale_value - cogs - estimated_broker_fee
             elif event_type == 'fee':
                 fee_amount = abs(data['amount'])
                 monthly_fees[month_label] += fee_amount
