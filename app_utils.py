@@ -3276,8 +3276,8 @@ def prepare_paginated_overview_data(user_id: int, page: int = 0):
     if nav_row:
         new_keyboard_rows.append(nav_row)
 
-    # 3. Add a back button to the main menu
-    new_keyboard_rows.append([InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")])
+    # 3. Add a back button to the character selection screen
+    new_keyboard_rows.append([InlineKeyboardButton("« Back to Character Selection", callback_data="overview")])
 
     reply_markup = InlineKeyboardMarkup(new_keyboard_rows)
 
