@@ -3611,33 +3611,50 @@ async def send_main_menu_async(bot: telegram.Bot, telegram_user_id: int, top_mes
     return None
 
 
-def edit_main_menu_sync(bot: telegram.Bot, chat_id: int, message_id: int, top_message: str = None):
-    """Synchronously edits an existing message to show the main menu."""
+def edit_main_menu_sync(bot: telegram.Bot, chat_id: int, message_id: int, top_message: str = None) -> bool:
+    """
+    Synchronously edits an existing message to show the main menu.
+    Returns True on success, False on failure.
+    """
     try:
-        asyncio.run(edit_main_menu_async(bot, chat_id, message_id, top_message))
+        return asyncio.run(edit_main_menu_async(bot, chat_id, message_id, top_message))
     except Exception as e:
-        logging.error(f"Error editing main menu message {message_id} in chat {chat_id}: {e}", exc_info=True)
+        logging.error(f"Error running edit_main_menu_async for message {message_id} in chat {chat_id}: {e}", exc_info=True)
+        return False
 
 
-async def edit_main_menu_async(bot: telegram.Bot, chat_id: int, message_id: int, top_message: str = None):
-    """Async version of editing an existing message to show the main menu."""
+async def edit_main_menu_async(bot: telegram.Bot, chat_id: int, message_id: int, top_message: str = None) -> bool:
+    """
+    Async version of editing an existing message to show the main menu.
+    Returns True on success, False on failure.
+    """
     # We need the telegram_user_id to build the menu, which is the same as the chat_id for private chats.
     message, reply_markup = _build_main_menu(chat_id, top_message)
-    if message:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=message,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
-            )
-        except telegram.error.BadRequest as e:
-            # This can happen if the message text is identical, which is not an error for us.
-            if "Message is not modified" in str(e):
-                logging.warning(f"Message {message_id} was not modified, nothing to edit.")
-            else:
-                raise e # Re-raise other bad requests
+    if not message:
+        return False  # Failed to build the menu content
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=message,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        return True
+    except telegram.error.BadRequest as e:
+        # This can happen if the message text is identical, which we can consider a success.
+        if "Message is not modified" in str(e):
+            logging.warning(f"Message {message_id} was not modified, nothing to edit.")
+            return True
+        else:
+            # Any other BadRequest, like "Message to edit not found", is a failure.
+            logging.error(f"BadRequest editing message {message_id}: {e}")
+            return False
+    except Exception as e:
+        # Catch any other unexpected errors during the API call
+        logging.error(f"Unexpected error editing message {message_id}: {e}", exc_info=True)
+        return False
 
 
 def send_daily_overview_for_character(character_id: int, bot):

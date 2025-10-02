@@ -120,20 +120,27 @@ def seed_character_data_task(character_id: int):
     # Try to edit the original welcome message.
     state_key = f"welcome_message_id_{character.telegram_user_id}"
     message_info = get_bot_state(state_key)
-    edited = False
+    was_edited = False
     if message_info:
         try:
             chat_id_str, message_id_str = message_info.split(':')
             chat_id, message_id = int(chat_id_str), int(message_id_str)
-            edit_main_menu_sync(bot, chat_id, message_id, top_message=msg)
-            set_bot_state(state_key, "") # Clear the state after using it
-            edited = True
-            logging.info(f"Edited welcome message {message_id} for user {character.telegram_user_id} with sync status.")
+
+            # edit_main_menu_sync now returns True on success, False on failure.
+            was_edited = edit_main_menu_sync(bot, chat_id, message_id, top_message=msg)
+
+            if was_edited:
+                logging.info(f"Successfully edited welcome message {message_id} for user {character.telegram_user_id} with sync status.")
+                # Clear the state only after a successful edit.
+                set_bot_state(state_key, "")
+            else:
+                logging.warning(f"Failed to edit welcome message {message_id} for user {character.telegram_user_id}. Fallback will be used.")
+
         except (ValueError, TypeError) as e:
             logging.error(f"Error parsing welcome message info '{message_info}': {e}. Falling back to sending new message.")
 
-    # Fallback to sending a new message if editing failed.
-    if not edited:
+    # Fallback to sending a new message if editing was not successful.
+    if not was_edited:
         logging.warning(f"Could not find or edit welcome message for user {character.telegram_user_id}. Sending a new message instead.")
         send_main_menu_sync(bot, character.telegram_user_id, top_message=msg)
 
