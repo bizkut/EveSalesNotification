@@ -2713,10 +2713,10 @@ def process_character_orders(character_id: int) -> list[dict]:
                     cancelled = [o for o in new_orders if o.get('state') == 'cancelled' or (o.get('state') == 'expired' and poll_time < (datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) + timedelta(days=o.get('duration', 90))))]
                     expired = [o for o in new_orders if o not in cancelled]
 
-                        item_ids = [o['type_id'] for o in new_orders]
-                        id_to_name = get_names_from_ids(item_ids)
+                    item_ids = [o['type_id'] for o in new_orders]
+                    id_to_name = get_names_from_ids(item_ids)
 
-                        for order in cancelled:
+                    for order in cancelled:
                             order_type = "Buy" if order.get('is_buy_order') else "Sell"
                             if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
                                 msg = f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled."
