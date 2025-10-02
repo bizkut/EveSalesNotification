@@ -478,6 +478,8 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         action = parts[0]
         chart_type = parts[1]
         character_id = int(parts[2])
+        # Check for an optional character index for paginated view context
+        character_index = int(parts[3]) if len(parts) > 3 else None
 
         if action != 'chart':
             return
@@ -507,12 +509,13 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         text=f"⏳ Generating {chart_name} chart for {character.name}. This may take a moment..."
     )
 
-    # Dispatch the background task via Celery
+    # Dispatch the background task via Celery, passing the index if it exists
     generate_chart_task.delay(
         character_id=character_id,
         chart_type=chart_type,
         chat_id=query.message.chat_id,
-        generating_message_id=generating_message.message_id
+        generating_message_id=generating_message.message_id,
+        character_index=character_index
     )
 
 

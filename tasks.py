@@ -314,7 +314,7 @@ def continue_backfill_character_history(self, character_id: int):
 
 
 @celery.task(name='tasks.generate_chart_task')
-def generate_chart_task(character_id: int, chart_type: str, chat_id: int, generating_message_id: int):
+def generate_chart_task(character_id: int, chart_type: str, chat_id: int, generating_message_id: int, character_index: int = None):
     """
     Celery task to generate and send a chart in the background, with caching.
     This replaces the bot's internal JobQueue for better scalability.
@@ -341,7 +341,16 @@ def generate_chart_task(character_id: int, chart_type: str, chat_id: int, genera
             '30days': "Last 30 Days", 'alltime': "All Time"
         }
         base_caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character_id}")]]
+
+        # Contextual "Back" button logic
+        if character_index is not None:
+            # Coming from a paginated view, so go back to that specific character's page
+            back_callback_data = f"overview_char_all_{character_index}"
+        else:
+            # Coming from a single character view
+            back_callback_data = f"overview_char_{character_id}"
+
+        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=back_callback_data)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Check for cached chart first

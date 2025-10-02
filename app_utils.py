@@ -3220,28 +3220,50 @@ def _format_overview_message(overview_data: dict, character: Character, user_cha
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_30_days']:,.2f} ISK`\n"
         f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`"
     )
-    keyboard = [
-        [InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"), InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}")],
-        [InlineKeyboardButton("Last 30 Days", callback_data=f"chart_30days_{character.id}"), InlineKeyboardButton("All Time", callback_data=f"chart_alltime_{character.id}")]
+
+    is_paginated = user_characters is not None
+
+    chart_buttons = [
+        InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"),
+        InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}"),
+        InlineKeyboardButton("Last 30 Days", callback_data=f"chart_30days_{character.id}"),
+        InlineKeyboardButton("All Time", callback_data=f"chart_alltime_{character.id}")
     ]
 
+    # If in a paginated view, add the index to the chart callbacks to allow the "Back" button
+    # on the chart page to return to the correct paginated overview.
+    if is_paginated:
+        for button in chart_buttons:
+            button.callback_data += f"_{current_character_index}"
+
+    keyboard = [chart_buttons]
+
     # --- Pagination Logic ---
-    # Only add pagination if a list of user_characters is provided (i.e., we are in the "All Characters" view)
-    if user_characters and len(user_characters) > 1:
+    if is_paginated and len(user_characters) > 1:
         num_chars = len(user_characters)
         prev_index = (current_character_index - 1 + num_chars) % num_chars
         next_index = (current_character_index + 1) % num_chars
         prev_char = user_characters[prev_index]
         next_char = user_characters[next_index]
 
-        # The callback data needs to signal that this is part of the "All Characters" paginated view.
-        # The format overview_char_all_{index} will be handled by the callback query handler.
         pagination_row = [
             InlineKeyboardButton(f"⬅️ {prev_char.name}", callback_data=f"overview_char_all_{prev_index}"),
             InlineKeyboardButton(f"{current_character_index + 1}/{num_chars}", callback_data="noop"),
             InlineKeyboardButton(f"{next_char.name} ➡️", callback_data=f"overview_char_all_{next_index}")
         ]
         keyboard.append(pagination_row)
+
+    # --- Back Button ---
+    # The user can either go back to the character selection menu or the main menu.
+    back_button_text = "« Back to Character Selection" if not is_paginated and user_characters and len(user_characters) > 1 else "« Back to Main Menu"
+    back_button_callback = "overview" if not is_paginated and user_characters and len(user_characters) > 1 else "start_command"
+
+    # For the paginated view, "Back" should go to the initial character selection screen.
+    if is_paginated:
+        back_button_text = "« Back to Character Selection"
+        back_button_callback = "overview"
+
+    keyboard.append([InlineKeyboardButton(back_button_text, callback_data=back_button_callback)])
 
     return message, InlineKeyboardMarkup(keyboard)
 
