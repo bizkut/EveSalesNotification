@@ -2907,13 +2907,13 @@ def process_character_orders(character_id: int) -> list[dict]:
 
                     for order in cancelled:
                         order_type = "Buy" if order.get('is_buy_order') else "Sell"
-                        if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
+                        if (order_type == "Buy" and character.enable_buys_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
                             msg = f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled."
                             notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
 
                     for order in expired:
                         order_type = "Buy" if order.get('is_buy_order') else "Sell"
-                        if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
+                        if (order_type == "Buy" and character.enable_buys_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
                             msg = f"ℹ️ *{order_type} Order Expired ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired."
                             notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
 
@@ -3203,8 +3203,8 @@ def _calculate_overview_data(character: Character) -> dict:
         "available_years": available_years
     }
 
-def _format_overview_message(overview_data: dict, character: Character, user_characters: list[Character] = None, current_character_index: int = 0) -> tuple[str, InlineKeyboardMarkup]:
-    """Formats the overview data into a message string and keyboard, with pagination for the 'All Characters' view."""
+def _format_overview_message(overview_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
+    """Formats the overview data into a message string and keyboard."""
     now = overview_data['now']
     message = (
         f"📊 *Market Overview ({character.name})*\n"
@@ -3220,51 +3220,10 @@ def _format_overview_message(overview_data: dict, character: Character, user_cha
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_30_days']:,.2f} ISK`\n"
         f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`"
     )
-
-    is_paginated = user_characters is not None
-
-    chart_buttons = [
-        InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"),
-        InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}"),
-        InlineKeyboardButton("Last 30 Days", callback_data=f"chart_30days_{character.id}"),
-        InlineKeyboardButton("All Time", callback_data=f"chart_alltime_{character.id}")
+    keyboard = [
+        [InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"), InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}")],
+        [InlineKeyboardButton("Last 30 Days", callback_data=f"chart_30days_{character.id}"), InlineKeyboardButton("All Time", callback_data=f"chart_alltime_{character.id}")]
     ]
-
-    # If in a paginated view, add the index to the chart callbacks to allow the "Back" button
-    # on the chart page to return to the correct paginated overview.
-    if is_paginated:
-        for button in chart_buttons:
-            button.callback_data += f"_{current_character_index}"
-
-    keyboard = [chart_buttons]
-
-    # --- Pagination Logic ---
-    if is_paginated and len(user_characters) > 1:
-        num_chars = len(user_characters)
-        prev_index = (current_character_index - 1 + num_chars) % num_chars
-        next_index = (current_character_index + 1) % num_chars
-        prev_char = user_characters[prev_index]
-        next_char = user_characters[next_index]
-
-        pagination_row = [
-            InlineKeyboardButton(f"⬅️ {prev_char.name}", callback_data=f"overview_char_all_{prev_index}"),
-            InlineKeyboardButton(f"{current_character_index + 1}/{num_chars}", callback_data="noop"),
-            InlineKeyboardButton(f"{next_char.name} ➡️", callback_data=f"overview_char_all_{next_index}")
-        ]
-        keyboard.append(pagination_row)
-
-    # --- Back Button ---
-    # The user can either go back to the character selection menu or the main menu.
-    back_button_text = "« Back to Character Selection" if not is_paginated and user_characters and len(user_characters) > 1 else "« Back to Main Menu"
-    back_button_callback = "overview" if not is_paginated and user_characters and len(user_characters) > 1 else "start_command"
-
-    # For the paginated view, "Back" should go to the initial character selection screen.
-    if is_paginated:
-        back_button_text = "« Back to Character Selection"
-        back_button_callback = "overview"
-
-    keyboard.append([InlineKeyboardButton(back_button_text, callback_data=back_button_callback)])
-
     return message, InlineKeyboardMarkup(keyboard)
 
 

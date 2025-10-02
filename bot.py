@@ -211,18 +211,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(text=message, reply_markup=reply_markup)
 
 
-async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character, character_index: int = None):
-    """Handles the interactive flow of generating and sending an overview message."""
+async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
+    """Handles the interactive flow of generating and sending a overview message."""
     if await check_and_handle_pending_deletion(update, context, character):
         return
 
     query = update.callback_query
 
+    # This part handles the "All Characters" case, where there's no query.
     if not query:
+        # This case is for scheduled overviews or the "All" button, which always send a new message.
         sent_message = await context.bot.send_message(chat_id=character.telegram_user_id, text=f"⏳ Generating overview for {character.name}...")
         message_id = sent_message.message_id
         user_id = character.telegram_user_id
     else:
+        # This is the standard case from a button press.
         if query.message.photo:
             await query.message.delete()
             sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ Generating overview for {character.name}...")
@@ -234,11 +237,10 @@ async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFA
 
     # Dispatch the background task via Celery
     generate_overview_task.delay(
+        character_id=character.id,
         user_id=user_id,
         chat_id=update.effective_chat.id,
-        message_id=message_id,
-        character_id=character.id if character_index is None else None,
-        character_index=character_index
+        message_id=message_id
     )
 
 
@@ -478,8 +480,6 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         action = parts[0]
         chart_type = parts[1]
         character_id = int(parts[2])
-        # Check for an optional character index for paginated view context
-        character_index = int(parts[3]) if len(parts) > 3 else None
 
         if action != 'chart':
             return
@@ -509,13 +509,12 @@ async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         text=f"⏳ Generating {chart_name} chart for {character.name}. This may take a moment..."
     )
 
-    # Dispatch the background task via Celery, passing the index if it exists
+    # Dispatch the background task via Celery
     generate_chart_task.delay(
         character_id=character_id,
         chart_type=chart_type,
         chat_id=query.message.chat_id,
-        generating_message_id=generating_message.message_id,
-        character_index=character_index
+        generating_message_id=generating_message.message_id
     )
 
 
@@ -1192,43 +1191,19 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data.startswith("overview_char_"):
         user_id = update.effective_user.id
-        parts = data.split('_')
-
-        # Handle the paginated "All Characters" view
-        if parts[2] == "all":
-            try:
-                # This is triggered by the "Next" and "Prev" buttons.
-                # The index of the character to show is in the callback data.
-                character_index = int(parts[3])
-                user_characters = get_characters_for_user(user_id)
-                if not user_characters or character_index >= len(user_characters):
-                    await query.edit_message_text("Error: Invalid character index.")
-                    return
-
-                character_to_show = user_characters[character_index]
-                await _generate_and_send_overview(update, context, character_to_show, character_index=character_index)
-
-            except (IndexError, ValueError):
-                # This is triggered by the initial "All Characters" button press.
-                # Start the paginated view from the beginning (index 0).
-                user_characters = get_characters_for_user(user_id)
-                if not user_characters:
-                    await query.edit_message_text("Error: No characters found.")
-                    return
-                await _generate_and_send_overview(update, context, user_characters[0], character_index=0)
-
-        # Handle the single character view
+        char_id_str = data.split('_')[-1]
+        if char_id_str == "all":
+            # If "All" is selected, delete the menu and send new messages for each overview.
+            await query.message.delete()
+            chars_to_query = get_characters_for_user(user_id)
+            for char in chars_to_query:
+                # We pass 'None' for the callback_query part of the update to force new messages
+                await _generate_and_send_overview(Update(update.update_id, message=query.message), context, char)
+                await asyncio.sleep(1) # Be nice to Telegram's API
         else:
-            try:
-                character_id = int(parts[2])
-                character = get_character_by_id(character_id)
-                if not character:
-                    await query.edit_message_text("Error: Character not found.")
-                    return
-                # Call without an index to signal a single, non-paginated view.
-                await _generate_and_send_overview(update, context, character)
-            except (IndexError, ValueError):
-                await query.edit_message_text("Error: Invalid overview request.")
+            # If a single character is selected, edit the existing message.
+            char_to_query = get_character_by_id(int(char_id_str))
+            await _generate_and_send_overview(update, context, char_to_query)
 
     # --- Historical Transaction Lists (Sales & Buys) ---
     elif data.startswith("history_list_sale_"):
