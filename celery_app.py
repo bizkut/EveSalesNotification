@@ -3,7 +3,7 @@ nest_asyncio.apply()
 import os
 import sys
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import worker_process_init, after_setup_logger
 import database
 import logging
 
@@ -11,12 +11,31 @@ import logging
 # This is necessary for the Celery worker to find the 'bot' module
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from log_config import setup_logging
+@after_setup_logger.connect
+def setup_celery_logging(logger, **kwargs):
+    """
+    Configures the Celery worker logger to respect the LOG_LEVEL from the environment.
+    """
+    log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+
+    # Set the level on the logger
+    logger.setLevel(log_level)
+
+    # Find the console handler and set its level and formatter
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.setLevel(log_level)
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            handler.setFormatter(formatter)
+            break
+
+    logger.info(f"Celery worker logging configured with level: {log_level_str}")
+
 
 @worker_process_init.connect
 def init_worker(**kwargs):
-    """Initializes database connection pool and logging for each worker process."""
-    setup_logging()
+    """Initializes database connection pool for each worker process."""
     logging.info("Initializing database connection pool for celery worker...")
     database.initialize_pool()
 
