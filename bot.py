@@ -215,55 +215,33 @@ async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFA
     """Handles the interactive flow of generating and sending a overview message."""
     if await check_and_handle_pending_deletion(update, context, character):
         return
-    target_chat_id = update.effective_chat.id
-    query = update.callback_query
-    message_id = None
 
-    if query:
-        # If the original message was a photo (i.e., we're coming back from a chart),
-        # we must delete it and send a new message.
+    query = update.callback_query
+
+    # This part handles the "All Characters" case, where there's no query.
+    if not query:
+        # This case is for scheduled overviews or the "All" button, which always send a new message.
+        sent_message = await context.bot.send_message(chat_id=character.telegram_user_id, text=f"⏳ Generating overview for {character.name}...")
+        message_id = sent_message.message_id
+        user_id = character.telegram_user_id
+    else:
+        # This is the standard case from a button press.
         if query.message.photo:
             await query.message.delete()
-            sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating overview for {character.name}...")
+            sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ Generating overview for {character.name}...")
             message_id = sent_message.message_id
         else:
-            # Otherwise, we can just edit the existing text message.
             await query.edit_message_text(text=f"⏳ Generating overview for {character.name}...")
             message_id = query.message.message_id
-    else:
-        # This case is for scheduled overviews, which always send a new message.
-        sent_message = await context.bot.send_message(chat_id=target_chat_id, text=f"⏳ Generating overview for {character.name}...")
-        message_id = sent_message.message_id
+        user_id = query.from_user.id
 
-    try:
-        # Run the synchronous data calculation in a thread to avoid blocking
-        overview_data = await asyncio.to_thread(_calculate_overview_data, character)
-        message, reply_markup = _format_overview_message(overview_data, character)
-
-        # Add a contextual back button based on how many characters the user has
-        user_characters = get_characters_for_user(update.effective_user.id)
-        back_button_callback = "overview" if len(user_characters) > 1 else "start_command"
-
-        new_keyboard = list(reply_markup.inline_keyboard) # Create a mutable copy
-        new_keyboard.append([InlineKeyboardButton("« Back", callback_data=back_button_callback)])
-        new_reply_markup = InlineKeyboardMarkup(new_keyboard)
-
-
-        # Edit the placeholder message with the final content
-        await context.bot.edit_message_text(
-            chat_id=target_chat_id,
-            message_id=message_id,
-            text=message,
-            parse_mode='Markdown',
-            reply_markup=new_reply_markup
-        )
-    except Exception as e:
-        logging.error(f"Failed to generate and send overview for {character.name}: {e}", exc_info=True)
-        await context.bot.edit_message_text(
-            chat_id=target_chat_id,
-            message_id=message_id,
-            text=f"❌ An error occurred while generating the overview for {character.name}."
-        )
+    # Dispatch the background task via Celery
+    generate_overview_task.delay(
+        character_id=character.id,
+        user_id=user_id,
+        chat_id=update.effective_chat.id,
+        message_id=message_id
+    )
 
 
 async def run_daily_overview_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
@@ -488,7 +466,7 @@ async def overview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
-from tasks import generate_chart_task
+from tasks import generate_chart_task, generate_historical_sales_task, generate_overview_task, display_open_orders_task, generate_historical_buys_task, generate_character_info_task
 
 async def chart_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -896,93 +874,26 @@ async def _show_character_settings(update: Update, context: ContextTypes.DEFAULT
 
 
 async def _show_character_info(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
-    """Fetches and displays public information for a character."""
+    """Dispatches a Celery task to fetch and display public information for a character."""
     query = update.callback_query
-    await query.edit_message_text(f"⏳ Fetching public info for {character.name}...")
 
-    # --- ESI Calls ---
-    # Concurrently fetch all required info
-    tasks = {
-        "public": asyncio.to_thread(get_character_public_info, character.id),
-        "online": asyncio.to_thread(get_character_online_status, character)
-    }
-    results = await asyncio.gather(*tasks.values())
-    public_info, online_status = results
-
-    if not public_info:
-        await query.edit_message_text(f"❌ Could not fetch public info for {character.name}.")
-        return
-
-    # Concurrently fetch corporation and alliance info
-    corp_tasks = [asyncio.to_thread(get_corporation_info, public_info['corporation_id'])]
-    if 'alliance_id' in public_info:
-        corp_tasks.append(asyncio.to_thread(get_alliance_info, public_info['alliance_id']))
-
-    corp_results = await asyncio.gather(*corp_tasks)
-    corp_info = corp_results[0]
-    alliance_info = corp_results[1] if 'alliance_id' in public_info else None
-
-
-    # --- Formatting ---
-    char_name = public_info.get('name', character.name)
-    try:
-        birthday = datetime.fromisoformat(public_info['birthday'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
-    except (ValueError, KeyError):
-        birthday = "Unknown"
-    security_status = f"{public_info.get('security_status', 0):.2f}"
-    corp_name = corp_info.get('name', 'Unknown Corporation') if corp_info else 'Unknown Corporation'
-
-    caption_lines = [
-        f"*{char_name}*",
-        f"`Character ID: {character.id}`",
-        f"Birthday: {birthday}",
-        f"Security Status: {security_status}",
-        f"Corporation: {corp_name}",
-    ]
-
-    if alliance_info:
-        alliance_name = alliance_info.get('name', 'Unknown Alliance')
-        caption_lines.append(f"Alliance: {alliance_name}")
-
-    if online_status:
-        status_text = "🟢 Online" if online_status.get('online') else "🔴 Offline"
-        login_count = online_status.get('logins', 'N/A')
-        caption_lines.append(f"Status: {status_text}")
-        caption_lines.append(f"Total Logins: {login_count:,}")
-
-
-    caption = "\n".join(caption_lines)
-
-    # --- Image Composition ---
-    image_buffer = await asyncio.to_thread(
-        _create_character_info_image,
-        character.id,
-        public_info['corporation_id'],
-        public_info.get('alliance_id')
+    # Send a "Fetching..." message, which the task will then delete and replace.
+    # It's better to send a new message and delete it than to edit, because we are switching
+    # from a text message to a photo message.
+    sent_message = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"⏳ Fetching public info for {character.name}..."
     )
 
-    # --- Sending Photo ---
+    # Delete the original message with the buttons
     await query.message.delete()
-    back_callback = f"settings_char_{character.id}"
-    keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if image_buffer:
-        await context.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=image_buffer,
-            caption=caption,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-    else:
-        # Fallback to text if image creation fails
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=caption,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
+    # Dispatch the background task via Celery
+    generate_character_info_task.delay(
+        character_id=character.id,
+        chat_id=query.message.chat_id,
+        message_id=sent_message.message_id
+    )
 
 
 async def remove_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1143,7 +1054,7 @@ async def open_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, is_buy: bool, page: int = 0):
-    """Fetches and displays a paginated list of open orders from the local cache."""
+    """Dispatches a Celery task to generate and display a paginated list of open orders."""
     query = update.callback_query
     character = get_character_by_id(character_id)
     if await check_and_handle_pending_deletion(update, context, character):
@@ -1152,156 +1063,22 @@ async def _display_open_orders(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text="Error: Could not find character.")
         return
 
-    # Let the user know we're working on it
+    # Let the user know we're working on it. The task will edit this message.
     await query.edit_message_text(text=f"⏳ Fetching open orders for {character.name}...")
 
-    # --- Data Fetching ---
-    # Use asyncio.gather to run skill and order fetches concurrently
-    # Orders are fetched from the local DB cache, which is updated by the master_orders_poll
-    results = await asyncio.gather(
-        asyncio.to_thread(get_tracked_market_orders, character.id),
-        asyncio.to_thread(get_character_skills, character)
+    # Dispatch the background task via Celery
+    display_open_orders_task.delay(
+        character_id=character_id,
+        user_id=query.from_user.id,
+        is_buy=is_buy,
+        page=page,
+        chat_id=query.message.chat_id,
+        message_id=query.message.message_id
     )
-    all_orders, skills_data = results
-    if all_orders is None:
-        # This case should be rare now, but good to keep as a fallback.
-        await query.edit_message_text(text=f"❌ Could not fetch market orders for {character.name}. The database might be unavailable.")
-        return
-
-    # --- Order Capacity Calculation (must happen before filtering) ---
-    order_capacity_str = ""
-    if skills_data and 'skills' in skills_data:
-        skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
-        # Skill IDs for market orders:
-        # Trade (3443): +4 orders/level
-        # Retail (3444): +8 orders/level
-        # Wholesale (16596): +16 orders/level
-        # Tycoon (18580): +32 orders/level
-        trade_level = skill_map.get(3443, 0)
-        retail_level = skill_map.get(3444, 0)
-        wholesale_level = skill_map.get(16596, 0)
-        tycoon_level = skill_map.get(18580, 0)
-
-        # 5 (base) + (Trade * 4) + (Retail * 8) + (Wholesale * 16) + (Tycoon * 32)
-        max_orders = 5 + (trade_level * 4) + (retail_level * 8) + (wholesale_level * 16) + (tycoon_level * 32)
-        # Use len(all_orders) for the current count, not the filtered count
-        order_capacity_str = f"({len(all_orders)} / {max_orders} orders)"
-
-    # Filter for buy or sell orders
-    filtered_orders = [order for order in all_orders if bool(order.get('is_buy_order')) == is_buy]
-    order_type_str = "Buy" if is_buy else "Sale"
-
-    # --- Message Formatting ---
-    header = f"📄 *Open {order_type_str} Orders for {character.name}* {order_capacity_str}\n\n"
-
-    if not filtered_orders:
-        # Provide a back button
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="open_orders")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        # Combine header and the "no orders" message
-        message = header + f"✅ No open {order_type_str.lower()} orders found."
-        await query.edit_message_text(
-            text=message,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-        return
-
-    # Sort orders by issued date, newest first
-    filtered_orders.sort(key=lambda x: datetime.fromisoformat(x['issued'].replace('Z', '+00:00')), reverse=True)
-
-    # --- Pagination ---
-    items_per_page = 10
-    total_items = len(filtered_orders)
-    total_pages = (total_items + items_per_page - 1) // items_per_page
-    page = max(0, min(page, total_pages - 1)) # clamp page number
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    paginated_orders = filtered_orders[start_index:end_index]
-
-    # --- Data Resolution (Names, Undercut Status, Character Location) ---
-    type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
-    location_ids = [order['location_id'] for order in paginated_orders]
-
-    # Fetch all undercut statuses for the character
-    all_undercut_statuses = await asyncio.to_thread(get_undercut_statuses, character.id)
-
-    # Now, gather all the IDs we need to resolve into names
-    competitor_location_ids = [
-        status.get('competitor_location_id')
-        for status in all_undercut_statuses.values()
-        if status.get('competitor_location_id')
-    ]
-    ids_to_resolve = list(set(type_ids_on_page + location_ids + competitor_location_ids))
-    id_to_name = await asyncio.to_thread(get_names_from_ids, ids_to_resolve, character)
-
-    message_lines = []
-    for order in paginated_orders:
-        item_name = id_to_name.get(order['type_id'], f"Type ID {order['type_id']}")
-        location_name = id_to_name.get(order['location_id'], f"Location ID {order['location_id']}")
-        remaining_vol = order['volume_remain']
-        total_vol = order['volume_total']
-        price = order['price']
-
-        line = (
-            f"*{item_name}*\n"
-            f"  `{remaining_vol:,}` of `{total_vol:,}` @ `{price:,.2f}` ISK\n"
-            f"  *Location:* `{location_name}`"
-        )
-
-        # Add undercut/outbid alert from the cached status
-        undercut_status = all_undercut_statuses.get(order['order_id'])
-        if undercut_status and undercut_status['is_undercut']:
-            competitor_price = undercut_status.get('competitor_price', 0.0)
-            competitor_location_id = undercut_status.get('competitor_location_id')
-
-            if competitor_price and competitor_location_id:
-                competitor_loc_name = id_to_name.get(competitor_location_id, "Unknown Location")
-                jumps_str = ""
-                # Calculate jumps from the order's location in a separate thread to avoid blocking
-                jumps = await asyncio.to_thread(get_jump_distance, order['location_id'], competitor_location_id, character)
-                if jumps is not None:
-                    jumps_str = f" ({jumps}j)"
-
-                if is_buy:
-                    alert_line = f"❗️ Outbid! Highest bid: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}"
-                else:
-                    alert_line = f"❗️ Undercut! Lowest price: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}"
-                line += f"\n  `> {alert_line}`"
-
-        message_lines.append(line)
-
-    # --- Page Summary & Disclaimer ---
-    summary_footer = "\n\n---\n_Undercut status is updated periodically._"
-
-    # --- Keyboard ---
-    keyboard = []
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page - 1}"))
-
-    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
-
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page + 1}"))
-
-    if nav_row:
-        keyboard.append(nav_row)
-
-    # Add a back button to go back to the open orders sub-menu
-    back_callback = "open_orders"
-    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # --- Send Message ---
-    full_message = header + "\n\n".join(message_lines) + summary_footer
-    await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 async def _display_historical_buys(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, page: int = 0):
-    """
-    Fetches and displays a paginated list of historical buy transactions.
-    """
+    """Dispatches a Celery task to generate and display a paginated list of historical buy transactions."""
     query = update.callback_query
     character = get_character_by_id(character_id)
     if await check_and_handle_pending_deletion(update, context, character):
@@ -1310,85 +1087,23 @@ async def _display_historical_buys(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text(text="Error: Could not find character.")
         return
 
+    # Let the user know we're working on it. The task will edit this message.
     await query.edit_message_text(text=f"⏳ Fetching historical buys for {character.name}...")
 
-    # --- Data Fetching & Filtering ---
-    all_transactions = get_historical_transactions_from_db(character.id)
-    buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
-
-    if not buy_transactions:
-        user_characters = get_characters_for_user(query.from_user.id)
-        back_callback = "buys" if len(user_characters) > 1 else "start_command"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            text=f"🧾 *Historical Buys for {character.name}*\n\nNo historical buys found.",
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-        return
-
-    # Sort by date, newest first for display
-    buy_transactions.sort(key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)
-
-    # --- Pagination ---
-    items_per_page = 5
-    total_items = len(buy_transactions)
-    total_pages = (total_items + items_per_page - 1) // items_per_page
-    page = max(0, min(page, total_pages - 1))
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    paginated_tx = buy_transactions[start_index:end_index]
-
-    # --- Name Resolution ---
-    type_ids = [tx['type_id'] for tx in paginated_tx]
-    location_ids = [tx['location_id'] for tx in paginated_tx]
-    id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
-
-    # --- Message Formatting ---
-    header = f"🧾 *Historical Buys for {character.name}*\n"
-    message_lines = []
-    for tx in paginated_tx:
-        item_name = id_to_name.get(tx['type_id'], f"Type ID {tx['type_id']}")
-        location_name = id_to_name.get(tx['location_id'], f"Location ID {tx['location_id']}")
-        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
-        total_value = tx['quantity'] * tx['unit_price']
-
-        line = (
-            f"*{item_name}*\n"
-            f"  *Date:* `{date_str}`\n"
-            f"  *Qty:* `{tx['quantity']:,}` @ `{tx['unit_price']:,.2f}`\n"
-            f"  *Total Cost:* `{total_value:,.2f}` ISK\n"
-            f"  *Location:* `{location_name}`"
-        )
-        message_lines.append(line)
-
-    # --- Keyboard ---
-    keyboard = []
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"history_list_buy_{character_id}_{page - 1}"))
-    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"history_list_buy_{character_id}_{page + 1}"))
-
-    if nav_row: keyboard.append(nav_row)
-
-    user_characters = get_characters_for_user(query.from_user.id)
-    back_callback = "buys" if len(user_characters) > 1 else "start_command"
-    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # --- Send Message ---
-    full_message = header + "\n".join(message_lines)
-    await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
+    # Dispatch the background task via Celery
+    generate_historical_buys_task.delay(
+        character_id=character_id,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat_id,
+        page=page,
+        message_id=query.message.message_id
+    )
 
 
 async def _display_historical_sales(update: Update, context: ContextTypes.DEFAULT_TYPE, character_id: int, page: int = 0):
     """
-    Fetches and displays a paginated list of historical sales transactions,
-    with detailed profit and loss analysis using FIFO for COGS and
-    wallet journal entries for accurate tax and fee calculations.
+    Dispatches a Celery task to generate and display a paginated list of
+    historical sales transactions.
     """
     query = update.callback_query
     character = get_character_by_id(character_id)
@@ -1398,240 +1113,17 @@ async def _display_historical_sales(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text(text="Error: Could not find character.")
         return
 
-    await query.edit_message_text(text=f"⏳ Checking data for {character.name}...")
-
-    # --- Data Integrity Check & Backfill ---
-    journal_state_key = f"journal_history_backfilled_{character.id}"
-    if not get_bot_state(journal_state_key):
-        await query.edit_message_text(text=f"⏳ Performing a one-time sync of wallet journal history for {character.name}. This may take a moment...")
-        # Run the backfill in a thread to avoid blocking the bot
-        backfill_success = await asyncio.to_thread(backfill_character_journal_history, character)
-        if not backfill_success:
-            await query.edit_message_text(text=f"❌ Failed to sync journal history for {character.name}. Please try again later.")
-            return
-
+    # Let the user know we're working on it. The task will edit this message.
     await query.edit_message_text(text=f"⏳ Calculating historical sales for {character.name}...")
 
-    # --- Data Fetching & On-Demand Refresh ---
-    # First, load what we already have in the database.
-    all_transactions = get_historical_transactions_from_db(character.id)
-    full_journal = get_full_wallet_journal_from_db(character.id) # This returns entries with datetime objects
-
-    # Now, perform a quick, on-demand refresh of both transactions and journal
-    # to prevent race conditions.
-    try:
-        # 1. Refresh Transactions
-        logging.info(f"Performing on-demand transaction refresh for {character.name}...")
-        recent_transactions_from_esi = await asyncio.to_thread(get_wallet_transactions, character)
-        if recent_transactions_from_esi:
-            existing_tx_ids = {tx['transaction_id'] for tx in all_transactions}
-            new_transactions = [
-                tx for tx in recent_transactions_from_esi
-                if tx['transaction_id'] not in existing_tx_ids
-            ]
-            if new_transactions:
-                logging.info(f"On-demand refresh found {len(new_transactions)} new transactions for {character.name}.")
-                # Save the raw new transactions to the DB
-                await asyncio.to_thread(add_historical_transactions_to_db, character.id, new_transactions)
-                # Extend the in-memory list for immediate use. The date is still a string, which is fine
-                # because the COGS calculation parses it on the fly.
-                all_transactions.extend(new_transactions)
-
-        # 2. Refresh Journal
-        logging.info(f"Performing on-demand journal refresh for {character.name}...")
-        recent_journal_entries_from_esi = await asyncio.to_thread(get_wallet_journal, character)
-        if recent_journal_entries_from_esi:
-            existing_journal_ids = {entry['id'] for entry in full_journal}
-            new_journal_entries = [
-                entry for entry in recent_journal_entries_from_esi
-                if entry['id'] not in existing_journal_ids
-            ]
-
-            if new_journal_entries:
-                logging.info(f"On-demand refresh found {len(new_journal_entries)} new journal entries for {character.name}.")
-                # Save the raw new journal entries to the DB
-                await asyncio.to_thread(add_wallet_journal_entries_to_db, character.id, new_journal_entries)
-
-                # Before merging, parse the date strings to datetime objects to match the existing list's type
-                for entry in new_journal_entries:
-                    entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
-
-                # Extend the in-memory list and re-sort to ensure chronological order
-                full_journal.extend(new_journal_entries)
-                full_journal.sort(key=lambda x: x['date'], reverse=True)
-
-    except Exception as e:
-        logging.error(f"On-demand data refresh failed for {character.name}: {e}", exc_info=True)
-        # Don't block the user, just log the error and proceed with potentially stale data.
-
-    # --- COGS Calculation (In-Memory FIFO Simulation) ---
-    inventory = defaultdict(list)
-    # Sort all transactions chronologically to build up inventory state correctly
-    sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
-    sale_cogs_data = {} # {transaction_id: cogs_value}
-
-    for tx in sorted_transactions:
-        type_id = tx['type_id']
-        if tx.get('is_buy'):
-            inventory[type_id].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
-        else: # It's a sale, calculate its COGS
-            cogs = 0
-            remaining_to_sell = tx['quantity']
-            lots_to_consume_from = inventory.get(type_id, [])
-            cogs_calculable = True
-            if not lots_to_consume_from:
-                cogs_calculable = False
-            else:
-                lots_consumed_count = 0
-                for lot in lots_to_consume_from:
-                    if remaining_to_sell <= 0: break
-                    quantity_from_lot = min(remaining_to_sell, lot['quantity'])
-                    cogs += quantity_from_lot * lot['price']
-                    remaining_to_sell -= quantity_from_lot
-                    lot['quantity'] -= quantity_from_lot
-                    if lot['quantity'] == 0:
-                        lots_consumed_count += 1
-                inventory[type_id] = lots_to_consume_from[lots_consumed_count:] # Remove consumed lots
-                if remaining_to_sell > 0:
-                    cogs_calculable = False
-            sale_cogs_data[tx['transaction_id']] = cogs if cogs_calculable else None
-
-    # --- Data Filtering and Annotation ---
-    # Identify sales from the journal, as this is the source of truth for completed sales.
-    sale_journal_entries = [
-        entry for entry in full_journal
-        if entry.get('ref_type') == 'market_transaction' and entry.get('amount', 0) > 0
-    ]
-    sale_transaction_ids = {entry['context_id'] for entry in sale_journal_entries}
-
-    # Filter all transactions to get only the ones that correspond to a sale journal entry.
-    sales_transactions = [
-        tx for tx in all_transactions
-        if tx['transaction_id'] in sale_transaction_ids
-    ]
-
-    # Create a lookup for market transaction journal entries by their context_id (which is the transaction_id)
-    tx_id_to_journal_map = {
-        entry['context_id']: entry for entry in full_journal
-        if entry.get('ref_type') == 'market_transaction'
-    }
-
-    # Group all fee-related journal entries by their exact timestamp for quick lookup
-    fee_journal_by_timestamp = defaultdict(list)
-    tax_ref_types = {'transaction_tax'}
-    for entry in full_journal:
-        if entry['ref_type'] in tax_ref_types:
-            # Use the parsed datetime object directly as the key
-            fee_journal_by_timestamp[entry['date']].append(entry)
-
-
-    for sale in sales_transactions:
-        sale['cogs'] = sale_cogs_data.get(sale['transaction_id'])
-        sale_value = sale['quantity'] * sale['unit_price']
-
-        # Find the main market transaction entry in the journal to get the precise timestamp
-        main_journal_entry = tx_id_to_journal_map.get(sale['transaction_id'])
-        taxes = 0
-        if main_journal_entry:
-            # The date from the journal is the source of truth for matching fees
-            precise_timestamp = main_journal_entry['date']
-            # Find all tax/fee entries that occurred at the exact same second
-            related_fees = fee_journal_by_timestamp.get(precise_timestamp, [])
-            taxes = sum(abs(fee['amount']) for fee in related_fees)
-        else:
-            logging.warning(f"Could not find matching journal entry for sale transaction_id {sale['transaction_id']}")
-
-
-        sale['taxes'] = taxes
-        if sale.get('cogs') is not None:
-            estimated_broker_fees = (sale['cogs'] * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
-            sale['total_fees'] = taxes + estimated_broker_fees
-            sale['net_profit'] = sale_value - sale['cogs'] - sale['total_fees']
-        else:
-            sale['net_profit'] = None
-
-    if not sales_transactions:
-        user_characters = get_characters_for_user(query.from_user.id)
-        back_callback = "sales" if len(user_characters) > 1 else "start_command"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            text=f"🧾 *Historical Sales for {character.name}*\n\nNo historical sales found.",
-            parse_mode='Markdown', reply_markup=reply_markup
-        )
-        return
-
-    sales_transactions.sort(key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)
-
-    # --- Pagination ---
-    items_per_page = 5
-    total_items = len(sales_transactions)
-    total_pages = (total_items + items_per_page - 1) // items_per_page
-    page = max(0, min(page, total_pages - 1))
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    paginated_tx = sales_transactions[start_index:end_index]
-
-    # --- Page-Specific Broker Fee Calculation ---
-    page_broker_fees = 0
-    if paginated_tx:
-        start_date = datetime.fromisoformat(paginated_tx[-1]['date'].replace('Z', '+00:00'))
-        end_date = datetime.fromisoformat(paginated_tx[0]['date'].replace('Z', '+00:00'))
-        page_broker_fees = sum(
-            abs(entry['amount']) for entry in full_journal
-            if entry['ref_type'] == 'brokers_fee' and start_date <= entry['date'] <= end_date
-        )
-
-    # --- Name Resolution ---
-    type_ids = [tx['type_id'] for tx in paginated_tx]
-    location_ids = [tx['location_id'] for tx in paginated_tx]
-    id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
-
-    # --- Message Formatting ---
-    header = f"🧾 *Historical Sales for {character.name}*\n"
-    message_lines = []
-    for tx in paginated_tx:
-        item_name = id_to_name.get(tx['type_id'], f"Type ID {tx['type_id']}")
-        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
-        sale_value = tx['quantity'] * tx['unit_price']
-        line = (
-            f"*{item_name}*\n"
-            f"  *Date:* `{date_str}`\n"
-            f"  *Qty:* `{tx['quantity']:,}` @ `{tx['unit_price']:,.2f}`\n"
-            f"  *Sale Value:* `{sale_value:,.2f}` ISK\n"
-        )
-        if tx.get('cogs') is not None:
-            line += f"  *Cost (FIFO):* `{tx['cogs']:,.2f}` ISK\n"
-            line += f"  *Total Fees (Est.):* `{tx.get('total_fees', 0):,.2f}` ISK\n"
-            line += f"  *Net Profit (Est.):* `{tx['net_profit']:,.2f}` ISK"
-        else:
-            line += f"  *Net Profit:* `N/A (Missing Purchase History)`"
-        message_lines.append(line)
-
-    # --- Page Summary & Footer ---
-    footer = (
-        f"\n---\n*Broker Fees for this page's period:* `{page_broker_fees:,.2f}` ISK\n"
-        f"_(Note: Net Profit is an estimate including sales tax and broker fees.)_"
+    # Dispatch the background task via Celery
+    generate_historical_sales_task.delay(
+        character_id=character_id,
+        user_id=query.from_user.id,
+        chat_id=query.message.chat_id,
+        page=page,
+        message_id=query.message.message_id
     )
-
-    # --- Keyboard ---
-    keyboard = []
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"history_list_sale_{character_id}_{page - 1}"))
-    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"history_list_sale_{character_id}_{page + 1}"))
-
-    if nav_row: keyboard.append(nav_row)
-    user_characters = get_characters_for_user(query.from_user.id)
-    back_callback = "sales" if len(user_characters) > 1 else "start_command"
-    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # --- Send Message ---
-    full_message = header + "\n".join(message_lines) + footer
-    await query.edit_message_text(text=full_message, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 async def _select_character_for_open_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, is_buy: bool):

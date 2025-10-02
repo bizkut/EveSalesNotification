@@ -2651,121 +2651,148 @@ def process_character_wallet(character_id: int) -> list[dict]:
                         add_processed_journal_refs(character.id, list(new_journal_ref_ids))
                         logging.info(f"Processed {len(new_entries)} new journal entries for {character.name}.")
         except (ValueError, TypeError):
-            pass # Handle legacy or malformed timestamps
+            pass  # Handle legacy or malformed timestamps
 
     # --- Wallet Transaction Processing ---
-    if history_backfilled_at_str:
-        try:
-            history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
-            recent_tx, headers = get_wallet_transactions(character, return_headers=True)
-            if recent_tx:
-                tx_ids_from_esi = [tx['transaction_id'] for tx in recent_tx]
-                existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
-                new_tx_ids = set(tx_ids_from_esi) - existing_tx_ids
-
-                if new_tx_ids:
-                    set_bot_state(f"chart_cache_dirty_{character.id}", "true")
-                    new_transactions = [tx for tx in recent_tx if tx['transaction_id'] in new_tx_ids and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > character.created_at]
-                    add_historical_transactions_to_db(character.id, new_transactions)
-
-                    sales, buys = defaultdict(list), defaultdict(list)
-                    for tx in new_transactions:
-                        (buys if tx['is_buy'] else sales)[tx['type_id']].append(tx)
-
-                        all_type_ids = list(sales.keys()) + list(buys.keys())
-                        all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
-                        id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids)), character=character)
-                        wallet_balance = get_wallet_balance(character, force_revalidate=True)
-
-                        # Process Buys
-                        if buys:
-                            for type_id, tx_group in buys.items():
-                                for tx in tx_group:
-                                    add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
-
-                        # Process Sales
-                        sales_details = []
-                        if sales:
-                            full_journal = get_full_wallet_journal_from_db(character.id)
-                            tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
-                            fee_journal_by_timestamp = defaultdict(list)
-                            for entry in full_journal:
-                                if entry['ref_type'] == 'transaction_tax':
-                                    fee_journal_by_timestamp[entry['date']].append(entry)
-
-                            for type_id, tx_group in sales.items():
-                                total_quantity = sum(t['quantity'] for t in tx_group)
-                                total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-
-                                # Get actual taxes from the journal
-                                journal_taxes = sum(abs(fee['amount']) for tx in tx_group if tx_id_to_journal_map.get(tx['transaction_id']) for fee in fee_journal_by_timestamp.get(tx_id_to_journal_map[tx['transaction_id']]['date'], []))
-
-                                estimated_broker_fees = 0
-                                if cogs is not None:
-                                    # Estimate broker fees based on user settings
-                                    estimated_broker_fees = (cogs * (character.buy_broker_fee / 100)) + (total_value * (character.sell_broker_fee / 100))
-
-                                total_fees = journal_taxes + estimated_broker_fees
-                                net_profit = total_value - cogs - total_fees if cogs is not None else None
-                                sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs, 'total_fees': total_fees, 'net_profit': net_profit})
-
-                        # --- Create Notifications ---
-                        if not character.notifications_enabled:
-                            return []
-
-                        # Low Balance Alert
-                        if wallet_balance is not None and character.wallet_balance_threshold > 0:
-                            state_key = f"low_balance_alert_sent_at_{character.id}"
-                            last_alert_str = get_bot_state(state_key)
-                            if wallet_balance < character.wallet_balance_threshold and (not last_alert_str or (datetime.now(timezone.utc) - datetime.fromisoformat(last_alert_str)) > timedelta(days=1)):
-                                alert_message = f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\nYour wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n**Current Balance:** `{wallet_balance:,.2f}` ISK"
-                                notifications.append({'message': alert_message, 'chat_id': character.telegram_user_id})
-                                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
-                            elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
-                                set_bot_state(state_key, '')
-
-                        # Buy Notifications
-                        if buys and character.enable_buy_notifications:
-                            if len(buys) >= character.notification_batch_threshold:
-                                header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
-                                item_lines = [f"  • Bought: `{sum(t['quantity'] for t in tx_group)}` x `{id_to_name.get(type_id, 'Unknown')}`" for type_id, tx_group in buys.items()]
-                                footer = f"\n**Total Cost:** `{sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group):,.2f} ISK`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
-                            else:
-                                for type_id, tx_group in buys.items():
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                    message = f"🛒 *Market Buy ({character.name})* 🛒\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}`\n**Total Cost:** `{total_cost:,.2f} ISK`\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                    notifications.append({'message': message, 'chat_id': character.telegram_user_id})
-
-                        # Sale Notifications
-                        if sales_details and character.enable_sales_notifications:
-                            if len(sales_details) >= character.notification_batch_threshold:
-                                header = f"✅ *Multiple Market Sales ({character.name})* ✅"
-                                item_lines = [f"  • Sold: `{sum(t['quantity'] for t in sale_info['tx_group'])}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`" for sale_info in sales_details]
-                                grand_total_value = sum(sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group']) for sale_info in sales_details)
-                                grand_total_fees = sum(sale_info['total_fees'] for sale_info in sales_details)
-                                grand_total_net_profit = sum(sale_info['net_profit'] for sale_info in sales_details if sale_info['net_profit'] is not None)
-                                profit_line = f"\n**Total Net Profit:** `{grand_total_net_profit:,.2f} ISK`" if grand_total_net_profit > 0 else ""
-                                footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`\n**Total Fees:** `{grand_total_fees:,.2f} ISK`{profit_line}\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
-                            else:
-                                for sale_info in sales_details:
-                                    type_id, tx_group, total_fees, net_profit = sale_info['type_id'], sale_info['tx_group'], sale_info['total_fees'], sale_info['net_profit']
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    avg_price = sum(t['quantity'] * t['unit_price'] for t in tx_group) / total_quantity
-                                    profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
-                                    message = f"✅ *Market Sale ({character.name})* ✅\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n**Total Fees:** `{total_fees:,.2f} ISK`{profit_line}\n\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                    notifications.append({'message': message, 'chat_id': character.telegram_user_id})
-
-        except (ValueError, TypeError):
-            pass
-
-    # --- Prevent notifications for characters pending deletion ---
-    if get_character_deletion_status(character.id):
-        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} wallet notifications.")
+    if not history_backfilled_at_str:
         return []
+
+    try:
+        # Check if the character's history has been backfilled
+        datetime.fromisoformat(history_backfilled_at_str)
+    except (ValueError, TypeError):
+        return []
+
+    recent_tx, headers = get_wallet_transactions(character, return_headers=True)
+    if not recent_tx:
+        return []
+
+    tx_ids_from_esi = [tx['transaction_id'] for tx in recent_tx]
+    existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
+    new_tx_ids = set(tx_ids_from_esi) - existing_tx_ids
+
+    if not new_tx_ids:
+        return []
+
+    set_bot_state(f"chart_cache_dirty_{character.id}", "true")
+    new_transactions = [
+        tx for tx in recent_tx
+        if tx['transaction_id'] in new_tx_ids and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > character.created_at
+    ]
+    add_historical_transactions_to_db(character.id, new_transactions)
+
+    sales, buys = defaultdict(list), defaultdict(list)
+    for tx in new_transactions:
+        (buys if tx['is_buy'] else sales)[tx['type_id']].append(tx)
+
+    # --- Essential Data Processing (Always Run) ---
+    # Process buys to update purchase lots for COGS tracking
+    for type_id, tx_group in buys.items():
+        for tx in tx_group:
+            add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+
+    # Process sales to consume purchase lots for COGS tracking and store the result
+    sales_cogs = {}
+    for type_id, tx_group in sales.items():
+        total_quantity_sold = sum(t['quantity'] for t in tx_group)
+        cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity_sold)
+        sales_cogs[type_id] = cogs
+
+
+    # --- Notification Generation (Run only if enabled) ---
+    # Suppress notifications for characters pending deletion or with notifications disabled
+    if get_character_deletion_status(character.id) or not character.notifications_enabled:
+        if get_character_deletion_status(character.id):
+            logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing wallet notifications.")
+        return []
+
+
+    # Fetch data needed for notifications
+    all_type_ids = list(sales.keys()) + list(buys.keys())
+    all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
+    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids)), character=character)
+    wallet_balance = get_wallet_balance(character, force_revalidate=True)
+    full_journal = get_full_wallet_journal_from_db(character.id)
+    tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
+    fee_journal_by_timestamp = defaultdict(list)
+    for entry in full_journal:
+        if entry['ref_type'] == 'transaction_tax':
+            fee_journal_by_timestamp[entry['date']].append(entry)
+
+
+    # Low Balance Alert
+    if wallet_balance is not None and character.wallet_balance_threshold > 0:
+        state_key = f"low_balance_alert_sent_at_{character.id}"
+        last_alert_str = get_bot_state(state_key)
+        try:
+            # Check if an alert was sent in the last day
+            should_send = not last_alert_str or (datetime.now(timezone.utc) - datetime.fromisoformat(last_alert_str)) > timedelta(days=1)
+            if wallet_balance < character.wallet_balance_threshold and should_send:
+                alert_message = f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\nYour wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n**Current Balance:** `{wallet_balance:,.2f}` ISK"
+                notifications.append({'message': alert_message, 'chat_id': character.telegram_user_id})
+                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+            elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
+                # Reset the alert state if balance is now okay
+                set_bot_state(state_key, '')
+        except (ValueError, TypeError):
+             set_bot_state(state_key, '') # Reset if state is malformed
+
+    # Buy Notifications
+    if buys and character.enable_buys_notifications:
+        if len(buys) >= character.notification_batch_threshold:
+            header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
+            item_lines = [f"  • Bought: `{sum(t['quantity'] for t in tx_group)}` x `{id_to_name.get(type_id, 'Unknown')}`" for type_id, tx_group in buys.items()]
+            footer = f"\n**Total Cost:** `{sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group):,.2f} ISK`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+            notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
+        else:
+            for type_id, tx_group in buys.items():
+                total_quantity = sum(t['quantity'] for t in tx_group)
+                total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+                message = f"🛒 *Market Buy ({character.name})* 🛒\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}`\n**Total Cost:** `{total_cost:,.2f} ISK`\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                notifications.append({'message': message, 'chat_id': character.telegram_user_id})
+
+    # Sale Notifications
+    if sales and character.enable_sales_notifications:
+        sales_details = []
+        for type_id, tx_group in sales.items():
+            total_quantity = sum(t['quantity'] for t in tx_group)
+            total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+            cogs = sales_cogs.get(type_id)
+
+            # Get actual taxes from the journal
+            journal_taxes = sum(
+                abs(fee['amount'])
+                for tx in tx_group
+                if tx_id_to_journal_map.get(tx['transaction_id'])
+                for fee in fee_journal_by_timestamp.get(tx_id_to_journal_map[tx['transaction_id']]['date'], [])
+            )
+
+            estimated_broker_fees = 0
+            if cogs is not None:
+                # Estimate broker fees based on user settings
+                estimated_broker_fees = (cogs * (character.buy_broker_fee / 100)) + (total_value * (character.sell_broker_fee / 100))
+
+            total_fees = journal_taxes + estimated_broker_fees
+            net_profit = total_value - cogs - total_fees if cogs is not None else None
+            sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs, 'total_fees': total_fees, 'net_profit': net_profit})
+
+        if len(sales_details) >= character.notification_batch_threshold:
+            header = f"✅ *Multiple Market Sales ({character.name})* ✅"
+            item_lines = [f"  • Sold: `{sum(t['quantity'] for t in sale_info['tx_group'])}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`" for sale_info in sales_details]
+            grand_total_value = sum(sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group']) for sale_info in sales_details)
+            grand_total_fees = sum(sale_info['total_fees'] for sale_info in sales_details)
+            grand_total_net_profit = sum(sale_info['net_profit'] for sale_info in sales_details if sale_info['net_profit'] is not None)
+            profit_line = f"\n**Total Net Profit:** `{grand_total_net_profit:,.2f} ISK`" if grand_total_net_profit > 0 else ""
+            footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`\n**Total Fees:** `{grand_total_fees:,.2f} ISK`{profit_line}\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+            notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
+        else:
+            for sale_info in sales_details:
+                type_id, tx_group, total_fees, net_profit = sale_info['type_id'], sale_info['tx_group'], sale_info['total_fees'], sale_info['net_profit']
+                total_quantity = sum(t['quantity'] for t in tx_group)
+                avg_price = sum(t['quantity'] * t['unit_price'] for t in tx_group) / total_quantity
+                profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
+                message = f"✅ *Market Sale ({character.name})* ✅\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n**Total Fees:** `{total_fees:,.2f} ISK`{profit_line}\n\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                notifications.append({'message': message, 'chat_id': character.telegram_user_id})
 
     return notifications
 
@@ -3677,3 +3704,564 @@ def send_daily_overview_for_character(character_id: int, bot):
         logging.info(f"Daily overview sent for {character.name}.")
     except Exception as e:
         logging.error(f"Failed to send daily overview for {character.name}: {e}", exc_info=True)
+
+
+def prepare_historical_sales_data(character_id: int, user_id: int, page: int = 0):
+    """
+    Fetches and prepares a paginated list of historical sales transactions,
+    with detailed profit and loss analysis using FIFO for COGS and
+    wallet journal entries for accurate tax and fee calculations.
+    This is a synchronous, data-intensive function designed to be called from a Celery task.
+    Returns a tuple of (message_text, reply_markup_json, status).
+    Status can be 'success', 'no_character', 'backfill_failed', 'no_sales'.
+    """
+    character = get_character_by_id(character_id)
+    if not character:
+        return None, None, "no_character"
+
+    # --- Data Integrity Check & Backfill ---
+    journal_state_key = f"journal_history_backfilled_{character.id}"
+    if not get_bot_state(journal_state_key):
+        logging.info(f"Performing one-time sync of wallet journal history for {character.name}...")
+        backfill_success = backfill_character_journal_history(character)
+        if not backfill_success:
+            logging.error(f"Failed to sync journal history for {character.name}.")
+            return f"❌ Failed to sync journal history for {character.name}. Please try again later.", None, "backfill_failed"
+
+    # --- Data Fetching & On-Demand Refresh ---
+    all_transactions = get_historical_transactions_from_db(character.id)
+    full_journal = get_full_wallet_journal_from_db(character.id)
+
+    try:
+        logging.info(f"Performing on-demand transaction refresh for {character.name}...")
+        recent_transactions_from_esi = get_wallet_transactions(character)
+        if recent_transactions_from_esi:
+            existing_tx_ids = {tx['transaction_id'] for tx in all_transactions}
+            new_transactions = [
+                tx for tx in recent_transactions_from_esi
+                if tx['transaction_id'] not in existing_tx_ids
+            ]
+            if new_transactions:
+                logging.info(f"On-demand refresh found {len(new_transactions)} new transactions for {character.name}.")
+                add_historical_transactions_to_db(character.id, new_transactions)
+                all_transactions.extend(new_transactions)
+
+        logging.info(f"Performing on-demand journal refresh for {character.name}...")
+        recent_journal_entries_from_esi = get_wallet_journal(character)
+        if recent_journal_entries_from_esi:
+            existing_journal_ids = {entry['id'] for entry in full_journal}
+            new_journal_entries = [
+                entry for entry in recent_journal_entries_from_esi
+                if entry['id'] not in existing_journal_ids
+            ]
+            if new_journal_entries:
+                logging.info(f"On-demand refresh found {len(new_journal_entries)} new journal entries for {character.name}.")
+                add_wallet_journal_entries_to_db(character.id, new_journal_entries)
+                for entry in new_journal_entries:
+                    entry['date'] = datetime.fromisoformat(entry['date'].replace('Z', '+00:00'))
+                full_journal.extend(new_journal_entries)
+                full_journal.sort(key=lambda x: x['date'], reverse=True)
+    except Exception as e:
+        logging.error(f"On-demand data refresh failed for {character.name}: {e}", exc_info=True)
+
+    # --- COGS Calculation (In-Memory FIFO Simulation) ---
+    inventory = defaultdict(list)
+    sorted_transactions = sorted(all_transactions, key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')))
+    sale_cogs_data = {}
+
+    for tx in sorted_transactions:
+        type_id = tx['type_id']
+        if tx.get('is_buy'):
+            inventory[type_id].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+        else:
+            cogs = 0
+            remaining_to_sell = tx['quantity']
+            lots_to_consume_from = inventory.get(type_id, [])
+            cogs_calculable = True
+            if not lots_to_consume_from:
+                cogs_calculable = False
+            else:
+                lots_consumed_count = 0
+                for lot in lots_to_consume_from:
+                    if remaining_to_sell <= 0: break
+                    quantity_from_lot = min(remaining_to_sell, lot['quantity'])
+                    cogs += quantity_from_lot * lot['price']
+                    remaining_to_sell -= quantity_from_lot
+                    lot['quantity'] -= quantity_from_lot
+                    if lot['quantity'] == 0:
+                        lots_consumed_count += 1
+                inventory[type_id] = lots_to_consume_from[lots_consumed_count:]
+                if remaining_to_sell > 0:
+                    cogs_calculable = False
+            sale_cogs_data[tx['transaction_id']] = cogs if cogs_calculable else None
+
+    # --- Data Filtering and Annotation ---
+    sale_journal_entries = [
+        entry for entry in full_journal
+        if entry.get('ref_type') == 'market_transaction' and entry.get('amount', 0) > 0
+    ]
+    sale_transaction_ids = {entry['context_id'] for entry in sale_journal_entries}
+    sales_transactions = [
+        tx for tx in all_transactions
+        if tx['transaction_id'] in sale_transaction_ids
+    ]
+
+    tx_id_to_journal_map = {
+        entry['context_id']: entry for entry in full_journal
+        if entry.get('ref_type') == 'market_transaction'
+    }
+    fee_journal_by_timestamp = defaultdict(list)
+    tax_ref_types = {'transaction_tax'}
+    for entry in full_journal:
+        if entry['ref_type'] in tax_ref_types:
+            fee_journal_by_timestamp[entry['date']].append(entry)
+
+    for sale in sales_transactions:
+        sale['cogs'] = sale_cogs_data.get(sale['transaction_id'])
+        sale_value = sale['quantity'] * sale['unit_price']
+        main_journal_entry = tx_id_to_journal_map.get(sale['transaction_id'])
+        taxes = 0
+        if main_journal_entry:
+            precise_timestamp = main_journal_entry['date']
+            related_fees = fee_journal_by_timestamp.get(precise_timestamp, [])
+            taxes = sum(abs(fee['amount']) for fee in related_fees)
+        else:
+            logging.warning(f"Could not find matching journal entry for sale transaction_id {sale['transaction_id']}")
+
+        sale['taxes'] = taxes
+        if sale.get('cogs') is not None:
+            estimated_broker_fees = (sale['cogs'] * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+            sale['total_fees'] = taxes + estimated_broker_fees
+            sale['net_profit'] = sale_value - sale['cogs'] - sale['total_fees']
+        else:
+            sale['net_profit'] = None
+
+    if not sales_transactions:
+        user_characters = get_characters_for_user(user_id)
+        back_callback = "sales" if len(user_characters) > 1 else "start_command"
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message = f"🧾 *Historical Sales for {character.name}*\n\nNo historical sales found."
+        return message, json.dumps(reply_markup.to_dict()), "no_sales"
+
+    sales_transactions.sort(key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)
+
+    # --- Pagination ---
+    items_per_page = 5
+    total_items = len(sales_transactions)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages - 1))
+    start_index = page * items_per_page
+    end_index = start_index + items_per_page
+    paginated_tx = sales_transactions[start_index:end_index]
+
+    page_broker_fees = 0
+    if paginated_tx:
+        start_date = datetime.fromisoformat(paginated_tx[-1]['date'].replace('Z', '+00:00'))
+        end_date = datetime.fromisoformat(paginated_tx[0]['date'].replace('Z', '+00:00'))
+        page_broker_fees = sum(
+            abs(entry['amount']) for entry in full_journal
+            if entry['ref_type'] == 'brokers_fee' and start_date <= entry['date'] <= end_date
+        )
+
+    # --- Name Resolution ---
+    type_ids = [tx['type_id'] for tx in paginated_tx]
+    location_ids = [tx['location_id'] for tx in paginated_tx]
+    id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
+
+    # --- Message Formatting ---
+    header = f"🧾 *Historical Sales for {character.name}*\n"
+    message_lines = []
+    for tx in paginated_tx:
+        item_name = id_to_name.get(tx['type_id'], f"Type ID {tx['type_id']}")
+        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+        sale_value = tx['quantity'] * tx['unit_price']
+        line = (
+            f"*{item_name}*\n"
+            f"  *Date:* `{date_str}`\n"
+            f"  *Qty:* `{tx['quantity']:,}` @ `{tx['unit_price']:,.2f}`\n"
+            f"  *Sale Value:* `{sale_value:,.2f}` ISK\n"
+        )
+        if tx.get('cogs') is not None:
+            line += f"  *Cost (FIFO):* `{tx['cogs']:,.2f}` ISK\n"
+            line += f"  *Total Fees (Est.):* `{tx.get('total_fees', 0):,.2f}` ISK\n"
+            line += f"  *Net Profit (Est.):* `{tx['net_profit']:,.2f}` ISK"
+        else:
+            line += f"  *Net Profit:* `N/A (Missing Purchase History)`"
+        message_lines.append(line)
+
+    footer = (
+        f"\n---\n*Broker Fees for this page's period:* `{page_broker_fees:,.2f}` ISK\n"
+        f"_(Note: Net Profit is an estimate including sales tax and broker fees.)_"
+    )
+
+    # --- Keyboard ---
+    keyboard = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"history_list_sale_{character_id}_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"history_list_sale_{character_id}_{page + 1}"))
+
+    if nav_row: keyboard.append(nav_row)
+    user_characters = get_characters_for_user(user_id)
+    back_callback = "sales" if len(user_characters) > 1 else "start_command"
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    full_message = header + "\n".join(message_lines) + footer
+    return full_message, json.dumps(reply_markup.to_dict()), "success"
+
+
+def prepare_open_orders_data(character_id: int, user_id: int, is_buy: bool, page: int = 0):
+    """
+    Fetches and prepares a paginated list of open orders from the local cache.
+    This is a synchronous, data-intensive function designed to be called from a Celery task.
+    Returns a tuple of (message_text, reply_markup_json, status).
+    Status can be 'success', 'no_character', 'no_orders', 'error'.
+    """
+    character = get_character_by_id(character_id)
+    if not character:
+        return None, None, "no_character"
+
+    # --- Data Fetching ---
+    all_orders = get_tracked_market_orders(character.id)
+    skills_data = get_character_skills(character)
+
+    if all_orders is None:
+        return f"❌ Could not fetch market orders for {character.name}. The database might be unavailable.", None, "error"
+
+    # --- Order Capacity Calculation ---
+    order_capacity_str = ""
+    if skills_data and 'skills' in skills_data:
+        skill_map = {s['skill_id']: s['active_skill_level'] for s in skills_data['skills']}
+        trade_level = skill_map.get(3443, 0)
+        retail_level = skill_map.get(3444, 0)
+        wholesale_level = skill_map.get(16596, 0)
+        tycoon_level = skill_map.get(18580, 0)
+        max_orders = 5 + (trade_level * 4) + (retail_level * 8) + (wholesale_level * 16) + (tycoon_level * 32)
+        order_capacity_str = f"({len(all_orders)} / {max_orders} orders)"
+
+    # Filter for buy or sell orders
+    filtered_orders = [order for order in all_orders if bool(order.get('is_buy_order')) == is_buy]
+    order_type_str = "Buy" if is_buy else "Sale"
+
+    # --- Message Formatting ---
+    header = f"📄 *Open {order_type_str} Orders for {character.name}* {order_capacity_str}\n\n"
+
+    if not filtered_orders:
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="open_orders")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message = header + f"✅ No open {order_type_str.lower()} orders found."
+        return message, json.dumps(reply_markup.to_dict()), "no_orders"
+
+    filtered_orders.sort(key=lambda x: datetime.fromisoformat(x['issued'].replace('Z', '+00:00')), reverse=True)
+
+    # --- Pagination ---
+    items_per_page = 10
+    total_items = len(filtered_orders)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages - 1))
+    start_index = page * items_per_page
+    end_index = start_index + items_per_page
+    paginated_orders = filtered_orders[start_index:end_index]
+
+    # --- Data Resolution ---
+    type_ids_on_page = list(set(order['type_id'] for order in paginated_orders))
+    location_ids = [order['location_id'] for order in paginated_orders]
+    all_undercut_statuses = get_undercut_statuses(character.id)
+    competitor_location_ids = [
+        status.get('competitor_location_id')
+        for status in all_undercut_statuses.values()
+        if status.get('competitor_location_id')
+    ]
+    ids_to_resolve = list(set(type_ids_on_page + location_ids + competitor_location_ids))
+    id_to_name = get_names_from_ids(ids_to_resolve, character)
+
+    message_lines = []
+    for order in paginated_orders:
+        item_name = id_to_name.get(order['type_id'], f"Type ID {order['type_id']}")
+        location_name = id_to_name.get(order['location_id'], f"Location ID {order['location_id']}")
+        remaining_vol = order['volume_remain']
+        total_vol = order['volume_total']
+        price = order['price']
+        line = (
+            f"*{item_name}*\n"
+            f"  `{remaining_vol:,}` of `{total_vol:,}` @ `{price:,.2f}` ISK\n"
+            f"  *Location:* `{location_name}`"
+        )
+
+        undercut_status = all_undercut_statuses.get(order['order_id'])
+        if undercut_status and undercut_status['is_undercut']:
+            competitor_price = undercut_status.get('competitor_price', 0.0)
+            competitor_location_id = undercut_status.get('competitor_location_id')
+            if competitor_price and competitor_location_id:
+                competitor_loc_name = id_to_name.get(competitor_location_id, "Unknown Location")
+                jumps = get_jump_distance(order['location_id'], competitor_location_id, character)
+                jumps_str = f" ({jumps}j)" if jumps is not None else ""
+                alert_text = "Outbid" if is_buy else "Undercut"
+                price_text = "Highest bid" if is_buy else "Lowest price"
+                alert_line = f"❗️ {alert_text}! {price_text}: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}"
+                line += f"\n  `> {alert_line}`"
+        message_lines.append(line)
+
+    summary_footer = "\n\n---\n_Undercut status is updated periodically._"
+
+    # --- Keyboard ---
+    keyboard = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"openorders_list_{character_id}_{str(is_buy).lower()}_{page + 1}"))
+    if nav_row:
+        keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="open_orders")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    full_message = header + "\n\n".join(message_lines) + summary_footer
+    return full_message, json.dumps(reply_markup.to_dict()), "success"
+
+
+def prepare_historical_buys_data(character_id: int, user_id: int, page: int = 0):
+    """
+    Fetches and prepares a paginated list of historical buy transactions.
+    This is a synchronous, data-intensive function designed to be called from a Celery task.
+    Returns a tuple of (message_text, reply_markup_json, status).
+    Status can be 'success', 'no_character', 'no_buys'.
+    """
+    character = get_character_by_id(character_id)
+    if not character:
+        return None, None, "no_character"
+
+    # --- Data Fetching & Filtering ---
+    all_transactions = get_historical_transactions_from_db(character.id)
+    buy_transactions = [tx for tx in all_transactions if tx.get('is_buy')]
+
+    if not buy_transactions:
+        user_characters = get_characters_for_user(user_id)
+        back_callback = "buys" if len(user_characters) > 1 else "start_command"
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message = f"🧾 *Historical Buys for {character.name}*\n\nNo historical buys found."
+        return message, json.dumps(reply_markup.to_dict()), "no_buys"
+
+    # Sort by date, newest first for display
+    buy_transactions.sort(key=lambda x: datetime.fromisoformat(x['date'].replace('Z', '+00:00')), reverse=True)
+
+    # --- Pagination ---
+    items_per_page = 5
+    total_items = len(buy_transactions)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages - 1))
+    start_index = page * items_per_page
+    end_index = start_index + items_per_page
+    paginated_tx = buy_transactions[start_index:end_index]
+
+    # --- Name Resolution ---
+    type_ids = [tx['type_id'] for tx in paginated_tx]
+    location_ids = [tx['location_id'] for tx in paginated_tx]
+    id_to_name = get_names_from_ids(list(set(type_ids + location_ids)), character)
+
+    # --- Message Formatting ---
+    header = f"🧾 *Historical Buys for {character.name}*\n"
+    message_lines = []
+    for tx in paginated_tx:
+        item_name = id_to_name.get(tx['type_id'], f"Type ID {tx['type_id']}")
+        location_name = id_to_name.get(tx['location_id'], f"Location ID {tx['location_id']}")
+        date_str = datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+        total_value = tx['quantity'] * tx['unit_price']
+
+        line = (
+            f"*{item_name}*\n"
+            f"  *Date:* `{date_str}`\n"
+            f"  *Qty:* `{tx['quantity']:,}` @ `{tx['unit_price']:,.2f}`\n"
+            f"  *Total Cost:* `{total_value:,.2f}` ISK\n"
+            f"  *Location:* `{location_name}`"
+        )
+        message_lines.append(line)
+
+    # --- Keyboard ---
+    keyboard = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"history_list_buy_{character_id}_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"history_list_buy_{character_id}_{page + 1}"))
+
+    if nav_row: keyboard.append(nav_row)
+
+    user_characters = get_characters_for_user(user_id)
+    back_callback = "buys" if len(user_characters) > 1 else "start_command"
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    full_message = header + "\n".join(message_lines)
+    return full_message, json.dumps(reply_markup.to_dict()), "success"
+
+
+def prepare_character_info_data(character_id: int):
+    """
+    Fetches and prepares all data and the composite image for the character info display.
+    This is a synchronous, data-intensive function designed to be called from a Celery task.
+    Returns a tuple of (caption, image_bytes, reply_markup_json, status).
+    Status can be 'success', 'no_character', 'error'.
+    """
+    character = get_character_by_id(character_id)
+    if not character:
+        return None, None, None, "no_character"
+
+    # --- ESI Calls ---
+    public_info = get_character_public_info(character.id)
+    online_status = get_character_online_status(character)
+
+    if not public_info:
+        return f"❌ Could not fetch public info for {character.name}.", None, None, "error"
+
+    corp_info = get_corporation_info(public_info['corporation_id'])
+    alliance_info = None
+    if 'alliance_id' in public_info:
+        alliance_info = get_alliance_info(public_info['alliance_id'])
+
+    # --- Formatting ---
+    char_name = public_info.get('name', character.name)
+    try:
+        birthday = datetime.fromisoformat(public_info['birthday'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
+    except (ValueError, KeyError):
+        birthday = "Unknown"
+    security_status = f"{public_info.get('security_status', 0):.2f}"
+    corp_name = corp_info.get('name', 'Unknown Corporation') if corp_info else 'Unknown Corporation'
+
+    caption_lines = [
+        f"*{char_name}*",
+        f"`Character ID: {character.id}`",
+        f"Birthday: {birthday}",
+        f"Security Status: {security_status}",
+        f"Corporation: {corp_name}",
+    ]
+
+    if alliance_info:
+        alliance_name = alliance_info.get('name', 'Unknown Alliance')
+        caption_lines.append(f"Alliance: {alliance_name}")
+
+    if online_status:
+        status_text = "🟢 Online" if online_status.get('online') else "🔴 Offline"
+        login_count = online_status.get('logins', 'N/A')
+        caption_lines.append(f"Status: {status_text}")
+        caption_lines.append(f"Total Logins: {login_count:,}")
+
+    caption = "\n".join(caption_lines)
+
+    # --- Image Composition ---
+    image_buffer = _create_character_info_image(
+        character.id,
+        public_info['corporation_id'],
+        public_info.get('alliance_id')
+    )
+    image_bytes = image_buffer.getvalue() if image_buffer else None
+
+    # --- Keyboard ---
+    back_callback = f"settings_char_{character.id}"
+    keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    return caption, image_bytes, json.dumps(reply_markup.to_dict()), "success"
+
+
+def prepare_contracts_data(character_id: int, user_id: int, page: int = 0):
+    """
+    Fetches and prepares a paginated list of outstanding contracts from the local cache.
+    This is a synchronous, data-intensive function designed to be called from a Celery task.
+    Returns a tuple of (message_text, reply_markup_json, status).
+    Status can be 'success', 'no_character', 'no_contracts'.
+    """
+    character = get_character_by_id(character_id)
+    if not character:
+        return None, None, "no_character"
+
+    # --- Data Fetching & Filtering ---
+    all_contracts = get_contracts_from_db(character.id)
+    outstanding_contracts = [c for c in all_contracts if c.get('status') == 'outstanding']
+
+    if not outstanding_contracts:
+        back_callback = "start_command"
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=back_callback)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message = f"📝 *Outstanding Contracts for {character.name}*\n\nNo outstanding contracts found."
+        return message, json.dumps(reply_markup.to_dict()), "no_contracts"
+
+    outstanding_contracts.sort(key=lambda x: datetime.fromisoformat(x['date_issued'].replace('Z', '+00:00')), reverse=True)
+
+    # --- Pagination ---
+    items_per_page = 5
+    total_items = len(outstanding_contracts)
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    page = max(0, min(page, total_pages - 1))
+    start_index = page * items_per_page
+    end_index = start_index + items_per_page
+    paginated_contracts = outstanding_contracts[start_index:end_index]
+
+    # --- Name Resolution ---
+    ids_to_resolve = set()
+    for c in paginated_contracts:
+        ids_to_resolve.add(c['issuer_id'])
+        if c.get('assignee_id'):
+            ids_to_resolve.add(c['assignee_id'])
+        if c.get('start_location_id'):
+            ids_to_resolve.add(c['start_location_id'])
+        if c.get('end_location_id'):
+            ids_to_resolve.add(c['end_location_id'])
+    id_to_name = get_names_from_ids(list(ids_to_resolve), character)
+
+    # --- Message Formatting ---
+    header = f"📝 *Outstanding Contracts for {character.name}*\n"
+    message_lines = []
+    for contract in paginated_contracts:
+        contract_type = contract['type'].replace('_', ' ').title()
+        issuer_name = id_to_name.get(contract['issuer_id'], 'Unknown')
+
+        line = f"*{contract_type}* from `{issuer_name}`"
+        if contract.get('title'):
+            line += f"\n  *Title:* `{contract['title']}`"
+        if contract.get('assignee_id'):
+            assignee_name = id_to_name.get(contract['assignee_id'], 'Unknown')
+            line += f"\n  *To:* `{assignee_name}`"
+        if contract.get('start_location_id'):
+            location_name = id_to_name.get(contract['start_location_id'], 'Unknown')
+            line += f"\n  *Location:* `{location_name}`"
+        if contract.get('reward', 0) > 0:
+            line += f"\n  *Reward:* `{contract['reward']:,.2f}` ISK"
+        if contract.get('collateral', 0) > 0:
+            line += f"\n  *Collateral:* `{contract['collateral']:,.2f}` ISK"
+        try:
+            expires_dt = datetime.fromisoformat(contract['date_expired'].replace('Z', '+00:00'))
+            time_left = expires_dt - datetime.now(timezone.utc)
+            if time_left.total_seconds() <= 0:
+                expires_str = "Expired"
+            else:
+                days = time_left.days
+                hours = time_left.seconds // 3600
+                expires_str = f"{days}d {hours}h"
+            line += f"\n  *Expires in:* `{expires_str}`"
+        except (ValueError, KeyError):
+            pass
+        message_lines.append(line)
+
+    # --- Keyboard ---
+    keyboard = []
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("« Prev", callback_data=f"contracts_list_{character_id}_{page - 1}"))
+    nav_row.append(InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next »", callback_data=f"contracts_list_{character_id}_{page + 1}"))
+    if nav_row:
+        keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    full_message = header + "\n\n".join(message_lines)
+    return full_message, json.dumps(reply_markup.to_dict()), "success"
