@@ -15,7 +15,9 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Near Real-Time Market Notifications**: Checks for market activity every 60 seconds using efficient ETag-based polling.
 - **Intelligent Grouping**: Multiple transactions of the same type are grouped into a single, summarized notification to reduce spam.
 - **Rich Contextual Data & Order Alerts**:
-  - **Accurate Profit Tracking (FIFO & Journal-Based)**: The bot uses the First-In, First-Out (FIFO) method to calculate the Cost of Goods Sold (COGS). For fees, it combines the *exact* sales tax found in your wallet journal with an *estimated* broker fee (based on configurable percentages in your settings) to provide a comprehensive net profit calculation in all views.
+  - **Dual Profit Tracking Methods**:
+    - **For Market Overviews & Charts**: Profit is calculated as a simple, high-level **net money flow** by summing all income and expenses directly from your wallet journal over the selected period. This provides a quick and easy-to-understand summary of your cash flow.
+    - **For Individual Sale Notifications**: For detailed, per-sale analysis, the bot still uses the **First-In, First-Out (FIFO)** method to calculate the Cost of Goods Sold (COGS), providing a precise net profit for each transaction.
   - **Automatic & Accurate Market Context**: Sales notifications are compared against the best buy order in the *exact location* of the sale. The bot automatically determines if the sale was in an NPC station or a player-owned structure and fetches the correct market data. For stations, it finds the correct region by walking the ESI hierarchy (`station -> system -> region`), ensuring pinpoint accuracy without any user configuration.
   - **Accurate, Multi-Region Undercut & Outbid Alerts**: When viewing open orders, the bot checks for undercuts on sell orders and outbids on buy orders in the *actual region of each order*, making it highly accurate for players who trade in multiple hubs simultaneously.
   - **Live Undercut & Outbid Notifications**: Get notified the moment one of your sell orders is undercut or your buy order is outbid. The bot monitors both regional markets and player-owned structures. To prevent spam, notifications are only sent once when an order's status changes from competitive to non-competitive. This can be toggled in the settings.
@@ -27,9 +29,8 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 - **Public Character Info**: View an overview of any character's public information, including their portrait, corporation and alliance logos, security status, and birthday, all presented in a clean composite image.
 - **Modern Inline Menu**: All bot commands are handled through a clean, interactive inline menu system directly within the chat.
 - **Interactive On-Demand Charts**: Generate detailed performance charts directly within Telegram with a single button press. The bot offers several timeframes: "Last Day," "Last 7 Days," "Last 30 Days," and "All Time."
-  - **Advanced Visualization**: Charts display profit as a cumulative area graph (showing gains and losses over the period) while sales and fees are shown as non-cumulative bar graphs for easy comparison.
+  - **Advanced Visualization**: Charts display your net money flow as a cumulative area graph (showing gains and losses over the period) while income and expenses are shown as non-cumulative bar graphs for easy comparison.
   - **Intelligent Caching**: Charts are cached intelligently to ensure fast delivery. "Last Day" charts are cached hourly, daily charts are cached for the day, and the "All Time" chart is only regenerated when new transaction data is detected.
-  - **Top Profitable Items**: Each chart is accompanied by a list of the top 5 most profitable items sold during that period, showing their net profit.
 - **Highly Configurable**: All major settings (wallet alerts, notification types, etc.) are configurable on a per-character basis via the bot's menu.
 - **Configurable Broker Fees for Profit Estimation**: In the character settings, you can specify custom "Buy Broker Fee" and "Sell Broker Fee" percentages (defaulting to 3%). These fees are used to estimate the net profit for sales, providing a more accurate financial picture. Since the actual broker fees paid can vary due to order modifications, this provides a close approximation for profit tracking purposes.
 - **Robust & Persistent**: Employs a sophisticated caching strategy using a PostgreSQL database. Background polling tasks continuously fetch data from ESI, and user-facing commands read from this fast, local cache. This minimizes API calls, prevents duplicate notifications, and ensures the bot remains responsive even during ESI slowdowns.
@@ -182,17 +183,17 @@ _2025-09-26 18:00 UTC_
 
 *Wallet Balance:* `1,234,567,890.12 ISK`
 
-*Last Day:*
-  - Total Sales Value: `15,000,000.00 ISK`
-  - Total Fees (Broker + Tax): `750,000.00 ISK`
-  - **Profit (FIFO):** `3,500,000.00 ISK`
+*Last Day (Journal Flow):*
+  - Total Income: `15,000,000.00 ISK`
+  - Total Expenses: `11,500,000.00 ISK`
+  - **Profit:** `3,500,000.00 ISK`
 
 ---
 
-🗓️ *Last 30 Days:*
-  - Total Sales Value: `120,000,000.00 ISK`
-  - Total Fees (Broker + Tax): `6,000,000.00 ISK`
-  - **Profit (FIFO):** `25,000,000.00 ISK`
+🗓️ *Last 30 Days (Journal Flow):*
+  - Total Income: `120,000,000.00 ISK`
+  - Total Expenses: `95,000,000.00 ISK`
+  - **Profit:** `25,000,000.00 ISK`
 ```
 
 ---
