@@ -1217,11 +1217,21 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             page = int(data.split('_')[-1])
             user_id = query.from_user.id
-            # The task will edit the message, so we just need to dispatch it.
+            message_id_to_use = query.message.message_id
+
+            # If coming back from a chart (photo), delete it and send a new placeholder message.
+            if query.message.photo:
+                await query.message.delete()
+                sent_message = await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="⏳ Loading overview..."
+                )
+                message_id_to_use = sent_message.message_id
+
             generate_paginated_overview_task.delay(
                 user_id=user_id,
                 chat_id=query.message.chat_id,
-                message_id=query.message.message_id,
+                message_id=message_id_to_use,
                 page=page
             )
         except (ValueError, IndexError):
