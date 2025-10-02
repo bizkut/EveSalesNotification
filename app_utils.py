@@ -143,6 +143,17 @@ def setup_database():
                 )
             """)
 
+            # Migration: Change notification_batch_threshold default and update existing users
+            cursor.execute("SELECT column_default FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'notification_batch_threshold'")
+            current_default = cursor.fetchone()
+            if current_default and '3' in current_default[0]:
+                logging.info("Applying migration: Updating 'notification_batch_threshold' default to 2...")
+                cursor.execute("ALTER TABLE characters ALTER COLUMN notification_batch_threshold SET DEFAULT 2;")
+                # Update existing users who are on the old default
+                cursor.execute("UPDATE characters SET notification_batch_threshold = 2 WHERE notification_batch_threshold = 3;")
+                logging.info("Migration for 'notification_batch_threshold' complete. Default is now 2 and existing users on old default have been updated.")
+
+
             # Migration: Rename enable_buy_notifications to enable_buys_notifications
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_buy_notifications'")
             if cursor.fetchone():
@@ -2716,7 +2727,7 @@ def process_character_wallet(character_id: int) -> list[dict]:
 
                         # Buy Notifications
                         if buys and character.enable_buy_notifications:
-                            if len(buys) > character.notification_batch_threshold:
+                            if len(buys) >= character.notification_batch_threshold:
                                 header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
                                 item_lines = [f"  • Bought: `{sum(t['quantity'] for t in tx_group)}` x `{id_to_name.get(type_id, 'Unknown')}`" for type_id, tx_group in buys.items()]
                                 footer = f"\n**Total Cost:** `{sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group):,.2f} ISK`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
@@ -2730,7 +2741,7 @@ def process_character_wallet(character_id: int) -> list[dict]:
 
                         # Sale Notifications
                         if sales_details and character.enable_sales_notifications:
-                            if len(sales_details) > character.notification_batch_threshold:
+                            if len(sales_details) >= character.notification_batch_threshold:
                                 header = f"✅ *Multiple Market Sales ({character.name})* ✅"
                                 item_lines = [f"  • Sold: `{sum(t['quantity'] for t in sale_info['tx_group'])}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`" for sale_info in sales_details]
                                 grand_total_value = sum(sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group']) for sale_info in sales_details)
