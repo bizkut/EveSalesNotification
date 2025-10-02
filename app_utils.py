@@ -2547,16 +2547,6 @@ def format_paginated_message(header: str, item_lines: list, footer: str, chat_id
                 message = "\n".join(chunk)
             notifications.append({'message': message, 'chat_id': chat_id})
 
-    # --- Prevent notifications for characters pending deletion ---
-    if get_character_deletion_status(character.id):
-        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} wallet notifications.")
-        return []
-
-    # --- Prevent notifications for characters pending deletion ---
-    if get_character_deletion_status(character.id):
-        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} order notifications.")
-        return []
-
     return notifications
 
 
@@ -2570,8 +2560,6 @@ def process_character_wallet(character_id: int) -> list[dict]:
         return []
 
     notifications = []
-    grace_period_hours = 1
-    min_delay = 3600
 
     # --- Wallet Journal Processing ---
     history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
@@ -2596,21 +2584,20 @@ def process_character_wallet(character_id: int) -> list[dict]:
     if history_backfilled_at_str:
         try:
             history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
-            if (datetime.now(timezone.utc) - history_backfilled_at) > timedelta(hours=grace_period_hours):
-                recent_tx, headers = get_wallet_transactions(character, return_headers=True)
-                if recent_tx:
-                    tx_ids_from_esi = [tx['transaction_id'] for tx in recent_tx]
-                    existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
-                    new_tx_ids = set(tx_ids_from_esi) - existing_tx_ids
+            recent_tx, headers = get_wallet_transactions(character, return_headers=True)
+            if recent_tx:
+                tx_ids_from_esi = [tx['transaction_id'] for tx in recent_tx]
+                existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
+                new_tx_ids = set(tx_ids_from_esi) - existing_tx_ids
 
-                    if new_tx_ids:
-                        set_bot_state(f"chart_cache_dirty_{character.id}", "true")
-                        new_transactions = [tx for tx in recent_tx if tx['transaction_id'] in new_tx_ids]
-                        add_historical_transactions_to_db(character.id, new_transactions)
+                if new_tx_ids:
+                    set_bot_state(f"chart_cache_dirty_{character.id}", "true")
+                    new_transactions = [tx for tx in recent_tx if tx['transaction_id'] in new_tx_ids and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > character.created_at]
+                    add_historical_transactions_to_db(character.id, new_transactions)
 
-                        sales, buys = defaultdict(list), defaultdict(list)
-                        for tx in new_transactions:
-                            (buys if tx['is_buy'] else sales)[tx['type_id']].append(tx)
+                    sales, buys = defaultdict(list), defaultdict(list)
+                    for tx in new_transactions:
+                        (buys if tx['is_buy'] else sales)[tx['type_id']].append(tx)
 
                         all_type_ids = list(sales.keys()) + list(buys.keys())
                         all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
@@ -2693,6 +2680,11 @@ def process_character_wallet(character_id: int) -> list[dict]:
         except (ValueError, TypeError):
             pass
 
+    # --- Prevent notifications for characters pending deletion ---
+    if get_character_deletion_status(character.id):
+        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} wallet notifications.")
+        return []
+
     return notifications
 
 
@@ -2706,22 +2698,20 @@ def process_character_orders(character_id: int) -> list[dict]:
         return []
 
     notifications = []
-    grace_period_hours = 1
 
     # --- Order History (Cancelled/Expired) ---
     history_backfilled_at_str = get_bot_state(f"history_backfilled_{character.id}")
     if history_backfilled_at_str and character.notifications_enabled:
         try:
             history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
-            if (datetime.now(timezone.utc) - history_backfilled_at) > timedelta(hours=grace_period_hours):
-                order_history, headers = get_market_orders_history(character, return_headers=True, force_revalidate=True)
-                if order_history:
-                    processed_order_ids = get_processed_orders(character.id)
-                    new_orders = [o for o in order_history if o['order_id'] not in processed_order_ids]
-                    if new_orders:
-                        poll_time = datetime.strptime(headers['Date'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc) if headers.get('Date') else datetime.now(timezone.utc)
-                        cancelled = [o for o in new_orders if o.get('state') == 'cancelled' or (o.get('state') == 'expired' and poll_time < (datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) + timedelta(days=o.get('duration', 90))))]
-                        expired = [o for o in new_orders if o not in cancelled]
+            order_history, headers = get_market_orders_history(character, return_headers=True, force_revalidate=True)
+            if order_history:
+                processed_order_ids = get_processed_orders(character.id)
+                new_orders = [o for o in order_history if o['order_id'] not in processed_order_ids and datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) > character.created_at]
+                if new_orders:
+                    poll_time = datetime.strptime(headers['Date'], '%a, %d %b %Y %H:%M:%S GMT').replace(tzinfo=timezone.utc) if headers.get('Date') else datetime.now(timezone.utc)
+                    cancelled = [o for o in new_orders if o.get('state') == 'cancelled' or (o.get('state') == 'expired' and poll_time < (datetime.fromisoformat(o['issued'].replace('Z', '+00:00')) + timedelta(days=o.get('duration', 90))))]
+                    expired = [o for o in new_orders if o not in cancelled]
 
                         item_ids = [o['type_id'] for o in new_orders]
                         id_to_name = get_names_from_ids(item_ids)
@@ -2809,7 +2799,8 @@ def process_character_orders(character_id: int) -> list[dict]:
 
             new_statuses.append({'order_id': order['order_id'], 'is_undercut': is_outbid_or_undercut, 'competitor_price': competitor['price'] if competitor else None, 'competitor_location_id': competitor['location_id'] if competitor else None})
             if is_outbid_or_undercut and not previous_statuses.get(order['order_id'], {}).get('is_undercut', False):
-                notifications_to_send.append({'my_order': order, 'competitor': competitor})
+                if competitor and 'issued' in competitor and datetime.fromisoformat(competitor['issued'].replace('Z', '+00:00')) > character.created_at:
+                    notifications_to_send.append({'my_order': order, 'competitor': competitor})
 
         if new_statuses:
             update_undercut_statuses(character.id, new_statuses)
@@ -2841,6 +2832,11 @@ def process_character_orders(character_id: int) -> list[dict]:
                        f"  • **{competitor_location_label}:** {location_line}\n\n"
                        f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`")
                 notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
+
+    # --- Prevent notifications for characters pending deletion ---
+    if get_character_deletion_status(character.id):
+        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} order notifications.")
+        return []
 
     return notifications
 
