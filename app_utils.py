@@ -3041,14 +3041,12 @@ def _calculate_overview_data(character: Character) -> dict:
     wallet_balance = get_last_known_wallet_balance(character)
     available_years = sorted(list(set(tx['date'].year for tx in full_journal))) if full_journal else []
 
-
     return {
         "now": now, "wallet_balance": wallet_balance,
         "total_sales_24h": total_sales_24h, "total_fees_24h": total_fees_24h, "profit_24h": profit_24h,
         "total_sales_30_days": total_sales_30_days, "total_fees_30_days": total_fees_30_days, "profit_30_days": profit_30_days,
         "available_years": available_years
     }
-
 
 def _format_overview_message(overview_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
     """Formats the overview data into a message string and keyboard."""
@@ -3087,9 +3085,78 @@ def format_isk(value):
     return f"{value:.2f}"
 
 
+def _calculate_top_profitable_items(events_in_period: list, initial_inventory: dict, character_id: int) -> str:
+    """
+    Calculates the top 5 most profitable items from a list of events and returns a formatted string.
+    This helper function is designed to be called by the various chart generation functions.
+    """
+    inventory = initial_inventory.copy()
+    item_profits = defaultdict(lambda: {'profit': 0, 'sales_value': 0})
+
+    # First, process all buys in the period to update the inventory
+    for event in events_in_period:
+        if event['type'] == 'tx' and event['data'].get('is_buy'):
+            tx = event['data']
+            inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+
+    # Then, process all sales and fees
+    for event in events_in_period:
+        if event['type'] == 'tx' and not event['data'].get('is_buy'):
+            tx = event['data']
+            sale_value = tx['quantity'] * tx['unit_price']
+
+            cogs = 0
+            remaining_to_sell = tx['quantity']
+            lots = inventory.get(tx['type_id'], [])
+            if lots:
+                consumed_count = 0
+                for lot in lots:
+                    if remaining_to_sell <= 0: break
+                    take = min(remaining_to_sell, lot['quantity'])
+                    cogs += take * lot['price']
+                    remaining_to_sell -= take
+                    lot['quantity'] -= take
+                    if lot['quantity'] == 0: consumed_count += 1
+                inventory[tx['type_id']] = lots[consumed_count:]
+
+            # Only track profit if COGS could be fully determined
+            if remaining_to_sell == 0:
+                net_profit = sale_value - cogs
+                item_profits[tx['type_id']]['profit'] += net_profit
+                item_profits[tx['type_id']]['sales_value'] += sale_value
+
+    if not item_profits:
+        return ""
+
+    # Sort items by profit in descending order
+    sorted_items = sorted(item_profits.items(), key=lambda item: item[1]['profit'], reverse=True)
+
+    # Get the top 5
+    top_5_items = sorted_items[:5]
+
+    if not top_5_items:
+        return ""
+
+    # Resolve names for the top 5 items
+    type_ids = [item_id for item_id, data in top_5_items]
+    character = get_character_by_id(character_id)
+    id_to_name = get_names_from_ids(type_ids, character)
+
+    # Format the output string
+    lines = ["\n\n*Top 5 Profitable Items (Net Profit):*"]
+    for item_id, data in top_5_items:
+        name = id_to_name.get(item_id, f"Unknown Item ID: {item_id}")
+        profit_in_millions = data['profit'] / 1_000_000
+        lines.append(f"  - `{name}`: `{profit_in_millions:,.2f}m ISK`")
+
+    return "\n".join(lines)
+
+
 def generate_last_day_chart(character_id: int):
     """
-    Generates a chart for the last 24 hours based on wallet journal flow.
+    Generates a chart for the last 24 hours.
+    - The main chart data is based on pure wallet journal money flow.
+    - The caption includes a FIFO-based calculation of the top 5 most profitable items.
     Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
     """
     import matplotlib
@@ -3101,13 +3168,16 @@ def generate_last_day_chart(character_id: int):
     now = datetime.now(timezone.utc)
     start_of_period = now - timedelta(days=1)
 
+    # --- FIFO-based Top Items Calculation (for caption) ---
+    inventory, events_in_period_fifo = _prepare_chart_data(character_id, start_of_period)
+    caption_suffix = _calculate_top_profitable_items(events_in_period_fifo, inventory, character_id)
+
+    # --- Journal-based Money Flow Calculation (for chart) ---
     full_journal = get_full_wallet_journal_from_db(character_id)
-    events_in_period = sorted([e for e in full_journal if e['date'] >= start_of_period], key=lambda x: x['date'])
+    journal_in_period = sorted([e for e in full_journal if e['date'] >= start_of_period], key=lambda x: x['date'])
 
-    if not events_in_period:
+    if not journal_in_period:
         return None, None
-
-    caption_suffix = ""  # Top profitable items calculation removed
 
     # --- Data Preparation for Chart ---
     hour_labels = [(start_of_period + timedelta(hours=i)).strftime('%H:00') for i in range(24)]
@@ -3123,13 +3193,12 @@ def generate_last_day_chart(character_id: int):
         hour_end = hour_start + timedelta(hours=1)
         hour_label = hour_start.strftime('%H:00')
 
-        while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < hour_end:
-            entry = events_in_period[event_idx]
+        while event_idx < len(journal_in_period) and journal_in_period[event_idx]['date'] < hour_end:
+            entry = journal_in_period[event_idx]
             amount = entry.get('amount', 0)
-
             if amount > 0:
                 hourly_income[hour_label] += amount
-            elif amount < 0:
+            else:
                 hourly_expenses[hour_label] += abs(amount)
             accumulated_profit += amount
             event_idx += 1
@@ -3173,10 +3242,11 @@ def generate_last_day_chart(character_id: int):
     buf.seek(0)
     return buf, caption_suffix
 
-
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     """
-    Helper to generate charts with a daily breakdown (last 7/30 days) based on wallet journal flow.
+    Helper to generate charts with a daily breakdown (last 7/30 days).
+    - The main chart data is based on pure wallet journal money flow.
+    - The caption includes a FIFO-based calculation of the top 5 most profitable items.
     Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
     """
     import matplotlib
@@ -3188,13 +3258,16 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     now = datetime.now(timezone.utc)
     start_of_period = (now - timedelta(days=days_to_show-1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
+    # --- FIFO-based Top Items Calculation (for caption) ---
+    inventory, events_in_period_fifo = _prepare_chart_data(character_id, start_of_period)
+    caption_suffix = _calculate_top_profitable_items(events_in_period_fifo, inventory, character_id)
+
+    # --- Journal-based Money Flow Calculation (for chart) ---
     full_journal = get_full_wallet_journal_from_db(character_id)
-    events_in_period = sorted([e for e in full_journal if e['date'] >= start_of_period], key=lambda x: x['date'])
+    journal_in_period = sorted([e for e in full_journal if e['date'] >= start_of_period], key=lambda x: x['date'])
 
-    if not events_in_period:
+    if not journal_in_period:
         return None, None
-
-    caption_suffix = "" # Top profitable items calculation removed
 
     # --- Data Preparation for Chart ---
     days = [(start_of_period + timedelta(days=i)) for i in range(days_to_show)]
@@ -3211,13 +3284,12 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
         day_end = day_start + timedelta(days=1)
         day_label = day_start.strftime(label_format)
 
-        while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < day_end:
-            entry = events_in_period[event_idx]
+        while event_idx < len(journal_in_period) and journal_in_period[event_idx]['date'] < day_end:
+            entry = journal_in_period[event_idx]
             amount = entry.get('amount', 0)
-
             if amount > 0:
                 daily_income[day_label] += amount
-            elif amount < 0:
+            else:
                 daily_expenses[day_label] += abs(amount)
             accumulated_profit += amount
             event_idx += 1
@@ -3261,20 +3333,19 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     buf.seek(0)
     return buf, caption_suffix
 
-
 def generate_last_7_days_chart(character_id: int):
     """Generates a chart for the last 7 days."""
     return _generate_daily_breakdown_chart(character_id, 7)
-
 
 def generate_last_30_days_chart(character_id: int):
     """Generates a chart for the last 30 days."""
     return _generate_daily_breakdown_chart(character_id, 30)
 
-
 def generate_all_time_chart(character_id: int):
     """
-    Generates a monthly breakdown chart for the character's entire history based on wallet journal flow.
+    Generates a monthly breakdown chart for the character's entire history.
+    - The main chart data is based on pure wallet journal money flow.
+    - The caption includes a FIFO-based calculation of the top 5 most profitable items.
     Returns a tuple: (BytesIO buffer, caption_suffix_string) or None.
     """
     import matplotlib
@@ -3283,16 +3354,19 @@ def generate_all_time_chart(character_id: int):
     character = get_character_by_id(character_id)
     if not character: return None, None
 
-    full_journal = get_full_wallet_journal_from_db(character_id)
-    events_in_period = sorted(full_journal, key=lambda x: x['date'])
+    # --- FIFO-based Top Items Calculation (for caption) ---
+    inventory, events_in_period_fifo = _prepare_chart_data(character_id, datetime.min.replace(tzinfo=timezone.utc))
+    caption_suffix = _calculate_top_profitable_items(events_in_period_fifo, inventory, character_id)
 
-    if not events_in_period:
+    # --- Journal-based Money Flow Calculation (for chart) ---
+    full_journal = get_full_wallet_journal_from_db(character_id)
+    journal_in_period = sorted(full_journal, key=lambda x: x['date'])
+
+    if not journal_in_period:
         return None, None
 
-    caption_suffix = "" # Top profitable items calculation removed
-
     # --- Data Preparation for Chart ---
-    start_date = events_in_period[0]['date']
+    start_date = journal_in_period[0]['date']
     end_date = datetime.now(timezone.utc)
     months = []
     current_month = start_date.replace(day=1)
@@ -3317,13 +3391,12 @@ def generate_all_time_chart(character_id: int):
         month_label = month_start.strftime('%Y-%m')
         next_month_start = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
 
-        while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < next_month_start:
-            entry = events_in_period[event_idx]
+        while event_idx < len(journal_in_period) and journal_in_period[event_idx]['date'] < next_month_start:
+            entry = journal_in_period[event_idx]
             amount = entry.get('amount', 0)
-
             if amount > 0:
                 monthly_income[month_label] += amount
-            elif amount < 0:
+            else:
                 monthly_expenses[month_label] += abs(amount)
             accumulated_profit += amount
             event_idx += 1
