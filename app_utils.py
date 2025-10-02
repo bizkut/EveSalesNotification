@@ -2717,18 +2717,18 @@ def process_character_orders(character_id: int) -> list[dict]:
                     id_to_name = get_names_from_ids(item_ids)
 
                     for order in cancelled:
-                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
-                            if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
-                                msg = f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled."
-                                notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
+                        order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                        if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
+                            msg = f"ℹ️ *{order_type} Order Cancelled ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` was cancelled."
+                            notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
 
-                        for order in expired:
-                            order_type = "Buy" if order.get('is_buy_order') else "Sell"
-                            if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
-                                msg = f"ℹ️ *{order_type} Order Expired ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired."
-                                notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
+                    for order in expired:
+                        order_type = "Buy" if order.get('is_buy_order') else "Sell"
+                        if (order_type == "Buy" and character.enable_buy_notifications) or (order_type == "Sell" and character.enable_sales_notifications):
+                            msg = f"ℹ️ *{order_type} Order Expired ({character.name})* ℹ️\nYour order for `{order['volume_total']}` x `{id_to_name.get(order['type_id'], 'Unknown')}` has expired."
+                            notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
 
-                        add_processed_orders(character.id, [o['order_id'] for o in new_orders])
+                    add_processed_orders(character.id, [o['order_id'] for o in new_orders])
         except (ValueError, TypeError):
             pass
 
