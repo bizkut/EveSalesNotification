@@ -15,6 +15,8 @@ import telegram
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import calendar
 
+grace_period_hours = 1
+
 # --- Character Dataclass and Global List ---
 
 @dataclass
