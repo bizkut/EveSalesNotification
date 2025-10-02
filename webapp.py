@@ -243,7 +243,7 @@ def callback():
         else:
             # If the character is being re-authenticated, trigger the check task immediately
             logging.info(f"Triggering check_new_characters task for re-authenticated character {character_name} ({character_id}).")
-            check_new_characters.delay()
+            check_new_characters.delay(character_id)
 
         # 5. Show the success page to the user
         bot_username = os.getenv("TELEGRAM_BOT_USERNAME")
