@@ -435,9 +435,9 @@ def generate_historical_sales_task(character_id: int, user_id: int, chat_id: int
 
 
 @celery.task(name='tasks.generate_overview_task')
-def generate_overview_task(character_id: int, user_id: int, chat_id: int, message_id: int):
+def generate_overview_task(character_id: int, user_id: int, chat_id: int, message_id: int, character_index: int):
     """
-    Celery task to generate and send a character overview.
+    Celery task to generate and send a character overview, now with pagination support.
     """
     bot = get_bot()
     character = get_character_by_id(character_id)
@@ -445,28 +445,31 @@ def generate_overview_task(character_id: int, user_id: int, chat_id: int, messag
         logging.error(f"generate_overview_task: Could not find character {character_id}")
         return
 
+    # Fetch all characters for the user to enable pagination logic
+    user_characters = get_characters_for_user(user_id)
+
     async def send_overview():
         try:
             overview_data = _calculate_overview_data(character)
-            message, reply_markup = _format_overview_message(overview_data, character)
-
-            user_characters = get_characters_for_user(user_id)
-            back_button_callback = "overview" if len(user_characters) > 1 else "start_command"
-
-            new_keyboard = list(reply_markup.inline_keyboard)
-            new_keyboard.append([InlineKeyboardButton("« Back", callback_data=back_button_callback)])
-            new_reply_markup = InlineKeyboardMarkup(new_keyboard)
+            # Pass the full list and current index to the formatting function
+            message, reply_markup = _format_overview_message(
+                overview_data=overview_data,
+                character=character,
+                user_characters=user_characters,
+                current_character_index=character_index
+            )
 
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=message,
                 parse_mode='Markdown',
-                reply_markup=new_reply_markup
+                reply_markup=reply_markup  # The new reply_markup now includes pagination
             )
         except Exception as e:
             logging.error(f"Failed to generate and send overview for {character.name} in task: {e}", exc_info=True)
             try:
+                # Try to send a simple error message if overview generation fails
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,

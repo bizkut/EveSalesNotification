@@ -211,7 +211,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(text=message, reply_markup=reply_markup)
 
 
-async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character):
+async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character, character_index: int = 0):
     """Handles the interactive flow of generating and sending a overview message."""
     if await check_and_handle_pending_deletion(update, context, character):
         return
@@ -240,7 +240,8 @@ async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFA
         character_id=character.id,
         user_id=user_id,
         chat_id=update.effective_chat.id,
-        message_id=message_id
+        message_id=message_id,
+        character_index=character_index
     )
 
 
@@ -439,8 +440,8 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def overview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Manually triggers the daily overview report. Prompts for character
-    selection if the user has multiple characters via an InlineKeyboardMarkup.
+    Manually triggers the daily overview report. If the user has multiple
+    characters, it will display a paginated view starting with the first character.
     """
     user_id = update.effective_user.id
     user_characters = get_characters_for_user(user_id)
@@ -448,22 +449,17 @@ async def overview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message_id = update.effective_message.message_id
 
     if not user_characters:
-        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
+        # For new users or users with no characters, send a message and stop.
+        message_text = "You have no characters added. Please use the 'Add Character' button first."
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text)
         return
 
-    if len(user_characters) == 1:
-        await _generate_and_send_overview(update, context, user_characters[0])
-    else:
-        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"overview_char_{char.id}")] for char in user_characters]
-        keyboard.append([InlineKeyboardButton("All Characters", callback_data="overview_char_all")])
-        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        message_text = "Please select a character (or all) to generate an overview for:"
-
-        if update.callback_query:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
+    # For both single and multiple characters, we now immediately show the overview for the first one.
+    # The pagination logic will be handled by the _format_overview_message function.
+    await _generate_and_send_overview(update, context, user_characters[0], character_index=0)
 
 
 from tasks import generate_chart_task, generate_historical_sales_task, generate_overview_task, display_open_orders_task, generate_historical_buys_task, generate_character_info_task
@@ -1190,20 +1186,33 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await _show_balance_for_characters(update, context, chars_to_query)
 
     elif data.startswith("overview_char_"):
-        user_id = update.effective_user.id
-        char_id_str = data.split('_')[-1]
-        if char_id_str == "all":
-            # If "All" is selected, delete the menu and send new messages for each overview.
-            await query.message.delete()
-            chars_to_query = get_characters_for_user(user_id)
-            for char in chars_to_query:
-                # We pass 'None' for the callback_query part of the update to force new messages
-                await _generate_and_send_overview(Update(update.update_id, message=query.message), context, char)
-                await asyncio.sleep(1) # Be nice to Telegram's API
-        else:
-            # If a single character is selected, edit the existing message.
-            char_to_query = get_character_by_id(int(char_id_str))
-            await _generate_and_send_overview(update, context, char_to_query)
+        try:
+            parts = data.split('_')
+            character_id = int(parts[2])
+            character_index = int(parts[3])
+
+            char_to_query = get_character_by_id(character_id)
+            if not char_to_query:
+                await query.edit_message_text("Error: Could not find character.")
+                return
+
+            # Call the overview generation function with the specific character and their index
+            await _generate_and_send_overview(update, context, char_to_query, character_index)
+
+        except (IndexError, ValueError):
+            # Fallback for old "overview_char_all" or malformed data
+            user_id = update.effective_user.id
+            char_id_str = data.split('_')[-1]
+            if char_id_str == "all":
+                await query.message.delete()
+                chars_to_query = get_characters_for_user(user_id)
+                for i, char in enumerate(chars_to_query):
+                    # We pass 'None' for the callback_query part of the update to force new messages
+                    # and ensure the index is passed correctly.
+                    await _generate_and_send_overview(Update(update.update_id, message=query.message), context, char, character_index=i)
+                    await asyncio.sleep(1) # Be nice to Telegram's API
+            else:
+                await query.edit_message_text("Error: Invalid overview request format.")
 
     # --- Historical Transaction Lists (Sales & Buys) ---
     elif data.startswith("history_list_sale_"):
