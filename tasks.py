@@ -277,7 +277,7 @@ def continue_backfill_character_history(self, character_id: int):
     if not transactions:
         logging.info(f"Backfill complete for character {character.name}.")
         update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
-        set_bot_state(f"history_backfilled_{character.id}", "true")
+        set_bot_state(f"history_backfilled_{character.id}", datetime.now(timezone.utc).isoformat())
         return
 
     add_historical_transactions_to_db(character_id, transactions)
@@ -289,7 +289,7 @@ def continue_backfill_character_history(self, character_id: int):
     if before_id is not None and min_transaction_id >= before_id:
         logging.warning(f"Backfill for character {character_id} reached the end (min_transaction_id {min_transaction_id} >= before_id {before_id}). Finalizing.")
         update_character_backfill_state(character_id, is_backfilling=False, before_id=None)
-        set_bot_state(f"history_backfilled_{character.id}", "true") # Explicitly mark as complete
+        set_bot_state(f"history_backfilled_{character.id}", datetime.now(timezone.utc).isoformat()) # Explicitly mark as complete
         return
 
     update_character_backfill_state(character_id, is_backfilling=True, before_id=min_transaction_id)
