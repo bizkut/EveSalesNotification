@@ -3558,12 +3558,14 @@ def generate_all_time_chart(character_id: int):
     return buf, caption_suffix
 
 
-def _build_main_menu(telegram_user_id: int, top_message: str = None) -> tuple[str, InlineKeyboardMarkup] | tuple[None, None]:
-    """Helper to construct the main menu message and keyboard."""
+def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int, top_message: str = None):
+    """Constructs and sends the main menu to a user, callable from a sync task."""
     user_characters = get_characters_for_user(telegram_user_id)
     if not user_characters:
-        logging.warning(f"Main menu build requested for user {telegram_user_id} with no characters.")
-        return None, None
+        # This function should only be called for users with characters,
+        # but as a safeguard, we'll log a warning and do nothing.
+        logging.warning(f"send_main_menu_sync called for user {telegram_user_id} with no characters. Aborting.")
+        return
 
     base_message = (
         f"You have {len(user_characters)} character(s) registered. "
@@ -3590,71 +3592,43 @@ def _build_main_menu(telegram_user_id: int, top_message: str = None) -> tuple[st
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    return message, reply_markup
-
-
-def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int, top_message: str = None):
-    """Constructs and sends the main menu to a user, callable from a sync task."""
-    message, reply_markup = _build_main_menu(telegram_user_id, top_message)
-    if message:
-        send_telegram_message_sync(bot, message, telegram_user_id, reply_markup=reply_markup)
+    send_telegram_message_sync(bot, message, telegram_user_id, reply_markup=reply_markup)
 
 
 async def send_main_menu_async(bot: telegram.Bot, telegram_user_id: int, top_message: str = None):
-    """
-    Async version of sending the main menu, for use within an event loop.
-    Returns the sent message object on success.
-    """
-    message, reply_markup = _build_main_menu(telegram_user_id, top_message)
-    if message:
-        return await bot.send_message(chat_id=telegram_user_id, text=message, parse_mode='Markdown', reply_markup=reply_markup)
-    return None
+    """Async version of sending the main menu, for use within an event loop."""
+    user_characters = get_characters_for_user(telegram_user_id)
+    if not user_characters:
+        logging.warning(f"send_main_menu_async called for user {telegram_user_id} with no characters. Aborting.")
+        return
 
-
-def edit_main_menu_sync(bot: telegram.Bot, chat_id: int, message_id: int, top_message: str = None) -> bool:
-    """
-    Synchronously edits an existing message to show the main menu.
-    Returns True on success, False on failure.
-    """
-    try:
-        return asyncio.run(edit_main_menu_async(bot, chat_id, message_id, top_message))
-    except Exception as e:
-        logging.error(f"Error running edit_main_menu_async for message {message_id} in chat {chat_id}: {e}", exc_info=True)
-        return False
-
-
-async def edit_main_menu_async(bot: telegram.Bot, chat_id: int, message_id: int, top_message: str = None) -> bool:
-    """
-    Async version of editing an existing message to show the main menu.
-    Returns True on success, False on failure.
-    """
-    # We need the telegram_user_id to build the menu, which is the same as the chat_id for private chats.
-    message, reply_markup = _build_main_menu(chat_id, top_message)
-    if not message:
-        return False  # Failed to build the menu content
-
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=message,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-        return True
-    except telegram.error.BadRequest as e:
-        # This can happen if the message text is identical, which we can consider a success.
-        if "Message is not modified" in str(e):
-            logging.warning(f"Message {message_id} was not modified, nothing to edit.")
-            return True
-        else:
-            # Any other BadRequest, like "Message to edit not found", is a failure.
-            logging.error(f"BadRequest editing message {message_id}: {e}")
-            return False
-    except Exception as e:
-        # Catch any other unexpected errors during the API call
-        logging.error(f"Unexpected error editing message {message_id}: {e}", exc_info=True)
-        return False
+    base_message = (
+        f"You have {len(user_characters)} character(s) registered. "
+        "Please choose an option from the main menu:"
+    )
+    message = f"{top_message}\n\n{base_message}" if top_message else base_message
+    keyboard = [
+        [
+            InlineKeyboardButton("💰 View Balances", callback_data="balance"),
+            InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
+        ],
+        [
+            InlineKeyboardButton("📈 View Sales", callback_data="sales"),
+            InlineKeyboardButton("🛒 View Buys", callback_data="buys")
+        ],
+        [
+            InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
+            InlineKeyboardButton("📊 Request Overview", callback_data="overview")
+        ],
+        [
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+            InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
+            InlineKeyboardButton("🗑️ Remove", callback_data="remove")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Call the bot's async method directly instead of the sync wrapper
+    await bot.send_message(chat_id=telegram_user_id, text=message, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 def send_daily_overview_for_character(character_id: int, bot):
