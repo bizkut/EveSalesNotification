@@ -400,7 +400,7 @@ async def _show_balance_for_characters(update: Update, context: ContextTypes.DEF
             message_lines.append(f"• `{char.name}`: `(Pending Deletion)`")
             continue  # Skip to the next character
 
-        balance = get_wallet_balance(char, force_revalidate=True)
+        balance = get_wallet_balance(char)
         if balance is not None:
             message_lines.append(f"• `{char.name}`: `{balance:,.2f} ISK`")
             total_balance += balance
