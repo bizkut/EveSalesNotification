@@ -341,8 +341,7 @@ def generate_chart_task(character_id: int, chart_type: str, chat_id: int, genera
             '30days': "Last 30 Days", 'alltime': "All Time"
         }
         base_caption = f"{caption_map.get(chart_type, chart_type.capitalize())} chart for {character.name}"
-        # Correctly format the callback to include the index `0` for the first character page.
-        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character.id}_0")]]
+        keyboard = [[InlineKeyboardButton("Back to Overview", callback_data=f"overview_char_{character_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Check for cached chart first
@@ -436,41 +435,60 @@ def generate_historical_sales_task(character_id: int, user_id: int, chat_id: int
 
 
 @celery.task(name='tasks.generate_overview_task')
-def generate_overview_task(character_id: int, user_id: int, chat_id: int, message_id: int, character_index: int):
+def generate_overview_task(user_id: int, chat_id: int, message_id: int, character_id: int = None, character_index: int = None):
     """
-    Celery task to generate and send a character overview, now with pagination support.
+    Celery task to generate and send a character overview.
+    Handles both single character and paginated "All Characters" views.
     """
     bot = get_bot()
-    character = get_character_by_id(character_id)
-    if not character:
-        logging.error(f"generate_overview_task: Could not find character {character_id}")
-        return
-
-    # Fetch all characters for the user to enable pagination logic
     user_characters = get_characters_for_user(user_id)
+    character = None
+    is_paginated = character_index is not None
+
+    if is_paginated:
+        if not user_characters or character_index >= len(user_characters):
+            logging.error(f"Invalid character_index {character_index} for user {user_id}")
+            asyncio.run(bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="Error: Invalid character index for paginated view."))
+            return
+        character = user_characters[character_index]
+    else:
+        character = get_character_by_id(character_id)
+
+    if not character:
+        logging.error(f"generate_overview_task: Could not find character.")
+        asyncio.run(bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="Error: Could not find the requested character."))
+        return
 
     async def send_overview():
         try:
             overview_data = _calculate_overview_data(character)
-            # Pass the full list and current index to the formatting function
+
+            pagination_chars = user_characters if is_paginated else None
+
             message, reply_markup = _format_overview_message(
                 overview_data=overview_data,
                 character=character,
-                user_characters=user_characters,
-                current_character_index=character_index
+                user_characters=pagination_chars,
+                current_character_index=character_index if is_paginated else 0
             )
+
+            # Add a "Back" button, directing to the character selection menu if it's not a paginated view.
+            if not is_paginated:
+                back_button_callback = "overview" if len(user_characters) > 1 else "start_command"
+                new_keyboard = list(reply_markup.inline_keyboard)
+                new_keyboard.append([InlineKeyboardButton("« Back", callback_data=back_button_callback)])
+                reply_markup = InlineKeyboardMarkup(new_keyboard)
 
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=message,
                 parse_mode='Markdown',
-                reply_markup=reply_markup  # The new reply_markup now includes pagination
+                reply_markup=reply_markup
             )
         except Exception as e:
             logging.error(f"Failed to generate and send overview for {character.name} in task: {e}", exc_info=True)
             try:
-                # Try to send a simple error message if overview generation fails
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,

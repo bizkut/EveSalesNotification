@@ -211,21 +211,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(text=message, reply_markup=reply_markup)
 
 
-async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character, character_index: int = 0):
-    """Handles the interactive flow of generating and sending a overview message."""
+async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFAULT_TYPE, character: Character, character_index: int = None):
+    """Handles the interactive flow of generating and sending an overview message."""
     if await check_and_handle_pending_deletion(update, context, character):
         return
 
     query = update.callback_query
 
-    # This part handles the "All Characters" case, where there's no query.
     if not query:
-        # This case is for scheduled overviews or the "All" button, which always send a new message.
         sent_message = await context.bot.send_message(chat_id=character.telegram_user_id, text=f"⏳ Generating overview for {character.name}...")
         message_id = sent_message.message_id
         user_id = character.telegram_user_id
     else:
-        # This is the standard case from a button press.
         if query.message.photo:
             await query.message.delete()
             sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⏳ Generating overview for {character.name}...")
@@ -237,10 +234,10 @@ async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFA
 
     # Dispatch the background task via Celery
     generate_overview_task.delay(
-        character_id=character.id,
         user_id=user_id,
         chat_id=update.effective_chat.id,
         message_id=message_id,
+        character_id=character.id if character_index is None else None,
         character_index=character_index
     )
 
@@ -440,23 +437,31 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def overview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Manually triggers the daily overview report. If the user has multiple
-    characters, it will display a paginated view starting with the first character.
+    Manually triggers the daily overview report. Prompts for character
+    selection if the user has multiple characters via an InlineKeyboardMarkup.
     """
     user_id = update.effective_user.id
     user_characters = get_characters_for_user(user_id)
     chat_id = update.effective_chat.id
+    message_id = update.effective_message.message_id
 
     if not user_characters:
-        message_text = "You have no characters added. Please use the 'Add Character' button first."
-        if update.callback_query:
-            await update.callback_query.edit_message_text(text=message_text)
-        else:
-            await update.message.reply_text(text=message_text)
+        await context.bot.send_message(chat_id, "You have no characters added. Please use `/add_character` first.")
         return
 
-    # For both single and multiple characters, immediately show the overview for the first one.
-    await _generate_and_send_overview(update, context, user_characters[0], character_index=0)
+    if len(user_characters) == 1:
+        await _generate_and_send_overview(update, context, user_characters[0])
+    else:
+        keyboard = [[InlineKeyboardButton(char.name, callback_data=f"overview_char_{char.id}")] for char in user_characters]
+        keyboard.append([InlineKeyboardButton("All Characters", callback_data="overview_char_all")])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        message_text = "Please select a character (or all) to generate an overview for:"
+
+        if update.callback_query:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=message_text, reply_markup=reply_markup)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup)
 
 
 from tasks import generate_chart_task, generate_historical_sales_task, generate_overview_task, display_open_orders_task, generate_historical_buys_task, generate_character_info_task
@@ -1183,17 +1188,44 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         await _show_balance_for_characters(update, context, chars_to_query)
 
     elif data.startswith("overview_char_"):
-        try:
-            parts = data.split('_')
-            character_id = int(parts[2])
-            character_index = int(parts[3])
-            char_to_query = get_character_by_id(character_id)
-            if not char_to_query:
-                await query.edit_message_text("Error: Could not find character.")
-                return
-            await _generate_and_send_overview(update, context, char_to_query, character_index)
-        except (IndexError, ValueError):
-            await query.edit_message_text("Error: Invalid overview request format.")
+        user_id = update.effective_user.id
+        parts = data.split('_')
+
+        # Handle the paginated "All Characters" view
+        if parts[2] == "all":
+            try:
+                # This is triggered by the "Next" and "Prev" buttons.
+                # The index of the character to show is in the callback data.
+                character_index = int(parts[3])
+                user_characters = get_characters_for_user(user_id)
+                if not user_characters or character_index >= len(user_characters):
+                    await query.edit_message_text("Error: Invalid character index.")
+                    return
+
+                character_to_show = user_characters[character_index]
+                await _generate_and_send_overview(update, context, character_to_show, character_index=character_index)
+
+            except (IndexError, ValueError):
+                # This is triggered by the initial "All Characters" button press.
+                # Start the paginated view from the beginning (index 0).
+                user_characters = get_characters_for_user(user_id)
+                if not user_characters:
+                    await query.edit_message_text("Error: No characters found.")
+                    return
+                await _generate_and_send_overview(update, context, user_characters[0], character_index=0)
+
+        # Handle the single character view
+        else:
+            try:
+                character_id = int(parts[2])
+                character = get_character_by_id(character_id)
+                if not character:
+                    await query.edit_message_text("Error: Character not found.")
+                    return
+                # Call without an index to signal a single, non-paginated view.
+                await _generate_and_send_overview(update, context, character)
+            except (IndexError, ValueError):
+                await query.edit_message_text("Error: Invalid overview request.")
 
     # --- Historical Transaction Lists (Sales & Buys) ---
     elif data.startswith("history_list_sale_"):
