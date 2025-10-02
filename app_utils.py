@@ -2651,121 +2651,148 @@ def process_character_wallet(character_id: int) -> list[dict]:
                         add_processed_journal_refs(character.id, list(new_journal_ref_ids))
                         logging.info(f"Processed {len(new_entries)} new journal entries for {character.name}.")
         except (ValueError, TypeError):
-            pass # Handle legacy or malformed timestamps
+            pass  # Handle legacy or malformed timestamps
 
     # --- Wallet Transaction Processing ---
-    if history_backfilled_at_str:
-        try:
-            history_backfilled_at = datetime.fromisoformat(history_backfilled_at_str)
-            recent_tx, headers = get_wallet_transactions(character, return_headers=True)
-            if recent_tx:
-                tx_ids_from_esi = [tx['transaction_id'] for tx in recent_tx]
-                existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
-                new_tx_ids = set(tx_ids_from_esi) - existing_tx_ids
-
-                if new_tx_ids:
-                    set_bot_state(f"chart_cache_dirty_{character.id}", "true")
-                    new_transactions = [tx for tx in recent_tx if tx['transaction_id'] in new_tx_ids and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > character.created_at]
-                    add_historical_transactions_to_db(character.id, new_transactions)
-
-                    sales, buys = defaultdict(list), defaultdict(list)
-                    for tx in new_transactions:
-                        (buys if tx['is_buy'] else sales)[tx['type_id']].append(tx)
-
-                        all_type_ids = list(sales.keys()) + list(buys.keys())
-                        all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
-                        id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids)), character=character)
-                        wallet_balance = get_wallet_balance(character, force_revalidate=True)
-
-                        # Process Buys
-                        if buys:
-                            for type_id, tx_group in buys.items():
-                                for tx in tx_group:
-                                    add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
-
-                        # Process Sales
-                        sales_details = []
-                        if sales:
-                            full_journal = get_full_wallet_journal_from_db(character.id)
-                            tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
-                            fee_journal_by_timestamp = defaultdict(list)
-                            for entry in full_journal:
-                                if entry['ref_type'] == 'transaction_tax':
-                                    fee_journal_by_timestamp[entry['date']].append(entry)
-
-                            for type_id, tx_group in sales.items():
-                                total_quantity = sum(t['quantity'] for t in tx_group)
-                                total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity)
-
-                                # Get actual taxes from the journal
-                                journal_taxes = sum(abs(fee['amount']) for tx in tx_group if tx_id_to_journal_map.get(tx['transaction_id']) for fee in fee_journal_by_timestamp.get(tx_id_to_journal_map[tx['transaction_id']]['date'], []))
-
-                                estimated_broker_fees = 0
-                                if cogs is not None:
-                                    # Estimate broker fees based on user settings
-                                    estimated_broker_fees = (cogs * (character.buy_broker_fee / 100)) + (total_value * (character.sell_broker_fee / 100))
-
-                                total_fees = journal_taxes + estimated_broker_fees
-                                net_profit = total_value - cogs - total_fees if cogs is not None else None
-                                sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs, 'total_fees': total_fees, 'net_profit': net_profit})
-
-                        # --- Create Notifications ---
-                        if not character.notifications_enabled:
-                            return []
-
-                        # Low Balance Alert
-                        if wallet_balance is not None and character.wallet_balance_threshold > 0:
-                            state_key = f"low_balance_alert_sent_at_{character.id}"
-                            last_alert_str = get_bot_state(state_key)
-                            if wallet_balance < character.wallet_balance_threshold and (not last_alert_str or (datetime.now(timezone.utc) - datetime.fromisoformat(last_alert_str)) > timedelta(days=1)):
-                                alert_message = f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\nYour wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n**Current Balance:** `{wallet_balance:,.2f}` ISK"
-                                notifications.append({'message': alert_message, 'chat_id': character.telegram_user_id})
-                                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
-                            elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
-                                set_bot_state(state_key, '')
-
-                        # Buy Notifications
-                        if buys and character.enable_buy_notifications:
-                            if len(buys) >= character.notification_batch_threshold:
-                                header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
-                                item_lines = [f"  • Bought: `{sum(t['quantity'] for t in tx_group)}` x `{id_to_name.get(type_id, 'Unknown')}`" for type_id, tx_group in buys.items()]
-                                footer = f"\n**Total Cost:** `{sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group):,.2f} ISK`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
-                            else:
-                                for type_id, tx_group in buys.items():
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
-                                    message = f"🛒 *Market Buy ({character.name})* 🛒\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}`\n**Total Cost:** `{total_cost:,.2f} ISK`\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                    notifications.append({'message': message, 'chat_id': character.telegram_user_id})
-
-                        # Sale Notifications
-                        if sales_details and character.enable_sales_notifications:
-                            if len(sales_details) >= character.notification_batch_threshold:
-                                header = f"✅ *Multiple Market Sales ({character.name})* ✅"
-                                item_lines = [f"  • Sold: `{sum(t['quantity'] for t in sale_info['tx_group'])}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`" for sale_info in sales_details]
-                                grand_total_value = sum(sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group']) for sale_info in sales_details)
-                                grand_total_fees = sum(sale_info['total_fees'] for sale_info in sales_details)
-                                grand_total_net_profit = sum(sale_info['net_profit'] for sale_info in sales_details if sale_info['net_profit'] is not None)
-                                profit_line = f"\n**Total Net Profit:** `{grand_total_net_profit:,.2f} ISK`" if grand_total_net_profit > 0 else ""
-                                footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`\n**Total Fees:** `{grand_total_fees:,.2f} ISK`{profit_line}\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
-                            else:
-                                for sale_info in sales_details:
-                                    type_id, tx_group, total_fees, net_profit = sale_info['type_id'], sale_info['tx_group'], sale_info['total_fees'], sale_info['net_profit']
-                                    total_quantity = sum(t['quantity'] for t in tx_group)
-                                    avg_price = sum(t['quantity'] * t['unit_price'] for t in tx_group) / total_quantity
-                                    profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
-                                    message = f"✅ *Market Sale ({character.name})* ✅\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n**Total Fees:** `{total_fees:,.2f} ISK`{profit_line}\n\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
-                                    notifications.append({'message': message, 'chat_id': character.telegram_user_id})
-
-        except (ValueError, TypeError):
-            pass
-
-    # --- Prevent notifications for characters pending deletion ---
-    if get_character_deletion_status(character.id):
-        logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing {len(notifications)} wallet notifications.")
+    if not history_backfilled_at_str:
         return []
+
+    try:
+        # Check if the character's history has been backfilled
+        datetime.fromisoformat(history_backfilled_at_str)
+    except (ValueError, TypeError):
+        return []
+
+    recent_tx, headers = get_wallet_transactions(character, return_headers=True)
+    if not recent_tx:
+        return []
+
+    tx_ids_from_esi = [tx['transaction_id'] for tx in recent_tx]
+    existing_tx_ids = get_ids_from_db('historical_transactions', 'transaction_id', character.id, tx_ids_from_esi)
+    new_tx_ids = set(tx_ids_from_esi) - existing_tx_ids
+
+    if not new_tx_ids:
+        return []
+
+    set_bot_state(f"chart_cache_dirty_{character.id}", "true")
+    new_transactions = [
+        tx for tx in recent_tx
+        if tx['transaction_id'] in new_tx_ids and datetime.fromisoformat(tx['date'].replace('Z', '+00:00')) > character.created_at
+    ]
+    add_historical_transactions_to_db(character.id, new_transactions)
+
+    sales, buys = defaultdict(list), defaultdict(list)
+    for tx in new_transactions:
+        (buys if tx['is_buy'] else sales)[tx['type_id']].append(tx)
+
+    # --- Essential Data Processing (Always Run) ---
+    # Process buys to update purchase lots for COGS tracking
+    for type_id, tx_group in buys.items():
+        for tx in tx_group:
+            add_purchase_lot(character.id, type_id, tx['quantity'], tx['unit_price'], purchase_date=tx['date'])
+
+    # Process sales to consume purchase lots for COGS tracking and store the result
+    sales_cogs = {}
+    for type_id, tx_group in sales.items():
+        total_quantity_sold = sum(t['quantity'] for t in tx_group)
+        cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity_sold)
+        sales_cogs[type_id] = cogs
+
+
+    # --- Notification Generation (Run only if enabled) ---
+    # Suppress notifications for characters pending deletion or with notifications disabled
+    if get_character_deletion_status(character.id) or not character.notifications_enabled:
+        if get_character_deletion_status(character.id):
+            logging.info(f"Character {character.name} ({character.id}) is pending deletion. Suppressing wallet notifications.")
+        return []
+
+
+    # Fetch data needed for notifications
+    all_type_ids = list(sales.keys()) + list(buys.keys())
+    all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
+    id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids)), character=character)
+    wallet_balance = get_wallet_balance(character, force_revalidate=True)
+    full_journal = get_full_wallet_journal_from_db(character.id)
+    tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
+    fee_journal_by_timestamp = defaultdict(list)
+    for entry in full_journal:
+        if entry['ref_type'] == 'transaction_tax':
+            fee_journal_by_timestamp[entry['date']].append(entry)
+
+
+    # Low Balance Alert
+    if wallet_balance is not None and character.wallet_balance_threshold > 0:
+        state_key = f"low_balance_alert_sent_at_{character.id}"
+        last_alert_str = get_bot_state(state_key)
+        try:
+            # Check if an alert was sent in the last day
+            should_send = not last_alert_str or (datetime.now(timezone.utc) - datetime.fromisoformat(last_alert_str)) > timedelta(days=1)
+            if wallet_balance < character.wallet_balance_threshold and should_send:
+                alert_message = f"⚠️ *Low Wallet Balance Warning ({character.name})* ⚠️\n\nYour wallet balance has dropped below `{character.wallet_balance_threshold:,.2f}` ISK.\n**Current Balance:** `{wallet_balance:,.2f}` ISK"
+                notifications.append({'message': alert_message, 'chat_id': character.telegram_user_id})
+                set_bot_state(state_key, datetime.now(timezone.utc).isoformat())
+            elif wallet_balance >= character.wallet_balance_threshold and last_alert_str:
+                # Reset the alert state if balance is now okay
+                set_bot_state(state_key, '')
+        except (ValueError, TypeError):
+             set_bot_state(state_key, '') # Reset if state is malformed
+
+    # Buy Notifications
+    if buys and character.enable_buys_notifications:
+        if len(buys) >= character.notification_batch_threshold:
+            header = f"🛒 *Multiple Market Buys ({character.name})* 🛒"
+            item_lines = [f"  • Bought: `{sum(t['quantity'] for t in tx_group)}` x `{id_to_name.get(type_id, 'Unknown')}`" for type_id, tx_group in buys.items()]
+            footer = f"\n**Total Cost:** `{sum(tx['quantity'] * tx['unit_price'] for tx_group in buys.values() for tx in tx_group):,.2f} ISK`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+            notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
+        else:
+            for type_id, tx_group in buys.items():
+                total_quantity = sum(t['quantity'] for t in tx_group)
+                total_cost = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+                message = f"🛒 *Market Buy ({character.name})* 🛒\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}`\n**Total Cost:** `{total_cost:,.2f} ISK`\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                notifications.append({'message': message, 'chat_id': character.telegram_user_id})
+
+    # Sale Notifications
+    if sales and character.enable_sales_notifications:
+        sales_details = []
+        for type_id, tx_group in sales.items():
+            total_quantity = sum(t['quantity'] for t in tx_group)
+            total_value = sum(t['quantity'] * t['unit_price'] for t in tx_group)
+            cogs = sales_cogs.get(type_id)
+
+            # Get actual taxes from the journal
+            journal_taxes = sum(
+                abs(fee['amount'])
+                for tx in tx_group
+                if tx_id_to_journal_map.get(tx['transaction_id'])
+                for fee in fee_journal_by_timestamp.get(tx_id_to_journal_map[tx['transaction_id']]['date'], [])
+            )
+
+            estimated_broker_fees = 0
+            if cogs is not None:
+                # Estimate broker fees based on user settings
+                estimated_broker_fees = (cogs * (character.buy_broker_fee / 100)) + (total_value * (character.sell_broker_fee / 100))
+
+            total_fees = journal_taxes + estimated_broker_fees
+            net_profit = total_value - cogs - total_fees if cogs is not None else None
+            sales_details.append({'type_id': type_id, 'tx_group': tx_group, 'cogs': cogs, 'total_fees': total_fees, 'net_profit': net_profit})
+
+        if len(sales_details) >= character.notification_batch_threshold:
+            header = f"✅ *Multiple Market Sales ({character.name})* ✅"
+            item_lines = [f"  • Sold: `{sum(t['quantity'] for t in sale_info['tx_group'])}` x `{id_to_name.get(sale_info['type_id'], 'Unknown')}`" for sale_info in sales_details]
+            grand_total_value = sum(sum(t['quantity'] * t['unit_price'] for t in sale_info['tx_group']) for sale_info in sales_details)
+            grand_total_fees = sum(sale_info['total_fees'] for sale_info in sales_details)
+            grand_total_net_profit = sum(sale_info['net_profit'] for sale_info in sales_details if sale_info['net_profit'] is not None)
+            profit_line = f"\n**Total Net Profit:** `{grand_total_net_profit:,.2f} ISK`" if grand_total_net_profit > 0 else ""
+            footer = f"\n**Total Sale Value:** `{grand_total_value:,.2f} ISK`\n**Total Fees:** `{grand_total_fees:,.2f} ISK`{profit_line}\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+            notifications.extend(format_paginated_message(header, item_lines, footer, character.telegram_user_id))
+        else:
+            for sale_info in sales_details:
+                type_id, tx_group, total_fees, net_profit = sale_info['type_id'], sale_info['tx_group'], sale_info['total_fees'], sale_info['net_profit']
+                total_quantity = sum(t['quantity'] for t in tx_group)
+                avg_price = sum(t['quantity'] * t['unit_price'] for t in tx_group) / total_quantity
+                profit_line = f"\n**Net Profit:** `{net_profit:,.2f} ISK`" if net_profit is not None else "\n**Profit:** `N/A (Missing Purchase History)`"
+                message = f"✅ *Market Sale ({character.name})* ✅\n\n**Item:** `{id_to_name.get(type_id, 'Unknown')}`\n**Quantity:** `{total_quantity}` @ `{avg_price:,.2f} ISK`\n**Total Fees:** `{total_fees:,.2f} ISK`{profit_line}\n\n**Location:** `{id_to_name.get(tx_group[0]['location_id'], 'Unknown')}`\n**Wallet:** `{wallet_balance:,.2f} ISK`"
+                notifications.append({'message': message, 'chat_id': character.telegram_user_id})
 
     return notifications
 
