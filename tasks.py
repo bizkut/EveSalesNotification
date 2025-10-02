@@ -4,6 +4,7 @@ import telegram
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import asyncio
 import io
+import json
 from datetime import datetime, timezone
 from celery_app import celery
 
@@ -39,7 +40,14 @@ from app_utils import (
     generate_last_day_chart,
     generate_last_7_days_chart,
     generate_last_30_days_chart,
-    generate_all_time_chart
+    generate_all_time_chart,
+    prepare_historical_sales_data,
+    _calculate_overview_data,
+    _format_overview_message,
+    get_characters_for_user,
+    prepare_open_orders_data,
+    prepare_historical_buys_data,
+    prepare_character_info_data
 )
 
 # --- Telegram Bot Initialization & Helper ---
@@ -373,3 +381,220 @@ def generate_chart_task(character_id: int, chart_type: str, chat_id: int, genera
         asyncio.run(run_async_chart_logic())
     except Exception as e:
         logging.error(f"Error in generate_chart_task for character {character_id}: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.generate_historical_sales_task')
+def generate_historical_sales_task(character_id: int, user_id: int, chat_id: int, page: int, message_id: int):
+    """
+    Celery task to generate and send the historical sales view.
+    """
+    bot = get_bot()
+
+    message_text, reply_markup_json, status = prepare_historical_sales_data(character_id, user_id, page)
+
+    reply_markup = None
+    if reply_markup_json:
+        reply_markup = InlineKeyboardMarkup.de_json(json.loads(reply_markup_json), bot)
+
+    async def edit_message():
+        try:
+            await bot.edit_message_text(
+                text=message_text,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logging.error(f"Error editing message for historical sales task: {e}", exc_info=True)
+            # As a fallback, send a new message
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+    try:
+        asyncio.run(edit_message())
+    except Exception as e:
+        logging.error(f"Error running asyncio for generate_historical_sales_task: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.generate_overview_task')
+def generate_overview_task(character_id: int, user_id: int, chat_id: int, message_id: int):
+    """
+    Celery task to generate and send a character overview.
+    """
+    bot = get_bot()
+    character = get_character_by_id(character_id)
+    if not character:
+        logging.error(f"generate_overview_task: Could not find character {character_id}")
+        return
+
+    async def send_overview():
+        try:
+            overview_data = _calculate_overview_data(character)
+            message, reply_markup = _format_overview_message(overview_data, character)
+
+            user_characters = get_characters_for_user(user_id)
+            back_button_callback = "overview" if len(user_characters) > 1 else "start_command"
+
+            new_keyboard = list(reply_markup.inline_keyboard)
+            new_keyboard.append([InlineKeyboardButton("« Back", callback_data=back_button_callback)])
+            new_reply_markup = InlineKeyboardMarkup(new_keyboard)
+
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=message,
+                parse_mode='Markdown',
+                reply_markup=new_reply_markup
+            )
+        except Exception as e:
+            logging.error(f"Failed to generate and send overview for {character.name} in task: {e}", exc_info=True)
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=f"❌ An error occurred while generating the overview for {character.name}."
+                )
+            except Exception as final_e:
+                logging.error(f"Failed to even send error message for overview task: {final_e}", exc_info=True)
+
+    try:
+        asyncio.run(send_overview())
+    except Exception as e:
+        logging.error(f"Error running asyncio for generate_overview_task: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.display_open_orders_task')
+def display_open_orders_task(character_id: int, user_id: int, is_buy: bool, page: int, chat_id: int, message_id: int):
+    """
+    Celery task to generate and send the open orders view.
+    """
+    bot = get_bot()
+
+    message_text, reply_markup_json, status = prepare_open_orders_data(character_id, user_id, is_buy, page)
+
+    reply_markup = None
+    if reply_markup_json:
+        reply_markup = InlineKeyboardMarkup.de_json(json.loads(reply_markup_json), bot)
+
+    async def edit_message():
+        try:
+            await bot.edit_message_text(
+                text=message_text,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logging.error(f"Error editing message for display_open_orders_task: {e}", exc_info=True)
+            # As a fallback, send a new message
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+    try:
+        asyncio.run(edit_message())
+    except Exception as e:
+        logging.error(f"Error running asyncio for display_open_orders_task: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.generate_historical_buys_task')
+def generate_historical_buys_task(character_id: int, user_id: int, chat_id: int, page: int, message_id: int):
+    """
+    Celery task to generate and send the historical buys view.
+    """
+    bot = get_bot()
+
+    message_text, reply_markup_json, status = prepare_historical_buys_data(character_id, user_id, page)
+
+    reply_markup = None
+    if reply_markup_json:
+        reply_markup = InlineKeyboardMarkup.de_json(json.loads(reply_markup_json), bot)
+
+    async def edit_message():
+        try:
+            await bot.edit_message_text(
+                text=message_text,
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logging.error(f"Error editing message for historical buys task: {e}", exc_info=True)
+            # As a fallback, send a new message
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+
+    try:
+        asyncio.run(edit_message())
+    except Exception as e:
+        logging.error(f"Error running asyncio for generate_historical_buys_task: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.generate_character_info_task')
+def generate_character_info_task(character_id: int, chat_id: int, message_id: int):
+    """
+    Celery task to generate and send the character info view (with image).
+    """
+    bot = get_bot()
+
+    caption, image_bytes, reply_markup_json, status = prepare_character_info_data(character_id)
+
+    reply_markup = None
+    if reply_markup_json:
+        reply_markup = InlineKeyboardMarkup.de_json(json.loads(reply_markup_json), bot)
+
+    async def send_char_info():
+        try:
+            # First, delete the "Fetching..." message
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+
+            if status == 'success' and image_bytes:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=io.BytesIO(image_bytes),
+                    caption=caption,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+            elif status == 'success': # Fallback to text if image creation failed
+                 await bot.send_message(
+                    chat_id=chat_id,
+                    text=caption,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+            else: # Handle errors
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=caption, # caption will contain the error message
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+
+        except Exception as e:
+            logging.error(f"Error sending character info for task: {e}", exc_info=True)
+            # Try to send a text-only error message as a final fallback
+            try:
+                await bot.send_message(chat_id=chat_id, text="❌ An error occurred while generating the character info.")
+            except Exception as final_e:
+                logging.error(f"Failed to even send final error message for char info task: {final_e}")
+
+
+    try:
+        asyncio.run(send_char_info())
+    except Exception as e:
+        logging.error(f"Error running asyncio for generate_character_info_task: {e}", exc_info=True)
