@@ -29,10 +29,10 @@ class Character:
     notifications_enabled: bool
     wallet_balance_threshold: int
     enable_sales_notifications: bool
-    enable_buy_notifications: bool
+    enable_buys_notifications: bool
     enable_daily_overview: bool
     enable_undercut_notifications: bool
-    enable_contract_notifications: bool
+    enable_contracts_notifications: bool
     notification_batch_threshold: int
     created_at: datetime
     is_backfilling: bool
@@ -54,9 +54,9 @@ def load_characters_from_db():
                 SELECT
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, wallet_balance_threshold,
-                    enable_sales_notifications, enable_buy_notifications,
+                    enable_sales_notifications, enable_buys_notifications,
                     enable_daily_overview, enable_undercut_notifications,
-                    enable_contract_notifications, notification_batch_threshold, created_at,
+                    enable_contracts_notifications, notification_batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 FROM characters
             """)
@@ -89,10 +89,10 @@ def load_characters_from_db():
             notifications_enabled=bool(notifications_enabled),
             wallet_balance_threshold=wallet_balance_threshold,
             enable_sales_notifications=bool(enable_sales),
-            enable_buy_notifications=bool(enable_buys),
+            enable_buys_notifications=bool(enable_buys),
             enable_daily_overview=bool(enable_overview),
             enable_undercut_notifications=bool(enable_undercut),
-            enable_contract_notifications=bool(enable_contracts),
+            enable_contracts_notifications=bool(enable_contracts),
             notification_batch_threshold=batch_threshold,
             created_at=created_at,
             is_backfilling=bool(is_backfilling),
@@ -130,9 +130,10 @@ def setup_database():
                     notifications_enabled BOOLEAN DEFAULT TRUE,
                     wallet_balance_threshold BIGINT DEFAULT 0,
                     enable_sales_notifications BOOLEAN DEFAULT TRUE,
-                    enable_buy_notifications BOOLEAN DEFAULT TRUE,
+                    enable_buys_notifications BOOLEAN DEFAULT TRUE,
                     enable_daily_overview BOOLEAN DEFAULT TRUE,
                     enable_undercut_notifications BOOLEAN DEFAULT TRUE,
+                    enable_contracts_notifications BOOLEAN DEFAULT TRUE,
                     notification_batch_threshold INTEGER DEFAULT 3,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
                     needs_update_notification BOOLEAN DEFAULT FALSE,
@@ -142,7 +143,13 @@ def setup_database():
                 )
             """)
 
-            # Migration: Add enable_undercut_notifications column if it doesn't exist
+            # Migration: Rename enable_buy_notifications to enable_buys_notifications
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_buy_notifications'")
+            if cursor.fetchone():
+                logging.info("Applying migration: Renaming 'enable_buy_notifications' to 'enable_buys_notifications'...")
+                cursor.execute("ALTER TABLE characters RENAME COLUMN enable_buy_notifications TO enable_buys_notifications;")
+                logging.info("Migration for 'enable_buys_notifications' complete.")
+
             # Migration: Rename enable_daily_summary to enable_daily_overview
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_daily_summary'")
             if cursor.fetchone():
@@ -170,12 +177,20 @@ def setup_database():
                 cursor.execute("ALTER TABLE characters ADD COLUMN needs_update_notification BOOLEAN DEFAULT FALSE;")
                 logging.info("Migration for 'needs_update_notification' complete.")
 
-            # Migration: Add enable_contract_notifications column if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_contract_notifications'")
+            # Migration: Add/Rename enable_contract_notifications to enable_contracts_notifications
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_contracts_notifications'")
             if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'enable_contract_notifications' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN enable_contract_notifications BOOLEAN DEFAULT TRUE;")
-                logging.info("Migration for 'enable_contract_notifications' complete.")
+                # Check if the old column name exists to rename it
+                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_contract_notifications'")
+                if cursor.fetchone():
+                    logging.info("Applying migration: Renaming 'enable_contract_notifications' to 'enable_contracts_notifications'...")
+                    cursor.execute("ALTER TABLE characters RENAME COLUMN enable_contract_notifications TO enable_contracts_notifications;")
+                    logging.info("Migration for 'enable_contracts_notifications' complete.")
+                else:
+                    # If neither old nor new column exists, add the new one
+                    logging.info("Applying migration: Adding 'enable_contracts_notifications' column to characters table...")
+                    cursor.execute("ALTER TABLE characters ADD COLUMN enable_contracts_notifications BOOLEAN DEFAULT TRUE;")
+                    logging.info("Migration for 'enable_contracts_notifications' complete.")
 
             # Migration: Add is_backfilling and backfill_before_id columns for gradual history backfill
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'is_backfilling'")
@@ -792,9 +807,9 @@ def get_characters_for_user(telegram_user_id):
                 SELECT
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, wallet_balance_threshold,
-                    enable_sales_notifications, enable_buy_notifications,
+                    enable_sales_notifications, enable_buys_notifications,
                     enable_daily_overview, enable_undercut_notifications,
-                    enable_contract_notifications, notification_batch_threshold, created_at,
+                    enable_contracts_notifications, notification_batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
@@ -814,10 +829,10 @@ def get_characters_for_user(telegram_user_id):
                     notifications_enabled=bool(notifications_enabled),
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
-                    enable_buy_notifications=bool(enable_buys),
+                    enable_buys_notifications=bool(enable_buys),
                     enable_daily_overview=bool(enable_overview),
                     enable_undercut_notifications=bool(enable_undercut),
-                    enable_contract_notifications=bool(enable_contracts),
+                    enable_contracts_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at,
                     is_backfilling=bool(is_backfilling),
@@ -840,9 +855,9 @@ def get_character_by_id(character_id: int) -> Character | None:
                 SELECT
                     character_id, character_name, refresh_token, telegram_user_id,
                     notifications_enabled, wallet_balance_threshold,
-                    enable_sales_notifications, enable_buy_notifications,
+                    enable_sales_notifications, enable_buys_notifications,
                     enable_daily_overview, enable_undercut_notifications,
-                    enable_contract_notifications, notification_batch_threshold, created_at,
+                    enable_contracts_notifications, notification_batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee
                 FROM characters WHERE character_id = %s
             """, (character_id,))
@@ -863,10 +878,10 @@ def get_character_by_id(character_id: int) -> Character | None:
                     notifications_enabled=bool(notifications_enabled),
                     wallet_balance_threshold=wallet_balance_threshold,
                     enable_sales_notifications=bool(enable_sales),
-                    enable_buy_notifications=bool(enable_buys),
+                    enable_buys_notifications=bool(enable_buys),
                     enable_daily_overview=bool(enable_overview),
                     enable_undercut_notifications=bool(enable_undercut),
-                    enable_contract_notifications=bool(enable_contracts),
+                    enable_contracts_notifications=bool(enable_contracts),
                     notification_batch_threshold=batch_threshold,
                     created_at=created_at,
                     is_backfilling=bool(is_backfilling),
@@ -947,10 +962,10 @@ def update_character_notification_setting(character_id: int, setting: str, value
     """Updates a specific notification setting for a character in the database."""
     allowed_settings = {
         "sales": "enable_sales_notifications",
-        "buys": "enable_buy_notifications",
+        "buys": "enable_buys_notifications",
         "overview": "enable_daily_overview",
         "undercut": "enable_undercut_notifications",
-        "contracts": "enable_contract_notifications"
+        "contracts": "enable_contracts_notifications"
     }
     if setting not in allowed_settings:
         logging.error(f"Attempted to update an invalid notification setting: {setting}")
