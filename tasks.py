@@ -461,8 +461,8 @@ def generate_overview_task(character_id: int, user_id: int, chat_id: int, messag
             overview_data = _calculate_overview_data(character)
             message, reply_markup = _format_overview_message(overview_data, character)
 
-            user_characters = get_characters_for_user(user_id)
-            back_button_callback = "overview" if len(user_characters) > 1 else "start_command"
+            # Set the back button to always go to the main menu
+            back_button_callback = "start_command"
 
             new_keyboard = list(reply_markup.inline_keyboard)
             new_keyboard.append([InlineKeyboardButton("« Back", callback_data=back_button_callback)])
