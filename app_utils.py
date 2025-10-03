@@ -3396,7 +3396,7 @@ def generate_last_day_chart(character_id: int):
 
 
     # --- Data Preparation for Chart ---
-    hour_labels = [(start_of_period + timedelta(hours=i)).strftime('%H:00') for i in range(24)]
+    hour_labels = [(start_of_period + timedelta(hours=i)).strftime('%H') for i in range(24)]
     hourly_sales = {label: 0 for label in hour_labels}
     hourly_fees = {label: 0 for label in hour_labels}
 
@@ -3408,7 +3408,7 @@ def generate_last_day_chart(character_id: int):
     for i in range(24):
         hour_start = start_of_period + timedelta(hours=i)
         hour_end = hour_start + timedelta(hours=1)
-        hour_label = hour_start.strftime('%H:00')
+        hour_label = hour_start.strftime('%H')
 
         # Process all events that fall within this hour, in order.
         while event_idx < len(events_in_period) and events_in_period[event_idx]['date'] < hour_end:
