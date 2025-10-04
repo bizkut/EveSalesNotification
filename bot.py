@@ -817,8 +817,12 @@ def _build_settings_message_and_keyboard(character: Character):
             InlineKeyboardButton(f"Buy Broker Fee: {character.buy_broker_fee:.2f}%", callback_data=f"set_buy_fee_{character.id}"),
             InlineKeyboardButton(f"Sell Broker Fee: {character.sell_broker_fee:.2f}%", callback_data=f"set_sell_fee_{character.id}")
         ],
-        [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
+    # Check if the user is the first user (admin)
+    if character.telegram_user_id == app_utils.get_first_telegram_user_id():
+        keyboard.append([InlineKeyboardButton("📊 Bot Statistics", callback_data="bot_stats")])
+
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
     reply_markup = InlineKeyboardMarkup(keyboard)
     message_text = f"⚙️ General settings for *{character.name}*:"
     return message_text, reply_markup
@@ -890,6 +894,48 @@ async def _show_character_info(update: Update, context: ContextTypes.DEFAULT_TYP
         chat_id=query.message.chat_id,
         message_id=sent_message.message_id
     )
+
+
+async def bot_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays bot statistics to the admin."""
+    query = update.callback_query
+    # Although the button should only appear for the admin, we check again for security.
+    admin_id = app_utils.get_first_telegram_user_id()
+    if not admin_id or query.from_user.id != admin_id:
+        await query.answer("You are not authorized to view this.", show_alert=True)
+        return
+
+    await query.edit_message_text("⏳ Gathering bot statistics...")
+
+    stats = await asyncio.to_thread(app_utils.get_bot_statistics)
+
+    message = (
+        f"🤖 *Bot Statistics*\n\n"
+        f"*Operational*\n"
+        f"  - Total Registered Characters: `{stats.get('total_characters', 'N/A')}`\n"
+        f"  - Last Character Registration: `{stats.get('last_character_registration', 'N/A')}`\n"
+        f"  - Last Market Price Update: `{stats.get('last_market_price_update', 'N/A')}`\n"
+        f"  - Database Size: `{stats.get('db_size', 'N/A')}`\n"
+        f"  - Bot Uptime: `{stats.get('last_bot_start_duration', 'N/A')}`\n"
+        f"  - ESI Requests (Last Hour): `{stats.get('esi_requests_last_hour', 'N/A')}`\n"
+        f"  - ESI Errors (Since Start): `{stats.get('esi_errors_since_start', 'N/A')}`\n\n"
+        f"*Market Activity (Last 24h)*\n"
+        f"  - Total Sales Value: `{stats.get('total_sales_value_24h', 0):,.2f} ISK`\n"
+        f"  - Total Buy Value: `{stats.get('total_buy_value_24h', 0):,.2f} ISK`\n"
+        f"  - Total Transactions: `{stats.get('total_transactions_24h', 'N/A')}`\n"
+        f"  - Active Characters: `{stats.get('active_characters_24h', 'N/A')}`"
+    )
+
+    # Find a character for the user to construct the back button
+    user_characters = get_characters_for_user(query.from_user.id)
+    back_callback = "start_command"
+    if user_characters:
+        back_callback = f"settings_char_{user_characters[0].id}"
+
+    keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data=back_callback)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(text=message, parse_mode='Markdown', reply_markup=reply_markup)
 
 
 async def remove_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1014,6 +1060,7 @@ def main() -> None:
     database.initialize_pool()
     setup_database()
     load_characters_from_db()
+    set_bot_state('bot_start_time', datetime.now(timezone.utc).isoformat())
 
     # Increase the timeout to handle slow network conditions
     application = (
@@ -1165,6 +1212,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "add_character": await add_character_command(update, context)
     elif data == "remove": await remove_character_command(update, context)
     elif data == "contracts": await contracts_command(update, context)
+    elif data == "bot_stats": await bot_stats_command(update, context)
 
     # --- Open Orders Flow ---
     elif data == "open_orders_sales":
