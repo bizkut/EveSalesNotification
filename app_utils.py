@@ -3126,6 +3126,10 @@ def get_character_net_worth(character: Character, force_revalidate: bool = False
     blueprints = get_character_blueprints(character)
     blueprint_item_ids = {bp['item_id'] for bp in blueprints} if blueprints else set()
 
+    # Get Assets and Orders
+    assets = get_character_assets(character)
+    orders = get_market_orders(character)
+
     asset_value = 0
     if assets is not None:
         assets_by_type = defaultdict(int)
