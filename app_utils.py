@@ -293,9 +293,13 @@ def setup_database():
                     is_undercut BOOLEAN NOT NULL,
                     competitor_price NUMERIC(17, 2),
                     competitor_location_id BIGINT,
-                    competitor_volume INTEGER,
                     PRIMARY KEY (order_id, character_id)
                 )
+            """)
+            # Add competitor_volume column if it doesn't exist for backward compatibility
+            cursor.execute("""
+                ALTER TABLE undercut_statuses
+                ADD COLUMN IF NOT EXISTS competitor_volume INTEGER;
             """)
 
             cursor.execute("""
