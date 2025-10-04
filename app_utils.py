@@ -353,6 +353,14 @@ def setup_database():
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_stats (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+                    status_code INTEGER NOT NULL
+                )
+            """)
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -1436,6 +1444,8 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
             response = requests.post(url, headers=headers, json=data)
         else:
             response = requests.get(url, headers=headers, params=params)
+
+        log_esi_request(response.status_code)
 
         if response.status_code == 304:
             logging.debug(f"304 Not Modified for {url}. Using DB-cached data.")
@@ -2635,6 +2645,93 @@ def get_characters_to_purge():
     finally:
         database.release_db_connection(conn)
     return characters_to_purge
+
+
+def get_first_telegram_user_id():
+    """Retrieves the telegram_id of the first user who registered."""
+    conn = database.get_db_connection()
+    user_id = None
+    try:
+        with conn.cursor() as cursor:
+            # Assuming the first entry is the first user. A created_at timestamp would be more robust.
+            cursor.execute("SELECT telegram_id FROM telegram_users ORDER BY telegram_id ASC LIMIT 1")
+            row = cursor.fetchone()
+            if row:
+                user_id = row[0]
+    finally:
+        database.release_db_connection(conn)
+    return user_id
+
+
+def get_bot_statistics():
+    """Gathers various statistics about the bot's operation."""
+    conn = database.get_db_connection()
+    stats = {}
+    try:
+        with conn.cursor() as cursor:
+            # Total characters
+            cursor.execute("SELECT COUNT(*) FROM characters")
+            stats['total_characters'] = cursor.fetchone()[0]
+
+            # Last character registration time
+            cursor.execute("SELECT MAX(created_at) FROM characters")
+            last_reg = cursor.fetchone()[0]
+            stats['last_character_registration'] = last_reg.strftime('%Y-%m-%d %H:%M:%S UTC') if last_reg else "N/A"
+
+            # Last market price update
+            cursor.execute("SELECT MAX(expires) FROM esi_cache WHERE cache_key LIKE '%/markets/%/orders/%'")
+            last_market_update = cursor.fetchone()[0]
+            stats['last_market_price_update'] = last_market_update.strftime('%Y-%m-%d %H:%M:%S UTC') if last_market_update else "N/A"
+
+            # DB Size
+            cursor.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
+            stats['db_size'] = cursor.fetchone()[0]
+
+            # Last bot start time
+            cursor.execute("SELECT value FROM bot_state WHERE key = 'bot_start_time'")
+            start_time_str = cursor.fetchone()
+            if start_time_str:
+                start_time = datetime.fromisoformat(start_time_str[0])
+                duration = datetime.now(timezone.utc) - start_time
+                stats['last_bot_start_duration'] = str(duration).split('.')[0] # Format as HH:MM:SS
+            else:
+                stats['last_bot_start_duration'] = "N/A"
+
+            # ESI requests in the last hour
+            cursor.execute("SELECT COUNT(*) FROM bot_stats WHERE timestamp > NOW() - INTERVAL '1 hour'")
+            stats['esi_requests_last_hour'] = cursor.fetchone()[0]
+
+            # ESI errors since last start
+            if start_time_str:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM bot_stats WHERE timestamp > %s AND status_code NOT IN (200, 304, 404)",
+                    (start_time,)
+                )
+                stats['esi_errors_since_start'] = cursor.fetchone()[0]
+            else:
+                stats['esi_errors_since_start'] = "N/A"
+
+    finally:
+        database.release_db_connection(conn)
+    return stats
+
+
+def log_esi_request(status_code: int):
+    """Logs an ESI request status to the bot_stats table."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO bot_stats (timestamp, status_code) VALUES (%s, %s)",
+                (datetime.now(timezone.utc), status_code)
+            )
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Error logging ESI request to bot_stats: {e}")
+        conn.rollback()
+    finally:
+        database.release_db_connection(conn)
+
 
 # --- Telegram Helpers ---
 

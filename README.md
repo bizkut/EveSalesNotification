@@ -40,6 +40,12 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
   - **Phase 2: Gradual Background Backfill**: After the fast sync, a background job is scheduled. Using Celery and Redis, this job fetches the rest of the character's transaction history, one page at a time, without blocking the main bot. This process is resilient and will automatically retry if it encounters temporary ESI API errors.
 - **Notification Grace Period**: To prevent a flood of old alerts after a character is added, a 1-hour grace period begins after the *background backfill* is fully complete. During this time, no new notifications (sales, buys, cancellations, or expirations) will be sent. This ensures that only market activity occurring after the full history has been retrieved will trigger an alert.
 - **Graceful Deletion with 1-Hour Grace Period**: To prevent accidental data loss, character deletion is a two-step process. When you remove a character, they are "soft-deleted" and scheduled for permanent deletion in one hour. If you re-add the character within this grace period, the deletion is cancelled, and monitoring resumes instantly without needing to re-fetch all historical data. If you do nothing, all data is permanently wiped after the hour is up.
+- **Admin-Only Bot Statistics**: The first user to register with the bot is automatically designated as the admin. A special "Bot Statistics" button will appear in the admin's settings menu, providing access to key operational metrics:
+  - Total registered characters.
+  - Timestamps for the last character registration and market price updates.
+  - The bot's current database size.
+  - The bot's uptime since its last restart.
+  - ESI request rates and error counts.
 
 ---
 
