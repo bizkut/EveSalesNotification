@@ -178,7 +178,8 @@ def login():
         "esi-contracts.read_character_contracts.v1",
         "esi-assets.read_assets.v1",
         "esi-characters.read_blueprints.v1",
-        "esi-location.read_location.v1"
+        "esi-location.read_location.v1",
+        "esi-location.read_ship_type.v1"
     ]
     scope_string = " ".join(scopes)
 
