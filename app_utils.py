@@ -2711,6 +2711,24 @@ def get_bot_statistics():
             else:
                 stats['esi_errors_since_start'] = "N/A"
 
+            # Market activity in the last 24 hours
+            twenty_four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=24)
+            cursor.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN is_buy = false THEN quantity * unit_price ELSE 0 END), 0) AS total_sales_value,
+                    COALESCE(SUM(CASE WHEN is_buy = true THEN quantity * unit_price ELSE 0 END), 0) AS total_buy_value,
+                    COUNT(*) AS total_transactions,
+                    COUNT(DISTINCT character_id) AS active_characters
+                FROM historical_transactions
+                WHERE date > %s
+            """, (twenty_four_hours_ago,))
+            market_stats = cursor.fetchone()
+            stats['total_sales_value_24h'] = market_stats[0]
+            stats['total_buy_value_24h'] = market_stats[1]
+            stats['total_transactions_24h'] = market_stats[2]
+            stats['active_characters_24h'] = market_stats[3]
+
+
     finally:
         database.release_db_connection(conn)
     return stats

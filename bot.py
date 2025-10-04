@@ -911,13 +911,19 @@ async def bot_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     message = (
         f"🤖 *Bot Statistics*\n\n"
+        f"*Operational*\n"
         f"  - Total Registered Characters: `{stats.get('total_characters', 'N/A')}`\n"
         f"  - Last Character Registration: `{stats.get('last_character_registration', 'N/A')}`\n"
         f"  - Last Market Price Update: `{stats.get('last_market_price_update', 'N/A')}`\n"
         f"  - Database Size: `{stats.get('db_size', 'N/A')}`\n"
         f"  - Bot Uptime: `{stats.get('last_bot_start_duration', 'N/A')}`\n"
         f"  - ESI Requests (Last Hour): `{stats.get('esi_requests_last_hour', 'N/A')}`\n"
-        f"  - ESI Errors (Since Start): `{stats.get('esi_errors_since_start', 'N/A')}`"
+        f"  - ESI Errors (Since Start): `{stats.get('esi_errors_since_start', 'N/A')}`\n\n"
+        f"*Market Activity (Last 24h)*\n"
+        f"  - Total Sales Value: `{stats.get('total_sales_value_24h', 0):,.2f} ISK`\n"
+        f"  - Total Buy Value: `{stats.get('total_buy_value_24h', 0):,.2f} ISK`\n"
+        f"  - Total Transactions: `{stats.get('total_transactions_24h', 'N/A')}`\n"
+        f"  - Active Characters: `{stats.get('active_characters_24h', 'N/A')}`"
     )
 
     # Find a character for the user to construct the back button
