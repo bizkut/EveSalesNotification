@@ -46,6 +46,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
   - The bot's current database size.
   - The bot's uptime since its last restart.
   - ESI request rates and error counts.
+  - **Market Activity (Last 24h)**: A summary of the bot's overall market activity, including total sales and buy values, total transaction counts, and the number of active characters.
 
 ---
 
