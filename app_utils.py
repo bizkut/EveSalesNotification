@@ -340,6 +340,14 @@ def setup_database():
                 )
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS access_tokens (
+                    character_id INTEGER PRIMARY KEY,
+                    access_token TEXT NOT NULL,
+                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+                )
+            """)
+
             conn.commit()
     finally:
         database.release_db_connection(conn)
@@ -1456,21 +1464,56 @@ def make_esi_request(url, character=None, params=None, data=None, return_headers
 
 
 # --- ESI Access Token Caching ---
-ACCESS_TOKEN_CACHE = {}
+def get_token_from_db(character_id: int):
+    """Retrieves a token from the database for a given character ID."""
+    conn = database.get_db_connection()
+    token_info = None
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT access_token, expires_at FROM access_tokens WHERE character_id = %s",
+                (character_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                token_info = {'access_token': row[0], 'expires_at': row[1]}
+    finally:
+        database.release_db_connection(conn)
+    return token_info
+
+def save_token_to_db(character_id: int, access_token: str, expires_at: datetime):
+    """Saves or updates a token in the database for a given character ID."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO access_tokens (character_id, access_token, expires_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (character_id) DO UPDATE SET
+                    access_token = EXCLUDED.access_token,
+                    expires_at = EXCLUDED.expires_at;
+                """,
+                (character_id, access_token, expires_at)
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+
 
 def get_access_token(character_id, refresh_token):
     """
-    Retrieves a valid access token for a character, using an in-memory cache
-    to avoid redundant requests.
+    Retrieves a valid access token for a character, using a database cache
+    to avoid redundant requests and support multiple workers.
     """
-    if character_id in ACCESS_TOKEN_CACHE:
-        token_info = ACCESS_TOKEN_CACHE[character_id]
-        # Check if the token is still valid (with a 60-second buffer)
-        if token_info['expires_at'] > time.time() + 60:
-            logging.debug(f"Returning cached access token for character {character_id}")
-            return token_info['access_token']
+    # 1. Check DB for a valid token
+    token_info = get_token_from_db(character_id)
+    if token_info and token_info['expires_at'] > datetime.now(timezone.utc) + timedelta(seconds=60):
+        logging.debug(f"Returning DB-cached access token for character {character_id}")
+        return token_info['access_token']
 
-    logging.info(f"No valid cached token for character {character_id}. Requesting a new one.")
+    # 2. If no valid token, request a new one
+    logging.info(f"No valid cached token in DB for character {character_id}. Requesting a new one.")
     url = "https://login.eveonline.com/v2/oauth/token"
     headers = {"Content-Type": "application/x-www-form-urlencoded", "Host": "login.eveonline.com"}
     data = {
@@ -1484,17 +1527,21 @@ def get_access_token(character_id, refresh_token):
         response.raise_for_status()
         token_data = response.json()
         access_token = token_data.get("access_token")
-        expires_in = token_data.get("expires_in", 1200) # Default to 20 minutes
+        expires_in = token_data.get("expires_in", 1200)  # Default to 20 minutes
 
-        # Cache the new token with its expiration time
-        ACCESS_TOKEN_CACHE[character_id] = {
-            'access_token': access_token,
-            'expires_at': time.time() + expires_in
-        }
-        logging.info(f"Successfully obtained and cached new access token for character {character_id}")
+        # 3. Save the new token to DB
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        save_token_to_db(character_id, access_token, expires_at)
+
+        logging.info(f"Successfully obtained and cached new access token in DB for character {character_id}")
         return access_token
     except requests.exceptions.RequestException as e:
         logging.error(f"Error refreshing access token for character {character_id}: {e}")
+        # As a fallback, try to use the (likely expired) token from the DB if one exists.
+        # This might allow some requests to succeed if the token is only just expired.
+        if token_info:
+            logging.warning(f"Returning stale access token for character {character_id} due to refresh failure.")
+            return token_info['access_token']
         return None
 
 def get_character_details_from_token(access_token):
