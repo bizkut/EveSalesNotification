@@ -293,6 +293,7 @@ def setup_database():
                     is_undercut BOOLEAN NOT NULL,
                     competitor_price NUMERIC(17, 2),
                     competitor_location_id BIGINT,
+                    competitor_volume INTEGER,
                     PRIMARY KEY (order_id, character_id)
                 )
             """)
@@ -1192,47 +1193,48 @@ def save_chart_to_cache(chart_key: str, character_id: int, chart_data: bytes, ca
 
 def get_undercut_statuses(character_id: int) -> dict[int, dict]:
     """
-    Retrieves the last known undercut status, competitor price, and competitor location for all of a character's orders.
-    Returns a dict mapping order_id to {'is_undercut': bool, 'competitor_price': float|None, 'competitor_location_id': int|None}.
+    Retrieves the last known undercut status and competitor info for all of a character's orders.
+    Returns a dict mapping order_id to {'is_undercut': bool, 'competitor_price': float|None, 'competitor_location_id': int|None, 'competitor_volume': int|None}.
     """
     conn = database.get_db_connection()
     statuses = {}
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT order_id, is_undercut, competitor_price, competitor_location_id FROM undercut_statuses WHERE character_id = %s",
+                "SELECT order_id, is_undercut, competitor_price, competitor_location_id, competitor_volume FROM undercut_statuses WHERE character_id = %s",
                 (character_id,)
             )
             for row in cursor.fetchall():
-                order_id, is_undercut, competitor_price, competitor_location_id = row
+                order_id, is_undercut, competitor_price, competitor_location_id, competitor_volume = row
                 statuses[order_id] = {
                     'is_undercut': is_undercut,
-                    # Convert Decimal from DB to float, or keep it as None
                     'competitor_price': float(competitor_price) if competitor_price is not None else None,
-                    'competitor_location_id': competitor_location_id
+                    'competitor_location_id': competitor_location_id,
+                    'competitor_volume': competitor_volume
                 }
     finally:
         database.release_db_connection(conn)
     return statuses
 
 def update_undercut_statuses(character_id: int, statuses: list[dict]):
-    """Inserts or updates the undercut status, competitor price, and location for a list of orders."""
+    """Inserts or updates the undercut status and competitor info for a list of orders."""
     if not statuses:
         return
     conn = database.get_db_connection()
     try:
         with conn.cursor() as cursor:
-            # `statuses` is a list of dicts: [{'order_id': X, 'is_undercut': Y, 'competitor_price': Z, 'competitor_location_id': A}, ...]
+            # `statuses` is a list of dicts: [{'order_id': X, 'is_undercut': Y, 'competitor_price': Z, 'competitor_location_id': A, 'competitor_volume': B}, ...]
             data_to_insert = [
-                (s['order_id'], character_id, s['is_undercut'], s.get('competitor_price'), s.get('competitor_location_id')) for s in statuses
+                (s['order_id'], character_id, s['is_undercut'], s.get('competitor_price'), s.get('competitor_location_id'), s.get('competitor_volume')) for s in statuses
             ]
             upsert_query = """
-                INSERT INTO undercut_statuses (order_id, character_id, is_undercut, competitor_price, competitor_location_id)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO undercut_statuses (order_id, character_id, is_undercut, competitor_price, competitor_location_id, competitor_volume)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (order_id, character_id) DO UPDATE
                 SET is_undercut = EXCLUDED.is_undercut,
                     competitor_price = EXCLUDED.competitor_price,
-                    competitor_location_id = EXCLUDED.competitor_location_id;
+                    competitor_location_id = EXCLUDED.competitor_location_id,
+                    competitor_volume = EXCLUDED.competitor_volume;
             """
             cursor.executemany(upsert_query, data_to_insert)
             conn.commit()
@@ -2982,7 +2984,13 @@ def process_character_orders(character_id: int) -> list[dict]:
                                 is_outbid_or_undercut, competitor = True, best_sell
                             break
 
-            new_statuses.append({'order_id': order['order_id'], 'is_undercut': is_outbid_or_undercut, 'competitor_price': competitor['price'] if competitor else None, 'competitor_location_id': competitor['location_id'] if competitor else None})
+            new_statuses.append({
+                'order_id': order['order_id'],
+                'is_undercut': is_outbid_or_undercut,
+                'competitor_price': competitor['price'] if competitor else None,
+                'competitor_location_id': competitor['location_id'] if competitor else None,
+                'competitor_volume': competitor.get('volume_remain') if competitor else None
+            })
 
             previous_status_info = previous_statuses.get(order['order_id'], {})
             was_undercut = previous_status_info.get('is_undercut', False)
@@ -3014,11 +3022,18 @@ def process_character_orders(character_id: int) -> list[dict]:
                         title, body, competitor_price_label, competitor_location_label = f"❗️ *Buy Order Outbid ({character.name})* ❗️", f"Your buy order for **{id_to_name.get(my_order['type_id'])}** has been outbid.", "Highest Bid", "Highest Bid Location"
                     else:
                         title, body, competitor_price_label, competitor_location_label = f"❗️ *Sell Order Undercut ({character.name})* ❗️", f"Your sell order for **{id_to_name.get(my_order['type_id'])}** has been undercut.", "Lowest Price", "Lowest Price Location"
-                    msg = (f"{title}\n\n{body}\n\n  • **Your Price:** `{my_order['price']:,.2f}` ISK\n"
-                           f"  • **Your Location:** `{id_to_name.get(my_order['location_id'])}`\n"
-                           f"  • **{competitor_price_label}:** `{competitor['price']:,.2f}` ISK\n"
-                           f"  • **{competitor_location_label}:** {location_line}\n\n"
-                           f"  • **Quantity:** `{my_order['volume_remain']:,}` of `{my_order['volume_total']:,}`")
+                    msg = (
+                        f"{title}\n\n"
+                        f"{body}\n\n"
+                        f"  *Your Order*\n"
+                        f"  • Price: `{my_order['price']:,.2f}` ISK\n"
+                        f"  • Qty: `{my_order['volume_remain']:,}` / `{my_order['volume_total']:,}`\n"
+                        f"  • Location: `{id_to_name.get(my_order['location_id'])}`\n\n"
+                        f"  *Competitor's Order*\n"
+                        f"  • {competitor_price_label}: `{competitor['price']:,.2f}` ISK\n"
+                        f"  • Qty: `{competitor['volume_remain']:,}`\n"
+                        f"  • Location: {location_line}"
+                    )
                     notifications.append({'message': msg, 'chat_id': character.telegram_user_id})
                 elif notif['type'] == 'back_on_top':
                     order_type_str = "Buy order" if my_order.get('is_buy_order') else "Sell order"
@@ -4253,7 +4268,9 @@ def prepare_open_orders_data(character_id: int, user_id: int, is_buy: bool, page
                 jumps_str = f" ({jumps}j)" if jumps is not None else ""
                 alert_text = "Outbid" if is_buy else "Undercut"
                 price_text = "Highest bid" if is_buy else "Lowest price"
-                alert_line = f"❗️ {alert_text}! {price_text}: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}"
+                competitor_volume = undercut_status.get('competitor_volume')
+                volume_str = f" (Qty: {competitor_volume:,})" if competitor_volume is not None else ""
+                alert_line = f"❗️ {alert_text}! {price_text}: {competitor_price:,.2f} in {competitor_loc_name}{jumps_str}{volume_str}"
                 line += f"\n  `> {alert_line}`"
         message_lines.append(line)
 
