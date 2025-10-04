@@ -88,6 +88,7 @@ Follow these steps to deploy your own instance of the bot.
     -   `esi-assets.read_assets.v1`
     -   `esi-characters.read_blueprints.v1`
     -   `esi-location.read_location.v1`
+    -   `esi-location.read_ship_type.v1`
 5.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
 ### Step 2: Configure and Run the Bot
