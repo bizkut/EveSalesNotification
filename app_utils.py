@@ -3314,11 +3314,28 @@ def get_character_net_worth(character: Character, force_revalidate: bool = False
             if not any(a['item_id'] == ship['ship_item_id'] for a in assets):
                 assets_by_type[ship['ship_type_id']] += 1
 
-        asset_value = sum(qty * market_prices.get(type_id, 0) for type_id, qty in assets_by_type.items())
+        # First, value all assets using adjusted_price, excluding BPs
+        for asset in assets:
+            if asset['item_id'] in blueprint_item_ids:
+                continue
+            asset_value += asset['quantity'] * market_prices.get(asset['type_id'], 0)
+
+        # Now, correct the valuation for items in sell orders
+        if orders:
+            for order in orders:
+                if not order.get('is_buy_order'):
+                    type_id = order['type_id']
+                    quantity = order['volume_remain']
+                    order_price = order['price']
+                    adjusted_price = market_prices.get(type_id, 0)
+
+                    # The correction is the difference between the order price and adjusted price, for the quantity on the market
+                    price_correction = (order_price - adjusted_price) * quantity
+                    asset_value += price_correction
+
         total_net_worth += asset_value
 
     # Sum Buy Order Escrow
-    orders = get_market_orders(character)
     if orders is not None:
         buy_order_escrow = sum(o.get('escrow', 0) for o in orders if o.get('is_buy_order'))
         total_net_worth += buy_order_escrow
