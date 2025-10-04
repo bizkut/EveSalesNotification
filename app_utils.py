@@ -2900,7 +2900,9 @@ def process_character_orders(character_id: int) -> list[dict]:
                 if new_orders:
                     # Trust the ESI state directly for cancelled vs expired status
                     cancelled = [o for o in new_orders if o.get('state') == 'cancelled']
-                    expired = [o for o in new_orders if o.get('state') == 'expired']
+                    # An order is only truly expired if it was not filled.
+                    # The ESI history endpoint marks filled orders as "expired" but with volume_remain: 0.
+                    expired = [o for o in new_orders if o.get('state') == 'expired' and o.get('volume_remain', 0) > 0]
 
                     item_ids = [o['type_id'] for o in new_orders]
                     id_to_name = get_names_from_ids(item_ids)
