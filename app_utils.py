@@ -144,128 +144,20 @@ def setup_database():
                     enable_daily_overview BOOLEAN DEFAULT TRUE,
                     enable_undercut_notifications BOOLEAN DEFAULT TRUE,
                     enable_contracts_notifications BOOLEAN DEFAULT TRUE,
-                    notification_batch_threshold INTEGER DEFAULT 3,
+                    notification_batch_threshold INTEGER DEFAULT 2,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now()),
                     needs_update_notification BOOLEAN DEFAULT FALSE,
                     deletion_scheduled_at TIMESTAMP WITH TIME ZONE,
                     buy_broker_fee NUMERIC(5, 2) DEFAULT 3.0,
-                    sell_broker_fee NUMERIC(5, 2) DEFAULT 3.0
+                    sell_broker_fee NUMERIC(5, 2) DEFAULT 3.0,
+                    is_backfilling BOOLEAN DEFAULT FALSE,
+                    backfill_before_id BIGINT,
+                    wallet_balance NUMERIC(17, 2),
+                    wallet_balance_last_updated TIMESTAMP WITH TIME ZONE,
+                    net_worth NUMERIC(17, 2),
+                    net_worth_last_updated TIMESTAMP WITH TIME ZONE
                 )
             """)
-
-            # Migration: Change notification_batch_threshold default and update existing users
-            cursor.execute("SELECT column_default FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'notification_batch_threshold'")
-            current_default = cursor.fetchone()
-            if current_default and '3' in current_default[0]:
-                logging.info("Applying migration: Updating 'notification_batch_threshold' default to 2...")
-                cursor.execute("ALTER TABLE characters ALTER COLUMN notification_batch_threshold SET DEFAULT 2;")
-                # Update existing users who are on the old default
-                cursor.execute("UPDATE characters SET notification_batch_threshold = 2 WHERE notification_batch_threshold = 3;")
-                logging.info("Migration for 'notification_batch_threshold' complete. Default is now 2 and existing users on old default have been updated.")
-
-
-            # Migration: Rename enable_buy_notifications to enable_buys_notifications
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_buy_notifications'")
-            if cursor.fetchone():
-                logging.info("Applying migration: Renaming 'enable_buy_notifications' to 'enable_buys_notifications'...")
-                cursor.execute("ALTER TABLE characters RENAME COLUMN enable_buy_notifications TO enable_buys_notifications;")
-                logging.info("Migration for 'enable_buys_notifications' complete.")
-
-            # Migration: Rename enable_daily_summary to enable_daily_overview
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_daily_summary'")
-            if cursor.fetchone():
-                logging.info("Applying migration: Renaming 'enable_daily_summary' to 'enable_daily_overview'...")
-                cursor.execute("ALTER TABLE characters RENAME COLUMN enable_daily_summary TO enable_daily_overview;")
-                logging.info("Migration for 'enable_daily_overview' complete.")
-
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_undercut_notifications'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'enable_undercut_notifications' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN enable_undercut_notifications BOOLEAN DEFAULT TRUE;")
-                logging.info("Migration for 'enable_undercut_notifications' complete.")
-
-            # Migration: Add deletion_scheduled_at column if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'deletion_scheduled_at'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'deletion_scheduled_at' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN deletion_scheduled_at TIMESTAMP WITH TIME ZONE;")
-                logging.info("Migration for 'deletion_scheduled_at' complete.")
-
-            # Migration: Add needs_update_notification column if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'needs_update_notification'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'needs_update_notification' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN needs_update_notification BOOLEAN DEFAULT FALSE;")
-                logging.info("Migration for 'needs_update_notification' complete.")
-
-            # Migration: Add/Rename enable_contract_notifications to enable_contracts_notifications
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_contracts_notifications'")
-            if not cursor.fetchone():
-                # Check if the old column name exists to rename it
-                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'enable_contract_notifications'")
-                if cursor.fetchone():
-                    logging.info("Applying migration: Renaming 'enable_contract_notifications' to 'enable_contracts_notifications'...")
-                    cursor.execute("ALTER TABLE characters RENAME COLUMN enable_contract_notifications TO enable_contracts_notifications;")
-                    logging.info("Migration for 'enable_contracts_notifications' complete.")
-                else:
-                    # If neither old nor new column exists, add the new one
-                    logging.info("Applying migration: Adding 'enable_contracts_notifications' column to characters table...")
-                    cursor.execute("ALTER TABLE characters ADD COLUMN enable_contracts_notifications BOOLEAN DEFAULT TRUE;")
-                    logging.info("Migration for 'enable_contracts_notifications' complete.")
-
-            # Migration: Add is_backfilling and backfill_before_id columns for gradual history backfill
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'is_backfilling'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'is_backfilling' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN is_backfilling BOOLEAN DEFAULT FALSE;")
-                logging.info("Migration for 'is_backfilling' complete.")
-
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'backfill_before_id'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'backfill_before_id' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN backfill_before_id BIGINT;")
-                logging.info("Migration for 'backfill_before_id' complete.")
-
-            # Migration: Add broker fee columns
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'buy_broker_fee'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'buy_broker_fee' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN buy_broker_fee NUMERIC(5, 2) DEFAULT 3.0;")
-                logging.info("Migration for 'buy_broker_fee' complete.")
-
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'sell_broker_fee'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'sell_broker_fee' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN sell_broker_fee NUMERIC(5, 2) DEFAULT 3.0;")
-                logging.info("Migration for 'sell_broker_fee' complete.")
-
-            # Migration: Add wallet balance caching columns
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'wallet_balance'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'wallet_balance' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN wallet_balance NUMERIC(17, 2);")
-                logging.info("Migration for 'wallet_balance' complete.")
-
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'wallet_balance_last_updated'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'wallet_balance_last_updated' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN wallet_balance_last_updated TIMESTAMP WITH TIME ZONE;")
-                logging.info("Migration for 'wallet_balance_last_updated' complete.")
-
-
-            # Migration: Add net worth caching columns
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'net_worth'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'net_worth' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN net_worth NUMERIC(17, 2);")
-                logging.info("Migration for 'net_worth' complete.")
-
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'net_worth_last_updated'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'net_worth_last_updated' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN net_worth_last_updated TIMESTAMP WITH TIME ZONE;")
-                logging.info("Migration for 'net_worth_last_updated' complete.")
-
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS market_orders (
@@ -277,20 +169,6 @@ def setup_database():
                     PRIMARY KEY (order_id, character_id)
                 )
             """)
-            # Migration: Add price column to market_orders if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'market_orders' AND column_name = 'price'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'price' column to market_orders table...")
-                # Add the column and set a default that will be updated on the next poll
-                cursor.execute("ALTER TABLE market_orders ADD COLUMN price NUMERIC(17, 2) DEFAULT 0.0;")
-                logging.info("Migration for 'price' complete.")
-
-            # Migration: Add order_data column to market_orders if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'market_orders' AND column_name = 'order_data'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'order_data' column to market_orders table...")
-                cursor.execute("ALTER TABLE market_orders ADD COLUMN order_data JSONB;")
-                logging.info("Migration for 'order_data' complete.")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trading_fees (
@@ -331,28 +209,6 @@ def setup_database():
                     name TEXT NOT NULL
                 )
             """)
-
-            # Migration: Alter esi_names.item_id from INTEGER to BIGINT for structure IDs
-            cursor.execute("""
-                SELECT data_type FROM information_schema.columns
-                WHERE table_name = 'esi_names' AND column_name = 'item_id'
-            """)
-            result = cursor.fetchone()
-            if result and result[0] == 'integer':
-                logging.info("Applying migration: Altering esi_names.item_id to BIGINT...")
-                cursor.execute("ALTER TABLE esi_names ALTER COLUMN item_id TYPE BIGINT;")
-                logging.info("Migration complete.")
-
-            # Migration: Add created_at to characters table for notification grace period
-            cursor.execute("""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name = 'characters' AND column_name = 'created_at'
-            """)
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'created_at' column to characters table...")
-                cursor.execute("ALTER TABLE characters ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('UTC', now());")
-                cursor.execute("UPDATE characters SET created_at = timezone('UTC', now()) WHERE created_at IS NULL;")
-                logging.info("Migration for 'created_at' complete.")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS esi_cache (
@@ -425,16 +281,10 @@ def setup_database():
                     chart_key TEXT PRIMARY KEY,
                     character_id INTEGER NOT NULL,
                     chart_data BYTEA NOT NULL,
-                    generated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    generated_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    caption_suffix TEXT
                 )
             """)
-
-            # Migration: Add caption_suffix to chart_cache table
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'chart_cache' AND column_name = 'caption_suffix'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'caption_suffix' column to chart_cache table...")
-                cursor.execute("ALTER TABLE chart_cache ADD COLUMN caption_suffix TEXT;")
-                logging.info("Migration for 'caption_suffix' complete.")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS undercut_statuses (
@@ -444,29 +294,6 @@ def setup_database():
                     competitor_price NUMERIC(17, 2),
                     competitor_location_id BIGINT,
                     PRIMARY KEY (order_id, character_id)
-                )
-            """)
-
-            # Migration: Add competitor_price column to undercut_statuses if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'undercut_statuses' AND column_name = 'competitor_price'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'competitor_price' column to undercut_statuses table...")
-                cursor.execute("ALTER TABLE undercut_statuses ADD COLUMN competitor_price NUMERIC(17, 2);")
-                logging.info("Migration for 'competitor_price' complete.")
-
-            # Migration: Add competitor_location_id column to undercut_statuses if it doesn't exist
-            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'undercut_statuses' AND column_name = 'competitor_location_id'")
-            if not cursor.fetchone():
-                logging.info("Applying migration: Adding 'competitor_location_id' column to undercut_statuses table...")
-                cursor.execute("ALTER TABLE undercut_statuses ADD COLUMN competitor_location_id BIGINT;")
-                logging.info("Migration for 'competitor_location_id' complete.")
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS chart_cache (
-                    chart_key TEXT PRIMARY KEY,
-                    character_id INTEGER NOT NULL,
-                    chart_data BYTEA NOT NULL,
-                    generated_at TIMESTAMP WITH TIME ZONE NOT NULL
                 )
             """)
 
