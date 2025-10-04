@@ -8,6 +8,7 @@ This is a comprehensive, multi-user Telegram bot designed to provide EVE Online 
 
 ## Features
 
+- **Total Net Worth Calculation**: Displays an estimated total net worth for your character on the Market Overview page. This value is calculated based on your wallet balance, the market value of your assets (excluding blueprints), and ISK held in escrow for buy orders and contracts. The value is cached to ensure fast and efficient display.
 - **Multi-User & Character Support**: Any user can add multiple characters by interacting with the bot in a private message. All data is stored securely in a database.
 - **Seamless Character Updates**: Re-authorizing an existing character (e.g., to update API scopes) is handled gracefully. The bot sends a confirmation and immediately starts using the new permissions.
 - **Private & Secure**: Notifications and command responses are sent directly to the user who owns the character.
@@ -83,6 +84,9 @@ Follow these steps to deploy your own instance of the bot.
     -   `esi-markets.structure_markets.v1`
     -   `esi-skills.read_skills.v1`
     -   `esi-location.read_online.v1`
+    -   `esi-assets.read_assets.v1`
+    -   `esi-characters.read_blueprints.v1`
+    -   `esi-location.read_location.v1`
 5.  Keep the **Client ID** and **Secret Key** handy for the next step.
 
 ### Step 2: Configure and Run the Bot
@@ -180,6 +184,7 @@ All interaction with the bot is handled through a clean, inline button-based men
 📊 *Market Overview (Character Name)*
 _2025-09-26 18:00 UTC_
 
+*Total Net Worth:* `2,500,123,456.78 ISK`
 *Wallet Balance:* `1,234,567,890.12 ISK`
 
 *Last Day:*

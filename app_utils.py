@@ -41,6 +41,8 @@ class Character:
     sell_broker_fee: float
     wallet_balance: float | None
     wallet_balance_last_updated: datetime | None
+    net_worth: float | None
+    net_worth_last_updated: datetime | None
 
 CHARACTERS: list[Character] = []
 
@@ -60,7 +62,7 @@ def load_characters_from_db():
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contracts_notifications, notification_batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
-                    wallet_balance, wallet_balance_last_updated
+                    wallet_balance, wallet_balance_last_updated, net_worth, net_worth_last_updated
                 FROM characters
             """)
             rows = cursor.fetchall()
@@ -80,7 +82,7 @@ def load_characters_from_db():
             enable_sales, enable_buys,
             enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
             is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
-            wallet_balance, wallet_balance_last_updated
+            wallet_balance, wallet_balance_last_updated, net_worth, net_worth_last_updated
         ) = row
 
         if any(c.id == char_id for c in CHARACTERS):
@@ -104,7 +106,9 @@ def load_characters_from_db():
             buy_broker_fee=float(buy_broker_fee),
             sell_broker_fee=float(sell_broker_fee),
             wallet_balance=float(wallet_balance) if wallet_balance is not None else None,
-            wallet_balance_last_updated=wallet_balance_last_updated
+            wallet_balance_last_updated=wallet_balance_last_updated,
+            net_worth=float(net_worth) if net_worth is not None else None,
+            net_worth_last_updated=net_worth_last_updated
         )
         CHARACTERS.append(character)
         logging.debug(f"Loaded character: {character.name} ({character.id})")
@@ -247,6 +251,20 @@ def setup_database():
                 logging.info("Applying migration: Adding 'wallet_balance_last_updated' column to characters table...")
                 cursor.execute("ALTER TABLE characters ADD COLUMN wallet_balance_last_updated TIMESTAMP WITH TIME ZONE;")
                 logging.info("Migration for 'wallet_balance_last_updated' complete.")
+
+
+            # Migration: Add net worth caching columns
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'net_worth'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'net_worth' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN net_worth NUMERIC(17, 2);")
+                logging.info("Migration for 'net_worth' complete.")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'characters' AND column_name = 'net_worth_last_updated'")
+            if not cursor.fetchone():
+                logging.info("Applying migration: Adding 'net_worth_last_updated' column to characters table...")
+                cursor.execute("ALTER TABLE characters ADD COLUMN net_worth_last_updated TIMESTAMP WITH TIME ZONE;")
+                logging.info("Migration for 'net_worth_last_updated' complete.")
 
 
             cursor.execute("""
@@ -841,7 +859,7 @@ def get_characters_for_user(telegram_user_id):
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contracts_notifications, notification_batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
-                    wallet_balance, wallet_balance_last_updated
+                    wallet_balance, wallet_balance_last_updated, net_worth, net_worth_last_updated
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
             """, (telegram_user_id,))
             rows = cursor.fetchall()
@@ -852,7 +870,7 @@ def get_characters_for_user(telegram_user_id):
                     enable_sales, enable_buys,
                     enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
-                    wallet_balance, wallet_balance_last_updated
+                    wallet_balance, wallet_balance_last_updated, net_worth, net_worth_last_updated
                 ) = row
 
                 user_characters.append(Character(
@@ -872,7 +890,9 @@ def get_characters_for_user(telegram_user_id):
                     buy_broker_fee=float(buy_broker_fee),
                     sell_broker_fee=float(sell_broker_fee),
                     wallet_balance=float(wallet_balance) if wallet_balance is not None else None,
-                    wallet_balance_last_updated=wallet_balance_last_updated
+                    wallet_balance_last_updated=wallet_balance_last_updated,
+                    net_worth=float(net_worth) if net_worth is not None else None,
+                    net_worth_last_updated=net_worth_last_updated
                 ))
     finally:
         database.release_db_connection(conn)
@@ -893,7 +913,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_daily_overview, enable_undercut_notifications,
                     enable_contracts_notifications, notification_batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
-                    wallet_balance, wallet_balance_last_updated
+                    wallet_balance, wallet_balance_last_updated, net_worth, net_worth_last_updated
                 FROM characters WHERE character_id = %s
             """, (character_id,))
             row = cursor.fetchone()
@@ -905,7 +925,7 @@ def get_character_by_id(character_id: int) -> Character | None:
                     enable_sales, enable_buys,
                     enable_overview, enable_undercut, enable_contracts, batch_threshold, created_at,
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
-                    wallet_balance, wallet_balance_last_updated
+                    wallet_balance, wallet_balance_last_updated, net_worth, net_worth_last_updated
                 ) = row
 
                 character = Character(
@@ -925,7 +945,9 @@ def get_character_by_id(character_id: int) -> Character | None:
                     buy_broker_fee=float(buy_broker_fee),
                     sell_broker_fee=float(sell_broker_fee),
                     wallet_balance=float(wallet_balance) if wallet_balance is not None else None,
-                    wallet_balance_last_updated=wallet_balance_last_updated
+                    wallet_balance_last_updated=wallet_balance_last_updated,
+                    net_worth=float(net_worth) if net_worth is not None else None,
+                    net_worth_last_updated=net_worth_last_updated
                 )
     finally:
         database.release_db_connection(conn)
@@ -969,6 +991,21 @@ def update_character_wallet_balance(character_id: int, balance: float, last_upda
     finally:
         database.release_db_connection(conn)
     logging.info(f"Updated wallet balance for character {character_id} to {balance:,.2f} ISK.")
+
+
+def update_character_net_worth(character_id: int, net_worth: float, last_updated: datetime):
+    """Updates the net worth and timestamp for a character in the database."""
+    conn = database.get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE characters SET net_worth = %s, net_worth_last_updated = %s WHERE character_id = %s",
+                (net_worth, last_updated, character_id)
+            )
+            conn.commit()
+    finally:
+        database.release_db_connection(conn)
+    logging.info(f"Updated net worth for character {character_id} to {net_worth:,.2f} ISK.")
 
 
 def update_character_fee_setting(character_id: int, fee_type: str, value: float):
@@ -1721,6 +1758,96 @@ def get_market_orders(character, return_headers=False, force_revalidate=False):
     if not character: return None
     url = f"https://esi.evetech.net/v2/characters/{character.id}/orders/"
     return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
+
+def get_character_assets(character, return_headers=False, force_revalidate=False):
+    """Fetches all pages of assets from ESI."""
+    if not character:
+        return (None, None) if return_headers else None
+
+    all_assets = []
+    page = 1
+    url = f"https://esi.evetech.net/v5/characters/{character.id}/assets/"
+    first_page_headers = None
+
+    while True:
+        params = {"datasource": "tranquility", "page": page}
+        revalidate_this_page = force_revalidate and page == 1
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+
+        if data is None:
+            logging.error(f"Failed to fetch page {page} of assets for {character.name}.")
+            return (None, None) if return_headers else None
+
+        if page == 1:
+            first_page_headers = headers
+
+        if not data:
+            break
+
+        all_assets.extend(data)
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1)
+
+    if return_headers:
+        return all_assets, first_page_headers
+    return all_assets
+
+
+def get_character_blueprints(character, return_headers=False, force_revalidate=False):
+    """Fetches all pages of blueprints from ESI."""
+    if not character:
+        return (None, None) if return_headers else None
+
+    all_blueprints = []
+    page = 1
+    url = f"https://esi.evetech.net/v3/characters/{character.id}/blueprints/"
+    first_page_headers = None
+
+    while True:
+        params = {"datasource": "tranquility", "page": page}
+        revalidate_this_page = force_revalidate and page == 1
+        data, headers = make_esi_request(url, character=character, params=params, return_headers=True, force_revalidate=revalidate_this_page)
+
+        if data is None:
+            logging.error(f"Failed to fetch page {page} of blueprints for {character.name}.")
+            return (None, None) if return_headers else None
+
+        if page == 1:
+            first_page_headers = headers
+
+        if not data:
+            break
+
+        all_blueprints.extend(data)
+
+        pages_header = headers.get('x-pages') if headers else None
+        if not pages_header or int(pages_header) <= page:
+            break
+
+        page += 1
+        time.sleep(0.1)
+
+    if return_headers:
+        return all_blueprints, first_page_headers
+    return all_blueprints
+
+
+def get_character_ship(character, return_headers=False, force_revalidate=False):
+    """Fetches the character's current ship from ESI."""
+    if not character: return None
+    url = f"https://esi.evetech.net/v2/characters/{character.id}/ship/"
+    return make_esi_request(url, character=character, return_headers=return_headers, force_revalidate=force_revalidate)
+
+
+def get_market_prices(return_headers=False, force_revalidate=False):
+    """Fetches market prices from ESI."""
+    url = "https://esi.evetech.net/v1/markets/prices/"
+    return make_esi_request(url, return_headers=return_headers, force_revalidate=force_revalidate)
 
 def get_character_skills(character, force_revalidate=False):
     """Fetches a character's skills from ESI."""
@@ -3136,6 +3263,109 @@ def _prepare_chart_data(character_id, start_of_period):
     events_in_period = [e for e in all_events if e['date'] >= start_of_period]
     return inventory, events_in_period
 
+def get_character_net_worth(character: Character, force_revalidate: bool = False) -> float | None:
+    """
+    Calculates a character's total net worth, using a 1-hour cache stored in the database.
+    If force_revalidate is True, it bypasses the cache check but still updates the cache.
+    """
+    if not character:
+        return None
+
+    # 1. Check for a fresh, cached net worth
+    if not force_revalidate and character.net_worth is not None and character.net_worth_last_updated is not None:
+        if (datetime.now(timezone.utc) - character.net_worth_last_updated) < timedelta(hours=1):
+            logging.debug(f"Returning cached net worth for {character.name}.")
+            return character.net_worth
+
+    # 2. If cache is stale or revalidation is forced, perform the full calculation
+    logging.info(f"Calculating net worth from ESI for {character.name}...")
+    total_net_worth = 0
+
+    # Get Wallet Balance
+    wallet_balance = get_wallet_balance(character, force_revalidate=True)
+    if wallet_balance is None:
+        logging.error(f"Failed to get wallet balance for {character.name}, cannot calculate net worth.")
+        return None # Wallet balance is essential
+    total_net_worth += wallet_balance
+
+    # Get Market Prices
+    market_prices_raw = get_market_prices(force_revalidate=True)
+    if not market_prices_raw:
+        logging.error("Failed to get market prices, cannot calculate asset values.")
+        return None # Prices are essential
+    market_prices = {p['type_id']: p.get('adjusted_price', p.get('average_price', 0)) for p in market_prices_raw}
+
+    # Get Blueprints to exclude them from asset valuation
+    blueprints = get_character_blueprints(character)
+    blueprint_item_ids = {bp['item_id'] for bp in blueprints} if blueprints else set()
+
+    # Get Assets and calculate their value
+    assets = get_character_assets(character)
+    if assets is not None:
+        assets_by_type = defaultdict(int)
+        for asset in assets:
+            # Exclude blueprints by their unique item_id
+            if asset['item_id'] in blueprint_item_ids:
+                continue
+            assets_by_type[asset['type_id']] += asset['quantity']
+
+        # Handle active ship hull if not in assets
+        ship = get_character_ship(character)
+        if ship:
+            # Check if the ship's item_id is already in the assets list
+            if not any(a['item_id'] == ship['ship_item_id'] for a in assets):
+                assets_by_type[ship['ship_type_id']] += 1
+
+        # First, value all assets using adjusted_price, excluding BPs
+        for asset in assets:
+            if asset['item_id'] in blueprint_item_ids:
+                continue
+            asset_value += asset['quantity'] * market_prices.get(asset['type_id'], 0)
+
+        # Now, correct the valuation for items in sell orders
+        if orders:
+            for order in orders:
+                if not order.get('is_buy_order'):
+                    type_id = order['type_id']
+                    quantity = order['volume_remain']
+                    order_price = order['price']
+                    adjusted_price = market_prices.get(type_id, 0)
+
+                    # The correction is the difference between the order price and adjusted price, for the quantity on the market
+                    price_correction = (order_price - adjusted_price) * quantity
+                    asset_value += price_correction
+
+        total_net_worth += asset_value
+
+    # Sum Buy Order Escrow
+    if orders is not None:
+        buy_order_escrow = sum(o.get('escrow', 0) for o in orders if o.get('is_buy_order'))
+        total_net_worth += buy_order_escrow
+
+    # Sum Contract Escrows
+    contracts = get_contracts(character)
+    if contracts is not None:
+        contract_escrow = 0
+        for contract in contracts:
+            if contract.get('status') == 'outstanding':
+                # Sum all relevant financial fields in the contract
+                contract_escrow += contract.get('price', 0)
+                contract_escrow += contract.get('reward', 0)
+                contract_escrow += contract.get('collateral', 0)
+                contract_escrow += contract.get('buyout', 0)
+        total_net_worth += contract_escrow
+
+    # 3. Update the cache
+    now = datetime.now(timezone.utc)
+    update_character_net_worth(character.id, total_net_worth, now)
+
+    # Update the in-memory object
+    character.net_worth = total_net_worth
+    character.net_worth_last_updated = now
+
+    return total_net_worth
+
+
 def _calculate_overview_data(character: Character) -> dict:
     """Fetches all necessary data from the local DB and calculates overview statistics."""
     logging.info(f"Calculating overview data for {character.name} from local database...")
@@ -3196,10 +3426,11 @@ def _calculate_overview_data(character: Character) -> dict:
     profit_30_days, total_sales_30_days, total_fees_30_days = calculate_profit(thirty_days_ago)
 
     wallet_balance = get_last_known_wallet_balance(character)
+    net_worth = get_character_net_worth(character)
     available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions))) if all_transactions else []
 
     return {
-        "now": now, "wallet_balance": wallet_balance,
+        "now": now, "wallet_balance": wallet_balance, "net_worth": net_worth,
         "total_sales_24h": total_sales_24h, "total_fees_24h": total_fees_24h, "profit_24h": profit_24h,
         "total_sales_30_days": total_sales_30_days, "total_fees_30_days": total_fees_30_days, "profit_30_days": profit_30_days,
         "available_years": available_years
@@ -3208,10 +3439,13 @@ def _calculate_overview_data(character: Character) -> dict:
 def _format_overview_message(overview_data: dict, character: Character) -> tuple[str, InlineKeyboardMarkup]:
     """Formats the overview data into a message string and keyboard."""
     now = overview_data['now']
+    net_worth_str = f"`{overview_data['net_worth']:,.2f} ISK`" if overview_data['net_worth'] is not None else "`Calculating...`"
+
     message = (
         f"📊 *Market Overview ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
-        f"*Wallet Balance:* `{overview_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
+        f"*Wallet Balance:* `{overview_data['wallet_balance'] or 0:,.2f} ISK`\n"
+        f"*Total Net Worth:* {net_worth_str}\n\n"
         f"*Last Day:*\n"
         f"  - Total Sales Value: `{overview_data['total_sales_24h']:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_24h']:,.2f} ISK`\n"
