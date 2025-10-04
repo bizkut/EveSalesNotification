@@ -3299,8 +3299,7 @@ def get_character_net_worth(character: Character, force_revalidate: bool = False
     blueprints = get_character_blueprints(character)
     blueprint_item_ids = {bp['item_id'] for bp in blueprints} if blueprints else set()
 
-    # Get Assets and calculate their value
-    assets = get_character_assets(character)
+    asset_value = 0
     if assets is not None:
         assets_by_type = defaultdict(int)
         for asset in assets:
@@ -3312,15 +3311,12 @@ def get_character_net_worth(character: Character, force_revalidate: bool = False
         # Handle active ship hull if not in assets
         ship = get_character_ship(character)
         if ship:
-            # Check if the ship's item_id is already in the assets list
             if not any(a['item_id'] == ship['ship_item_id'] for a in assets):
                 assets_by_type[ship['ship_type_id']] += 1
 
-        # First, value all assets using adjusted_price, excluding BPs
-        for asset in assets:
-            if asset['item_id'] in blueprint_item_ids:
-                continue
-            asset_value += asset['quantity'] * market_prices.get(asset['type_id'], 0)
+        # Value all assets using adjusted_price
+        for type_id, qty in assets_by_type.items():
+            asset_value += qty * market_prices.get(type_id, 0)
 
         # Now, correct the valuation for items in sell orders
         if orders:
@@ -3331,11 +3327,11 @@ def get_character_net_worth(character: Character, force_revalidate: bool = False
                     order_price = order['price']
                     adjusted_price = market_prices.get(type_id, 0)
 
-                    # The correction is the difference between the order price and adjusted price, for the quantity on the market
+                    # The correction is the difference between the order price and adjusted price
                     price_correction = (order_price - adjusted_price) * quantity
                     asset_value += price_correction
 
-        total_net_worth += asset_value
+    total_net_worth += asset_value
 
     # Sum Buy Order Escrow
     if orders is not None:
