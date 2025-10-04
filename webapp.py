@@ -175,7 +175,10 @@ def login():
         "esi-markets.structure_markets.v1",
         "esi-skills.read_skills.v1",
         "esi-location.read_online.v1",
-        "esi-contracts.read_character_contracts.v1"
+        "esi-contracts.read_character_contracts.v1",
+        "esi-assets.read_assets.v1",
+        "esi-characters.read_blueprints.v1",
+        "esi-location.read_location.v1"
     ]
     scope_string = " ".join(scopes)
 
