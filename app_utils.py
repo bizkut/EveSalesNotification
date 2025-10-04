@@ -3738,7 +3738,8 @@ def generate_last_day_chart(character_id: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    return buf, caption_suffix, accumulated_profit
+    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`"
+    return buf, caption_suffix
 
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     """
@@ -3860,21 +3861,16 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
+    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`"
     return buf, caption_suffix
 
 def generate_last_7_days_chart(character_id: int):
     """Generates a chart for the last 7 days."""
-    chart_buffer, caption_suffix, accumulated_profit = _generate_daily_breakdown_chart(character_id, 7)
-    if chart_buffer:
-        caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`"
-    return chart_buffer, caption_suffix
+    return _generate_daily_breakdown_chart(character_id, 7)
 
 def generate_last_30_days_chart(character_id: int):
     """Generates a chart for the last 30 days."""
-    chart_buffer, caption_suffix, accumulated_profit = _generate_daily_breakdown_chart(character_id, 30)
-    if chart_buffer:
-        caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`"
-    return chart_buffer, caption_suffix
+    return _generate_daily_breakdown_chart(character_id, 30)
 
 def generate_all_time_chart(character_id: int):
     """
