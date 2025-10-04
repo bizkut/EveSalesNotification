@@ -3425,8 +3425,8 @@ def _format_overview_message(overview_data: dict, character: Character) -> tuple
     message = (
         f"📊 *Market Overview ({character.name})*\n"
         f"_{now.strftime('%Y-%m-%d %H:%M UTC')}_\n\n"
-        f"*Total Net Worth:* {net_worth_str}\n"
-        f"*Wallet Balance:* `{overview_data['wallet_balance'] or 0:,.2f} ISK`\n\n"
+        f"*Wallet Balance:* `{overview_data['wallet_balance'] or 0:,.2f} ISK`\n"
+        f"*Total Net Worth:* {net_worth_str}\n\n"
         f"*Last Day:*\n"
         f"  - Total Sales Value: `{overview_data['total_sales_24h']:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_24h']:,.2f} ISK`\n"
