@@ -2849,21 +2849,8 @@ def process_character_wallet(character_id: int) -> list[dict]:
                     new_journal_ref_ids = set(journal_ref_ids) - existing_ref_ids
                     if new_journal_ref_ids:
                         new_entries = [j for j in recent_journal if j['id'] in new_journal_ref_ids]
-                        # Sort by date descending to ensure the first entry is the absolute latest
-                        new_entries.sort(key=lambda x: x['date'], reverse=True)
                         add_wallet_journal_entries_to_db(character.id, new_entries)
                         add_processed_journal_refs(character.id, list(new_journal_ref_ids))
-
-                        # Update the character's main balance from the newest journal entry
-                        if new_entries and 'balance' in new_entries[0] and new_entries[0]['balance'] is not None:
-                            latest_balance = new_entries[0]['balance']
-                            latest_date_str = new_entries[0]['date']
-                            latest_date = datetime.fromisoformat(latest_date_str.replace('Z', '+00:00'))
-                            update_character_wallet_balance(character.id, latest_balance, latest_date)
-                            # Also update the in-memory object for the rest of this task run
-                            character.wallet_balance = latest_balance
-                            character.wallet_balance_last_updated = latest_date
-
                         logging.info(f"Processed {len(new_entries)} new journal entries for {character.name}.")
         except (ValueError, TypeError):
             pass  # Handle legacy or malformed timestamps
@@ -2926,7 +2913,7 @@ def process_character_wallet(character_id: int) -> list[dict]:
     all_type_ids = list(sales.keys()) + list(buys.keys())
     all_loc_ids = [t['location_id'] for txs in list(sales.values()) + list(buys.values()) for t in txs]
     id_to_name = get_names_from_ids(list(set(all_type_ids + all_loc_ids)), character=character)
-    wallet_balance = character.wallet_balance # Use the balance updated from the journal
+    wallet_balance = get_wallet_balance(character, force_revalidate=True)
     full_journal = get_full_wallet_journal_from_db(character.id)
     tx_id_to_journal_map = {entry['context_id']: entry for entry in full_journal if entry.get('ref_type') == 'market_transaction'}
     fee_journal_by_timestamp = defaultdict(list)
