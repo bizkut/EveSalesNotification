@@ -121,20 +121,46 @@ def seed_character_data_task(character_id: int):
 
 # --- Dispatcher Tasks (Triggered by Celery Beat) ---
 
-@celery.task(name='tasks.dispatch_character_polls')
-def dispatch_character_polls():
-    """Fetches all active character IDs and dispatches individual polling tasks for each."""
-    logging.info("Dispatching character polls...")
+@celery.task(name='tasks.dispatch_order_polls')
+def dispatch_order_polls():
+    """Fetches all active character IDs and dispatches individual order polling tasks."""
+    logging.info("Dispatching order polls...")
     try:
         character_ids = get_all_character_ids()
         for char_id in character_ids:
-            logging.debug(f"Queueing polling tasks for character_id: {char_id}")
-            poll_wallet.delay(char_id)
+            logging.debug(f"Queueing order poll for character_id: {char_id}")
             poll_orders.delay(char_id)
-            poll_contracts.delay(char_id)
-        logging.info(f"Dispatched polls for {len(character_ids)} characters.")
+        logging.info(f"Dispatched order polls for {len(character_ids)} characters.")
     except Exception as e:
-        logging.error(f"Error in dispatch_character_polls: {e}", exc_info=True)
+        logging.error(f"Error in dispatch_order_polls: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.dispatch_wallet_polls')
+def dispatch_wallet_polls():
+    """Fetches all active character IDs and dispatches individual wallet polling tasks."""
+    logging.info("Dispatching wallet polls...")
+    try:
+        character_ids = get_all_character_ids()
+        for char_id in character_ids:
+            logging.debug(f"Queueing wallet poll for character_id: {char_id}")
+            poll_wallet.delay(char_id)
+        logging.info(f"Dispatched wallet polls for {len(character_ids)} characters.")
+    except Exception as e:
+        logging.error(f"Error in dispatch_wallet_polls: {e}", exc_info=True)
+
+
+@celery.task(name='tasks.dispatch_contract_polls')
+def dispatch_contract_polls():
+    """Fetches all active character IDs and dispatches individual contract polling tasks."""
+    logging.info("Dispatching contract polls...")
+    try:
+        character_ids = get_all_character_ids()
+        for char_id in character_ids:
+            logging.debug(f"Queueing contract poll for character_id: {char_id}")
+            poll_contracts.delay(char_id)
+        logging.info(f"Dispatched contract polls for {len(character_ids)} characters.")
+    except Exception as e:
+        logging.error(f"Error in dispatch_contract_polls: {e}", exc_info=True)
 
 
 @celery.task(name='tasks.dispatch_daily_overviews')
