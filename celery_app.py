@@ -60,9 +60,17 @@ celery.conf.update(
     timezone='UTC',
     enable_utc=True,
     beat_schedule={
-        'dispatch-character-polls': {
-            'task': 'tasks.dispatch_character_polls',
-            'schedule': 120.0,  # Run every 2 minutes
+        'dispatch-order-polls': {
+            'task': 'tasks.dispatch_order_polls',
+            'schedule': 300.0,  # Run every 5 minutes
+        },
+        'dispatch-wallet-polls': {
+            'task': 'tasks.dispatch_wallet_polls',
+            'schedule': 600.0,  # Run every 10 minutes
+        },
+        'dispatch-contract-polls': {
+            'task': 'tasks.dispatch_contract_polls',
+            'schedule': 1800.0,  # Run every 30 minutes
         },
         'dispatch-daily-overviews': {
             'task': 'tasks.dispatch_daily_overviews',
