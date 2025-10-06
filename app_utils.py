@@ -2668,6 +2668,7 @@ def get_bot_statistics():
     conn = database.get_db_connection()
     stats = {}
     try:
+        stats['bot_version'] = os.getenv('BOT_VERSION', 'unknown')
         with conn.cursor() as cursor:
             # Total characters
             cursor.execute("SELECT COUNT(*) FROM characters")

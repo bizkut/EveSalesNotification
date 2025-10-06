@@ -4,6 +4,9 @@ FROM python:3.12-slim
 # Set the working directory in the container
 WORKDIR /app
 
+ARG GIT_COMMIT_HASH
+ENV BOT_VERSION=$GIT_COMMIT_HASH
+
 # Copy the dependencies file to the working directory
 COPY requirements.txt .
 
