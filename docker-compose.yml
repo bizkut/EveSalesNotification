@@ -18,10 +18,7 @@ services:
       retries: 5
 
   bot:
-    build:
-      context: .
-      args:
-        - GIT_COMMIT_HASH=${GIT_COMMIT_HASH:-unknown}
+    build: .
     container_name: eve-market-bot
     restart: unless-stopped
     command: ["python", "bot.py"]
@@ -47,10 +44,7 @@ services:
         condition: service_healthy
 
   webapp:
-    build:
-      context: .
-      args:
-        - GIT_COMMIT_HASH=${GIT_COMMIT_HASH:-unknown}
+    build: .
     container_name: eve-market-webapp
     restart: unless-stopped
     command: ["gunicorn", "--bind", "0.0.0.0:5000", "--log-level", "${LOG_LEVEL}", "webapp:app"]
@@ -85,10 +79,7 @@ services:
       retries: 5
 
   celery_worker:
-    build:
-      context: .
-      args:
-        - GIT_COMMIT_HASH=${GIT_COMMIT_HASH:-unknown}
+    build: .
     container_name: eve-market-celery
     restart: unless-stopped
     command: ["celery", "-A", "celery_app.celery", "worker", "--loglevel=info"]
@@ -113,10 +104,7 @@ services:
         condition: service_healthy
 
   celery_beat:
-    build:
-      context: .
-      args:
-        - GIT_COMMIT_HASH=${GIT_COMMIT_HASH:-unknown}
+    build: .
     container_name: eve-market-beat
     restart: unless-stopped
     command: ["celery", "-A", "celery_app.celery", "beat", "--loglevel=info"]

@@ -864,7 +864,7 @@ async def bot_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     message = (
         f"🤖 *Bot Statistics*\n\n"
         f"*Operational*\n"
-        f"  - Bot Version: `{stats.get('bot_version', 'N/A')}`\n"
+        f"  - Bot Version: `{stats.get('version', 'unknown')}`\n"
         f"  - Total Registered Characters: `{stats.get('total_characters', 'N/A')}`\n"
         f"  - Last Character Registration: `{stats.get('last_character_registration', 'N/A')}`\n"
         f"  - Last Market Price Update: `{stats.get('last_market_price_update', 'N/A')}`\n"
