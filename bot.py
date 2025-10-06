@@ -178,7 +178,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
         [
             InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
-                        InlineKeyboardButton("📊 Request Overview", callback_data="overview")
+            InlineKeyboardButton("📊 Overview", callback_data="overview")
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
@@ -249,54 +249,6 @@ async def run_daily_overview_for_character(character: Character, context: Contex
         logging.info(f"Daily overview sent for {character.name}.")
     except Exception as e:
         logging.error(f"Failed to send daily overview for {character.name}: {e}", exc_info=True)
-
-
-    """Displays the main menu or routes to the add character flow for new users."""
-    user = update.effective_user
-    user_characters = get_characters_for_user(user.id)
-
-    # If the user has no characters, treat it as a request to add one.
-    if not user_characters:
-        await add_character_command(update, context)
-        return
-
-    # Otherwise, show the main menu for existing users.
-    welcome_message = f"Welcome, {user.first_name}!"
-    message = (
-        f"{welcome_message}\n\nYou have {len(user_characters)} character(s) registered. "
-        "Please choose an option:"
-    )
-    keyboard = [
-        [
-            InlineKeyboardButton("💰 View Balances", callback_data="balance"),
-            InlineKeyboardButton("📊 Open Orders", callback_data="open_orders")
-        ],
-        [
-            InlineKeyboardButton("📈 View Sales", callback_data="sales"),
-            InlineKeyboardButton("🛒 View Buys", callback_data="buys")
-        ],
-        [
-            InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
-                        InlineKeyboardButton("📊 Request Overview", callback_data="overview")
-        ],
-        [
-            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-            InlineKeyboardButton("➕ Add Character", callback_data="add_character"),
-            InlineKeyboardButton("🗑️ Remove", callback_data="remove")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if update.callback_query:
-        await update.callback_query.answer()
-        try:
-            await update.callback_query.edit_message_text(text=message, reply_markup=reply_markup)
-        except BadRequest as e:
-            if "message is not modified" not in str(e).lower():
-                raise e
-            logging.info("Message not modified, skipping edit.")
-    else:
-        await update.message.reply_text(text=message, reply_markup=reply_markup)
 
 
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
