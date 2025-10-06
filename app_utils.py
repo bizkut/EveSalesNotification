@@ -2972,7 +2972,7 @@ def process_character_wallet(character_id: int) -> list[dict]:
             estimated_broker_fees = 0
             if cogs is not None:
                 # Estimate broker fees based on user settings
-                estimated_broker_fees = (cogs * (character.buy_broker_fee / 100)) + (total_value * (character.sell_broker_fee / 100))
+                estimated_broker_fees = _calculate_estimated_broker_fees(character, cogs, total_value)
 
             total_fees = journal_taxes + estimated_broker_fees
             net_profit = total_value - cogs - total_fees if cogs is not None else None
@@ -3378,6 +3378,24 @@ def get_character_net_worth(character: Character, force_revalidate: bool = False
     return total_net_worth
 
 
+def _calculate_estimated_broker_fees(character: Character, cogs: float, sale_value: float) -> float:
+    """
+    Calculates the estimated broker fees for a transaction, applying the 100 ISK minimum fee rule.
+    The 100 ISK minimum is applied independently to both the buy-side (COGS) and sell-side transactions.
+    """
+    # Calculate fee based on the user-configured percentage for the original buy order
+    calculated_buy_fee = cogs * (character.buy_broker_fee / 100)
+    # Apply the 100 ISK minimum, as per EVE game mechanics
+    final_buy_fee = max(100.0, calculated_buy_fee)
+
+    # Calculate fee based on the user-configured percentage for the sale order
+    calculated_sell_fee = sale_value * (character.sell_broker_fee / 100)
+    # Apply the 100 ISK minimum, as per EVE game mechanics
+    final_sell_fee = max(100.0, calculated_sell_fee)
+
+    return final_buy_fee + final_sell_fee
+
+
 def _calculate_overview_data(character: Character) -> dict:
     """Fetches all necessary data from the local DB and calculates overview statistics."""
     logging.info(f"Calculating overview data for {character.name} from local database...")
@@ -3424,7 +3442,7 @@ def _calculate_overview_data(character: Character) -> dict:
 
                     # Add estimated broker fees for this sale
                     if cogs > 0:
-                        estimated_broker_fees += (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+                        estimated_broker_fees += _calculate_estimated_broker_fees(character, cogs, sale_value)
 
                     profit += sale_value - cogs
 
@@ -3687,7 +3705,7 @@ def generate_last_day_chart(character_id: int):
                     # Estimate broker fees for this sale
                     estimated_broker_fee = 0
                     if cogs > 0:
-                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+                        estimated_broker_fee = _calculate_estimated_broker_fees(character, cogs, sale_value)
 
                     hourly_fees[hour_label] += estimated_broker_fee
                     accumulated_profit += sale_value - cogs - estimated_broker_fee
@@ -3811,7 +3829,7 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
                     # Estimate broker fees for this sale
                     estimated_broker_fee = 0
                     if cogs > 0:
-                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+                        estimated_broker_fee = _calculate_estimated_broker_fees(character, cogs, sale_value)
 
                     daily_fees[day_label] += estimated_broker_fee
                     accumulated_profit += sale_value - cogs - estimated_broker_fee
@@ -3946,7 +3964,7 @@ def generate_all_time_chart(character_id: int):
                     # Estimate broker fees for this sale
                     estimated_broker_fee = 0
                     if cogs > 0:
-                        estimated_broker_fee = (cogs * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+                        estimated_broker_fee = _calculate_estimated_broker_fees(character, cogs, sale_value)
 
                     monthly_fees[month_label] += estimated_broker_fee
                     accumulated_profit += sale_value - cogs - estimated_broker_fee
@@ -4219,7 +4237,7 @@ def prepare_historical_sales_data(character_id: int, user_id: int, page: int = 0
 
         sale['taxes'] = taxes
         if sale.get('cogs') is not None:
-            estimated_broker_fees = (sale['cogs'] * (character.buy_broker_fee / 100)) + (sale_value * (character.sell_broker_fee / 100))
+            estimated_broker_fees = _calculate_estimated_broker_fees(character, sale['cogs'], sale_value)
             sale['total_fees'] = taxes + estimated_broker_fees
             sale['net_profit'] = sale_value - sale['cogs'] - sale['total_fees']
         else:
