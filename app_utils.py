@@ -4106,7 +4106,6 @@ def send_daily_overview_for_character(character_id: int, bot):
         new_keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
         new_reply_markup = InlineKeyboardMarkup(new_keyboard)
 
-        from tasks import send_telegram_message_sync
         send_telegram_message_sync(bot, message, chat_id=character.telegram_user_id, reply_markup=new_reply_markup)
         logging.info(f"Daily overview sent for {character.name}.")
     except Exception as e:
