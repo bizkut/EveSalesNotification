@@ -4043,7 +4043,7 @@ def send_main_menu_sync(bot: telegram.Bot, telegram_user_id: int, top_message: s
         ],
         [
             InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
-            InlineKeyboardButton("📊 Request Overview", callback_data="overview")
+            InlineKeyboardButton("📊 Overview", callback_data="overview")
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
@@ -4078,7 +4078,7 @@ async def send_main_menu_async(bot: telegram.Bot, telegram_user_id: int, top_mes
         ],
         [
             InlineKeyboardButton("📝 View Contracts", callback_data="contracts"),
-            InlineKeyboardButton("📊 Request Overview", callback_data="overview")
+            InlineKeyboardButton("📊 Overview", callback_data="overview")
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="settings"),

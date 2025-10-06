@@ -146,7 +146,7 @@ All interaction with the bot is handled through a clean, inline button-based men
     -   **📈 View Sales**: Displays a detailed, paginated history of all sales, including profit and fee calculations.
     -   **🛒 View Buys**: Displays a detailed, paginated history of all buy transactions.
     -   **📝 View Contracts**: Shows a paginated list of all outstanding contracts.
-    -   **📊 Request Overview**: Manually triggers the daily overview report, which includes on-demand performance charts.
+    -   **📊 Overview**: Manually triggers the daily overview report, which includes on-demand performance charts.
     -   **⚙️ Settings**: Configure per-character settings like wallet balance alerts, notification preferences, and view public character info.
     -   **➕ Add Character**: Starts the process of adding a new character.
     -   **🗑️ Remove Character**: Schedules a character and all their associated data for permanent deletion after a one-hour grace period. This action can be cancelled by re-adding the character within the hour.
