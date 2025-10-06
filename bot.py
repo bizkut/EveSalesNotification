@@ -781,7 +781,7 @@ async def _show_notification_settings(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton(f"Buy Notifications: {'✅ On' if character.enable_buys_notifications else '❌ Off'}", callback_data=f"toggle_buys_{character.id}")],
         [InlineKeyboardButton(f"Contract Notifications: {'✅ On' if character.enable_contracts_notifications else '❌ Off'}", callback_data=f"toggle_contracts_{character.id}")],
         [InlineKeyboardButton(f"Daily Overview: {'✅ On' if character.enable_daily_overview else '❌ Off'}", callback_data=f"toggle_overview_{character.id}")],
-        [InlineKeyboardButton(f"Undercut Notifications: {'✅ On' if character.enable_undercut_notifications else '❌ Off'}", callback_data=f"toggle_undercut_{character.id}")],
+        [InlineKeyboardButton(f"Competition Alerts: {'✅ On' if character.enable_undercut_notifications else '❌ Off'}", callback_data=f"toggle_undercut_{character.id}")],
         [InlineKeyboardButton("« Back", callback_data=back_callback)]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
