@@ -3455,6 +3455,10 @@ def _calculate_overview_data(character: Character) -> dict:
     profit_24h, total_sales_24h, total_fees_24h = calculate_profit(one_day_ago)
     profit_30_days, total_sales_30_days, total_fees_30_days = calculate_profit(thirty_days_ago)
 
+    # Calculate profit margins, handling division by zero
+    profit_margin_24h = (profit_24h / total_sales_24h) * 100 if total_sales_24h > 0 else 0.0
+    profit_margin_30_days = (profit_30_days / total_sales_30_days) * 100 if total_sales_30_days > 0 else 0.0
+
     wallet_balance = get_last_known_wallet_balance(character)
     net_worth = get_character_net_worth(character)
     available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions))) if all_transactions else []
@@ -3462,7 +3466,9 @@ def _calculate_overview_data(character: Character) -> dict:
     return {
         "now": now, "wallet_balance": wallet_balance, "net_worth": net_worth,
         "total_sales_24h": total_sales_24h, "total_fees_24h": total_fees_24h, "profit_24h": profit_24h,
+        "profit_margin_24h": profit_margin_24h,
         "total_sales_30_days": total_sales_30_days, "total_fees_30_days": total_fees_30_days, "profit_30_days": profit_30_days,
+        "profit_margin_30_days": profit_margin_30_days,
         "available_years": available_years
     }
 
@@ -3479,12 +3485,14 @@ def _format_overview_message(overview_data: dict, character: Character) -> tuple
         f"*Last Day:*\n"
         f"  - Total Sales Value: `{overview_data['total_sales_24h']:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_24h']:,.2f} ISK`\n"
-        f"  - **Profit (FIFO):** `{overview_data['profit_24h']:,.2f} ISK`\n\n"
+        f"  - **Profit (FIFO):** `{overview_data['profit_24h']:,.2f} ISK`\n"
+        f"  - **Profit Margin:** `{overview_data['profit_margin_24h']:.2f}%`\n\n"
         f"---\n\n"
         f"🗓️ *Last 30 Days:*\n"
         f"  - Total Sales Value: `{overview_data['total_sales_30_days']:,.2f} ISK`\n"
         f"  - Total Fees (Broker + Tax): `{overview_data['total_fees_30_days']:,.2f} ISK`\n"
-        f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`"
+        f"  - **Profit (FIFO):** `{overview_data['profit_30_days']:,.2f} ISK`\n"
+        f"  - **Profit Margin:** `{overview_data['profit_margin_30_days']:.2f}%`"
     )
     keyboard = [
         [InlineKeyboardButton("Last Day", callback_data=f"chart_lastday_{character.id}"), InlineKeyboardButton("Last 7 Days", callback_data=f"chart_7days_{character.id}")],
@@ -3671,6 +3679,7 @@ def generate_last_day_chart(character_id: int):
     event_idx = 0
 
     # --- Chronological Event Processing for Chart ---
+    total_sales_value = 0
     for i in range(24):
         hour_start = start_of_period + timedelta(hours=i)
         hour_end = hour_start + timedelta(hours=1)
@@ -3688,6 +3697,7 @@ def generate_last_day_chart(character_id: int):
                 else:  # Sale
                     sale_value = data['quantity'] * data['unit_price']
                     hourly_sales[hour_label] += sale_value
+                    total_sales_value += sale_value
 
                     cogs = 0
                     remaining_to_sell = data['quantity']
@@ -3718,6 +3728,9 @@ def generate_last_day_chart(character_id: int):
             event_idx += 1
 
         hourly_cumulative_profit.append(accumulated_profit)
+
+    # Calculate profit margin
+    profit_margin = (accumulated_profit / total_sales_value) * 100 if total_sales_value > 0 else 0.0
 
     # --- Plotting ---
     plt.style.use('dark_background')
@@ -3756,7 +3769,7 @@ def generate_last_day_chart(character_id: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`"
+    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
     return buf, caption_suffix
 
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
@@ -3798,6 +3811,7 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     event_idx = 0
 
     # --- Chronological Event Processing for Chart ---
+    total_sales_value = 0
     for day_start in days:
         day_end = day_start + timedelta(days=1)
         day_label = day_start.strftime(label_format)
@@ -3813,6 +3827,7 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
                 else:  # Sale
                     sale_value = data['quantity'] * data['unit_price']
                     daily_sales[day_label] += sale_value
+                    total_sales_value += sale_value
                     cogs = 0
                     remaining_to_sell = data['quantity']
                     lots = inventory.get(data['type_id'], [])
@@ -3842,6 +3857,9 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
             event_idx += 1
 
         daily_cumulative_profit.append(accumulated_profit)
+
+    # Calculate profit margin
+    profit_margin = (accumulated_profit / total_sales_value) * 100 if total_sales_value > 0 else 0.0
 
     # --- Plotting ---
     plt.style.use('dark_background')
@@ -3879,7 +3897,7 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`"
+    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
     return buf, caption_suffix
 
 def generate_last_7_days_chart(character_id: int):
@@ -3933,6 +3951,7 @@ def generate_all_time_chart(character_id: int):
     event_idx = 0
 
     # --- Chronological Event Processing ---
+    total_sales_value = 0
     for month_start in months:
         month_label = month_start.strftime('%Y-%m')
         next_month_start = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -3948,6 +3967,7 @@ def generate_all_time_chart(character_id: int):
                 else: # Sale
                     sale_value = data['quantity'] * data['unit_price']
                     monthly_sales[month_label] += sale_value
+                    total_sales_value += sale_value
                     cogs = 0
                     remaining_to_sell = data['quantity']
                     lots = inventory.get(data['type_id'], [])
@@ -3977,7 +3997,9 @@ def generate_all_time_chart(character_id: int):
 
         monthly_cumulative_profit.append(accumulated_profit)
 
-    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`"
+    # Calculate profit margin
+    profit_margin = (accumulated_profit / total_sales_value) * 100 if total_sales_value > 0 else 0.0
+    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
 
     # --- Plotting ---
     plt.style.use('dark_background')
