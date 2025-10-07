@@ -2731,6 +2731,15 @@ def get_bot_statistics():
 
     finally:
         database.release_db_connection(conn)
+
+    try:
+        # The git_hash.txt file is created by the Dockerfile during build.
+        with open('/app/git_hash.txt', 'r') as f:
+            stats['version'] = f.read().strip()
+    except (FileNotFoundError, IOError):
+        logging.warning("Could not read git_hash.txt. Version will be 'unknown'.")
+        stats['version'] = 'unknown'
+
     return stats
 
 
