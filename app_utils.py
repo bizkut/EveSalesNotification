@@ -4008,6 +4008,8 @@ def generate_all_time_chart(character_id: int):
 
     # Calculate profit margin
     profit_margin = (accumulated_profit / total_sales_value) * 100 if total_sales_value > 0 else 0.0
+    # Calculate profit margin
+    profit_margin = (accumulated_profit / total_sales_value) * 100 if total_sales_value > 0 else 0.0
     caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
 
     # --- Plotting ---
