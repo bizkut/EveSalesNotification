@@ -691,6 +691,8 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _show_character_settings(update, context, user_characters[0])
     else:
         keyboard = [[InlineKeyboardButton(char.name, callback_data=f"settings_char_{char.id}")] for char in user_characters]
+        if user_id == app_utils.get_first_telegram_user_id():
+            keyboard.append([InlineKeyboardButton("📊 Bot Statistics", callback_data="bot_stats")])
         keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         message_text = "Please select a character to manage their settings:"
@@ -752,10 +754,6 @@ def _build_settings_message_and_keyboard(character: Character):
             InlineKeyboardButton(f"Sell Broker Fee: {character.sell_broker_fee:.2f}%", callback_data=f"set_sell_fee_{character.id}")
         ],
     ]
-    # Check if the user is the first user (admin)
-    if character.telegram_user_id == app_utils.get_first_telegram_user_id():
-        keyboard.append([InlineKeyboardButton("📊 Bot Statistics", callback_data="bot_stats")])
-
     keyboard.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
     reply_markup = InlineKeyboardMarkup(keyboard)
     message_text = f"⚙️ General settings for *{character.name}*:"
@@ -861,13 +859,8 @@ async def bot_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"  - Active Characters: `{stats.get('active_characters_24h', 'N/A')}`"
     )
 
-    # Find a character for the user to construct the back button
-    user_characters = get_characters_for_user(query.from_user.id)
-    back_callback = "start_command"
-    if user_characters:
-        back_callback = f"settings_char_{user_characters[0].id}"
-
-    keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data=back_callback)]]
+    # The back button should always go to the main menu now.
+    keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text=message, parse_mode='Markdown', reply_markup=reply_markup)
