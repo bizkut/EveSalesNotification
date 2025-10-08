@@ -3808,7 +3808,7 @@ def generate_last_day_chart(character_id: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
+    caption_suffix = (caption_suffix or "") + f"\n\n*Total Sales:* `{total_sales_value:,.2f} ISK`\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
     return buf, caption_suffix
 
 def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
@@ -3936,7 +3936,7 @@ def _generate_daily_breakdown_chart(character_id: int, days_to_show: int):
     plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight', pad_inches=0.1)
     plt.close(fig)
     buf.seek(0)
-    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
+    caption_suffix = (caption_suffix or "") + f"\n\n*Total Sales:* `{total_sales_value:,.2f} ISK`\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
     return buf, caption_suffix
 
 def generate_last_7_days_chart(character_id: int):
@@ -4040,7 +4040,7 @@ def generate_all_time_chart(character_id: int):
     profit_margin = (accumulated_profit / total_sales_value) * 100 if total_sales_value > 0 else 0.0
     # Calculate profit margin
     profit_margin = (accumulated_profit / total_sales_value) * 100 if total_sales_value > 0 else 0.0
-    caption_suffix = (caption_suffix or "") + f"\n\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
+    caption_suffix = (caption_suffix or "") + f"\n\n*Total Sales:* `{total_sales_value:,.2f} ISK`\n*Accumulated Profit:* `{accumulated_profit:,.2f} ISK`\n*Profit Margin:* `{profit_margin:.2f}%`"
 
     # --- Plotting ---
     plt.style.use('dark_background')
