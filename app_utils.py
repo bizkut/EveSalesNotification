@@ -3644,11 +3644,15 @@ def _calculate_top_profitable_items(events_in_period: list, initial_inventory: d
                     if lot['quantity'] == 0: consumed_count += 1
                 inventory[tx['type_id']] = lots[consumed_count:]
 
-            # Only track profit if COGS could be fully determined
+            # If COGS could be fully determined, calculate net profit.
+            # Otherwise, if purchase history is missing, consider the sale value as the profit.
             if remaining_to_sell == 0:
                 net_profit = sale_value - cogs
-                item_profits[tx['type_id']]['profit'] += net_profit
-                item_profits[tx['type_id']]['sales_value'] += sale_value
+            else:
+                net_profit = sale_value
+
+            item_profits[tx['type_id']]['profit'] += net_profit
+            item_profits[tx['type_id']]['sales_value'] += sale_value
 
     if not item_profits:
         return ""
