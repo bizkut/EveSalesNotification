@@ -3,6 +3,7 @@ nest_asyncio.apply()
 import os
 import sys
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import worker_process_init, after_setup_logger
 import database
 import logging
@@ -74,7 +75,7 @@ celery.conf.update(
         },
         'dispatch-daily-overviews': {
             'task': 'tasks.dispatch_daily_overviews',
-            'schedule': 86400.0,  # Run once every 24 hours
+            'schedule': crontab(hour=11, minute=0),  # Run daily at 11:00 UTC
         },
         'check-new-characters': {
             'task': 'tasks.check_new_characters',

@@ -233,24 +233,6 @@ async def _generate_and_send_overview(update: Update, context: ContextTypes.DEFA
     )
 
 
-async def run_daily_overview_for_character(character: Character, context: ContextTypes.DEFAULT_TYPE):
-    """Calculates and sends the daily overview for a single character (for scheduled jobs)."""
-    logging.info(f"Running scheduled daily overview for {character.name}...")
-    try:
-        overview_data = await asyncio.to_thread(_calculate_overview_data, character)
-        message, reply_markup = _format_overview_message(overview_data, character)
-
-        # For scheduled overviews, always add a simple back button to the main menu
-        new_keyboard = list(reply_markup.inline_keyboard)
-        new_keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
-        new_reply_markup = InlineKeyboardMarkup(new_keyboard)
-
-        await send_telegram_message(context, message, chat_id=character.telegram_user_id, reply_markup=new_reply_markup)
-        logging.info(f"Daily overview sent for {character.name}.")
-    except Exception as e:
-        logging.error(f"Failed to send daily overview for {character.name}: {e}", exc_info=True)
-
-
 async def add_character_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Provides a link for the user to add a new EVE Online character.
