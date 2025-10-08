@@ -859,13 +859,8 @@ async def bot_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"  - Active Characters: `{stats.get('active_characters_24h', 'N/A')}`"
     )
 
-    # Find a character for the user to construct the back button
-    user_characters = get_characters_for_user(query.from_user.id)
-    back_callback = "start_command"
-    if user_characters:
-        back_callback = f"settings_char_{user_characters[0].id}"
-
-    keyboard = [[InlineKeyboardButton("« Back to Settings", callback_data=back_callback)]]
+    # The back button should always go to the main menu now.
+    keyboard = [[InlineKeyboardButton("« Back to Main Menu", callback_data="start_command")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await query.edit_message_text(text=message, parse_mode='Markdown', reply_markup=reply_markup)
