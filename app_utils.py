@@ -3410,24 +3410,57 @@ def _calculate_overview_data(character: Character) -> dict:
     logging.info(f"Calculating overview data for {character.name} from local database...")
 
     now = datetime.now(timezone.utc)
+    # Use a consistent time window definition across the app
     one_day_ago = now - timedelta(days=1)
-    thirty_days_ago = now - timedelta(days=30)
+    # The 30-day chart shows the last 30 calendar days including today.
+    thirty_days_ago = (now - timedelta(days=29)).replace(hour=0, minute=0, second=0, microsecond=0)
 
+    # Fetch data once to be used by all subsequent calculations
     all_transactions = get_historical_transactions_from_db(character.id)
     full_journal = get_full_wallet_journal_from_db(character.id)
 
-    # --- Profit/Loss Calculation ---
-    def calculate_profit(start_date):
-        inventory, events = _prepare_chart_data(character.id, start_date)
+    # Combine and sort all financial events chronologically
+    all_events = []
+    fee_ref_types = {'transaction_tax', 'market_provider_tax'}
+    for tx in all_transactions:
+        all_events.append({'type': 'tx', 'data': tx, 'date': datetime.fromisoformat(tx['date'].replace('Z', '+00:00'))})
+    for entry in full_journal:
+        if entry['ref_type'] in fee_ref_types:
+            all_events.append({'type': 'fee', 'data': entry, 'date': entry['date']})
+    all_events.sort(key=lambda x: x['date'])
+
+
+    # --- Profit/Loss Calculation Helper ---
+    def calculate_profit(start_date, all_events):
+        # Determine initial inventory state at the beginning of the period
+        inventory = defaultdict(list)
+        events_before_period = [e for e in all_events if e['date'] < start_date]
+        for event in events_before_period:
+            if event['type'] == 'tx' and event['data'].get('is_buy'):
+                tx = event['data']
+                inventory[tx['type_id']].append({'quantity': tx['quantity'], 'price': tx['unit_price']})
+            elif event['type'] == 'tx' and not event['data'].get('is_buy'): # Sale
+                tx = event['data']
+                remaining_to_sell = tx['quantity']
+                lots = inventory.get(tx['type_id'], [])
+                if lots:
+                    consumed_count = 0
+                    for lot in lots:
+                        if remaining_to_sell <= 0: break
+                        take = min(remaining_to_sell, lot['quantity'])
+                        remaining_to_sell -= take
+                        lot['quantity'] -= take
+                        if lot['quantity'] == 0: consumed_count += 1
+                    inventory[tx['type_id']] = lots[consumed_count:]
+
+        # Process events within the period to calculate profit
         profit = 0
         sales_value = 0
-
-        # `events` from `_prepare_chart_data` now contains journaled fees like
-        # transaction_tax and market_provider_tax. Broker's fees are estimated separately.
-        journaled_fees_value = sum(abs(e['data']['amount']) for e in events if e['type'] == 'fee')
+        events_in_period = [e for e in all_events if e['date'] >= start_date]
+        journaled_fees_value = sum(abs(e['data']['amount']) for e in events_in_period if e['type'] == 'fee')
         estimated_broker_fees = 0
 
-        for event in events:
+        for event in events_in_period:
             if event['type'] == 'tx':
                 tx = event['data']
                 if tx.get('is_buy'):
@@ -3448,21 +3481,17 @@ def _calculate_overview_data(character: Character) -> dict:
                             lot['quantity'] -= take
                             if lot['quantity'] == 0: consumed_count += 1
                         inventory[tx['type_id']] = lots[consumed_count:]
-
-                    # Add estimated broker fees for this sale
                     if cogs > 0:
                         estimated_broker_fees += _calculate_estimated_broker_fees(character, cogs, sale_value)
-
                     profit += sale_value - cogs
 
-        # Subtract all fees from the final profit
         total_fees = journaled_fees_value + estimated_broker_fees
         profit -= total_fees
 
         return profit, sales_value, total_fees
 
-    profit_24h, total_sales_24h, total_fees_24h = calculate_profit(one_day_ago)
-    profit_30_days, total_sales_30_days, total_fees_30_days = calculate_profit(thirty_days_ago)
+    profit_24h, total_sales_24h, total_fees_24h = calculate_profit(one_day_ago, all_events)
+    profit_30_days, total_sales_30_days, total_fees_30_days = calculate_profit(thirty_days_ago, all_events)
 
     # Calculate profit margins, handling division by zero
     profit_margin_24h = (profit_24h / total_sales_24h) * 100 if total_sales_24h > 0 else 0.0
@@ -3470,7 +3499,8 @@ def _calculate_overview_data(character: Character) -> dict:
 
     wallet_balance = get_last_known_wallet_balance(character)
     net_worth = get_character_net_worth(character)
-    available_years = sorted(list(set(datetime.fromisoformat(tx['date'].replace('Z', '+00:00')).year for tx in all_transactions))) if all_transactions else []
+    available_years = sorted(list(set(tx['date'].year for tx in all_events if tx['type'] == 'tx'))) if all_events else []
+
 
     return {
         "now": now, "wallet_balance": wallet_balance, "net_worth": net_worth,
