@@ -709,6 +709,7 @@ def get_characters_for_user(telegram_user_id):
                     is_backfilling, backfill_before_id, buy_broker_fee, sell_broker_fee,
                     wallet_balance, wallet_balance_last_updated, net_worth, net_worth_last_updated
                 FROM characters WHERE telegram_user_id = %s AND deletion_scheduled_at IS NULL
+                ORDER BY character_name ASC
             """, (telegram_user_id,))
             rows = cursor.fetchall()
             for row in rows:
@@ -3550,6 +3551,9 @@ def prepare_paginated_overview_data(user_id: int, page: int = 0):
     user_characters = get_characters_for_user(user_id)
     if not user_characters:
         return "You have no characters to display.", None, "no_characters"
+
+    # Sort the list of characters by name to ensure consistent pagination order
+    user_characters.sort(key=lambda c: c.name)
 
     total_pages = len(user_characters)
     # Ensure page index is valid
