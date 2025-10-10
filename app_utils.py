@@ -3073,7 +3073,7 @@ def process_character_orders(character_id: int) -> list[dict]:
         remove_tracked_market_orders(character.id, list(cached_order_ids))
 
     # Undercut Notifications
-    if character.enable_undercut_notifications and open_orders:
+    if open_orders:
         remove_stale_undercut_statuses(character.id, list(esi_order_ids))
         previous_statuses = get_undercut_statuses(character.id)
         new_statuses, notifications_to_send = [], []
@@ -3121,17 +3121,19 @@ def process_character_orders(character_id: int) -> list[dict]:
                 'competitor_volume': competitor.get('volume_remain') if competitor else None
             })
 
-            previous_status_info = previous_statuses.get(order['order_id'], {})
-            was_undercut = previous_status_info.get('is_undercut', False)
-            cached_order = cached_orders_map.get(order['order_id'])
-            previous_price = cached_order['price'] if cached_order else None
+            # Only check for notification conditions if the user has them enabled
+            if character.enable_undercut_notifications:
+                previous_status_info = previous_statuses.get(order['order_id'], {})
+                was_undercut = previous_status_info.get('is_undercut', False)
+                cached_order = cached_orders_map.get(order['order_id'])
+                previous_price = cached_order['price'] if cached_order else None
 
-            if is_outbid_or_undercut and not was_undercut:
-                if competitor and 'issued' in competitor and datetime.fromisoformat(competitor['issued'].replace('Z', '+00:00')) > character.created_at:
-                    notifications_to_send.append({'type': 'undercut', 'my_order': order, 'competitor': competitor})
-            elif not is_outbid_or_undercut and was_undercut:
-                if previous_price is not None and order['price'] == previous_price:
-                    notifications_to_send.append({'type': 'back_on_top', 'my_order': order})
+                if is_outbid_or_undercut and not was_undercut:
+                    if competitor and 'issued' in competitor and datetime.fromisoformat(competitor['issued'].replace('Z', '+00:00')) > character.created_at:
+                        notifications_to_send.append({'type': 'undercut', 'my_order': order, 'competitor': competitor})
+                elif not is_outbid_or_undercut and was_undercut:
+                    if previous_price is not None and order['price'] == previous_price:
+                        notifications_to_send.append({'type': 'back_on_top', 'my_order': order})
 
         if new_statuses:
             update_undercut_statuses(character.id, new_statuses)
