@@ -4173,13 +4173,9 @@ def send_daily_overview_for_character(character_id: int, bot):
     logging.info(f"Running scheduled daily overview for {character.name}...")
     try:
         overview_data = _calculate_overview_data(character)
-        message, reply_markup = _format_overview_message(overview_data, character)
+        message, _ = _format_overview_message(overview_data, character)
 
-        new_keyboard = list(reply_markup.inline_keyboard)
-        new_keyboard.append([InlineKeyboardButton("« Back", callback_data="start_command")])
-        new_reply_markup = InlineKeyboardMarkup(new_keyboard)
-
-        send_telegram_message_sync(bot, message, chat_id=character.telegram_user_id, reply_markup=new_reply_markup)
+        send_telegram_message_sync(bot, message, chat_id=character.telegram_user_id, reply_markup=None)
         logging.info(f"Daily overview sent for {character.name}.")
     except Exception as e:
         logging.error(f"Failed to send daily overview for {character.name}: {e}", exc_info=True)
