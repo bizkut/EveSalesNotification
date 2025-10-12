@@ -2052,23 +2052,24 @@ def save_image_to_cache(url: str, etag: str, data: bytes):
         database.release_db_connection(conn)
 
 
-def get_cached_image(url: str) -> bytes | None:
+def get_cached_image(url: str, force_revalidate: bool = False) -> bytes | None:
     """
     Fetches an image, using a database cache to handle ETags.
+    If force_revalidate is True, it will not send an ETag.
     Returns the image data as bytes, or None on failure.
     """
     cached = get_image_from_cache(url)
     headers = {}
-    if cached and cached.get('etag'):
+    if not force_revalidate and cached and cached.get('etag'):
         headers['If-None-Match'] = cached['etag']
 
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 304:  # Not Modified
             logging.debug(f"Returning cached image for {url} (304 Not Modified).")
-            return bytes(cached['data']) # Return the stored binary data
+            return bytes(cached['data'])  # Return the stored binary data
 
-        res.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        res.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
 
         new_etag = res.headers.get('ETag')
         image_data = res.content
@@ -2533,7 +2534,7 @@ def _trigger_regional_market_data_fetch(character: Character, open_orders: list)
     logging.info(f"Regional market data cache warmup complete for character {character.name}.")
 
 
-def _create_character_info_image(character_id, corporation_id, alliance_id=None):
+def _create_character_info_image(character_id, corporation_id, alliance_id=None, force_revalidate=False):
     """
     Creates a composite image of the character portrait, corp logo, and alliance logo.
     """
@@ -2544,18 +2545,18 @@ def _create_character_info_image(character_id, corporation_id, alliance_id=None)
         alliance_logo_url = f"https://images.evetech.net/alliances/{alliance_id}/logo?size=128" if alliance_id else None
 
         # Download images using the new caching function
-        portrait_data = get_cached_image(portrait_url)
+        portrait_data = get_cached_image(portrait_url, force_revalidate=force_revalidate)
         if not portrait_data:
             logging.error(f"Failed to get portrait for character {character_id}. Aborting image creation.")
             return None
         portrait_img = Image.open(io.BytesIO(portrait_data)).convert("RGBA")
 
-        corp_logo_data = get_cached_image(corp_logo_url)
+        corp_logo_data = get_cached_image(corp_logo_url, force_revalidate=force_revalidate)
         corp_logo_img = Image.open(io.BytesIO(corp_logo_data)).convert("RGBA") if corp_logo_data else None
 
         alliance_logo_img = None
         if alliance_logo_url:
-            alliance_logo_data = get_cached_image(alliance_logo_url)
+            alliance_logo_data = get_cached_image(alliance_logo_url, force_revalidate=force_revalidate)
             alliance_logo_img = Image.open(io.BytesIO(alliance_logo_data)).convert("RGBA") if alliance_logo_data else None
 
         # Create composite image
@@ -4637,7 +4638,8 @@ def prepare_character_info_data(character_id: int):
     image_buffer = _create_character_info_image(
         character.id,
         public_info['corporation_id'],
-        public_info.get('alliance_id')
+        public_info.get('alliance_id'),
+        force_revalidate=True
     )
     image_bytes = image_buffer.getvalue() if image_buffer else None
 
