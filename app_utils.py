@@ -1965,20 +1965,21 @@ def get_character_location(character: Character):
     url = f"https://esi.evetech.net/v2/characters/{character.id}/location/"
     return make_esi_request(url, character=character, force_revalidate=True)
 
-def get_character_public_info(character_id: int):
+def get_character_public_info(character_id: int, force_revalidate=False):
     """Fetches public character information from ESI."""
     url = f"https://esi.evetech.net/v5/characters/{character_id}/"
-    return make_esi_request(url)
+    return make_esi_request(url, force_revalidate=force_revalidate)
 
-def get_corporation_info(corporation_id: int):
+def get_corporation_info(corporation_id: int, force_revalidate=False):
     """Fetches public corporation information from ESI."""
     url = f"https://esi.evetech.net/v5/corporations/{corporation_id}/"
-    return make_esi_request(url)
+    return make_esi_request(url, force_revalidate=force_revalidate)
 
-def get_alliance_info(alliance_id: int):
+
+def get_alliance_info(alliance_id: int, force_revalidate=False):
     """Fetches public alliance information from ESI."""
     url = f"https://esi.evetech.net/v4/alliances/{alliance_id}/"
-    return make_esi_request(url)
+    return make_esi_request(url, force_revalidate=force_revalidate)
 
 
 def get_station_info(station_id: int):
@@ -4592,16 +4593,16 @@ def prepare_character_info_data(character_id: int):
         return None, None, None, "no_character"
 
     # --- ESI Calls ---
-    public_info = get_character_public_info(character.id)
+    public_info = get_character_public_info(character.id, force_revalidate=True)
     online_status = get_character_online_status(character)
 
     if not public_info:
         return f"❌ Could not fetch public info for {character.name}.", None, None, "error"
 
-    corp_info = get_corporation_info(public_info['corporation_id'])
+    corp_info = get_corporation_info(public_info['corporation_id'], force_revalidate=True)
     alliance_info = None
     if 'alliance_id' in public_info:
-        alliance_info = get_alliance_info(public_info['alliance_id'])
+        alliance_info = get_alliance_info(public_info['alliance_id'], force_revalidate=True)
 
     # --- Formatting ---
     char_name = public_info.get('name', character.name)
