@@ -2149,14 +2149,16 @@ def get_names_from_ids(id_list, character: Character = None):
 def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
     """
     Calculates the Cost of Goods Sold (COGS) for a sale using FIFO and updates the database.
-    Returns the total COGS for the quantity sold.
+    Returns a tuple: (total_cogs, is_complete).
+    `is_complete` is False if the purchase history was insufficient.
     """
     lots = get_purchase_lots(character_id, type_id)
     if not lots:
-        return None  # Indicates no purchase history
+        return None, False  # Indicates no purchase history
 
     cogs = 0
     remaining_to_sell = quantity_sold
+    is_complete = True
 
     for lot in lots:
         if remaining_to_sell <= 0:
@@ -2177,13 +2179,14 @@ def calculate_cogs_and_update_lots(character_id, type_id, quantity_sold):
             logging.debug(f"Fully consumed and deleted lot {lot['lot_id']}.")
 
     if remaining_to_sell > 0:
+        is_complete = False
         # This can happen if the user sells items they acquired before the bot started tracking
         logging.debug(
             f"Could not find enough purchase history for char {character_id} to account for sale of {quantity_sold} of type {type_id}. "
             f"Profit calculation may be incomplete for this sale."
         )
 
-    return cogs
+    return cogs, is_complete
 
 
 def get_next_run_delay(headers):
@@ -2909,8 +2912,9 @@ def process_character_wallet(character_id: int) -> list[dict]:
     sales_cogs = {}
     for type_id, tx_group in sales.items():
         total_quantity_sold = sum(t['quantity'] for t in tx_group)
-        cogs = calculate_cogs_and_update_lots(character.id, type_id, total_quantity_sold)
-        sales_cogs[type_id] = cogs
+        cogs, is_complete = calculate_cogs_and_update_lots(character.id, type_id, total_quantity_sold)
+        # Only store the COGS if the calculation was complete
+        sales_cogs[type_id] = cogs if is_complete else None
 
 
     # --- Notification Generation (Run only if enabled) ---
